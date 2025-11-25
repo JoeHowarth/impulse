@@ -1,99 +1,111 @@
-use std::fs;
+#![allow(unused_imports)]
+use std::{cell::LazyCell, fs};
 
-use astrora_core::core::elements::OrbitalElements;
-use bevy::{platform::collections::HashMap, prelude::*};
+use astrora_core::core::{
+    Vector3,
+    elements::{OrbitalElements, coe_to_rv},
+    integrators_static::position,
+};
+use bevy::{math::Vec3, platform::collections::HashMap, prelude::*};
 use bevy_pancam::{PanCam, PanCamPlugin};
-use bevy_polyline::PolylinePlugin;
+use bevy_vector_shapes::prelude::*;
 use big_space::prelude::*;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::orbital_data::{Body, MU_SUN, PlanetaryElements, propagate_elliptic};
+
+pub mod orbital_data;
+
 fn main() {
-    let app = App::new()
+    App::new()
         .add_plugins(DefaultPlugins.build().disable::<TransformPlugin>())
         .add_plugins(PanCamPlugin)
-        .add_plugins(PolylinePlugin)
+        .add_plugins(ShapePlugin::default())
         .add_plugins(BigSpaceDefaultPlugins)
         .add_systems(Startup, setup_system)
         .add_systems(Update, update_system)
         .run();
 }
 
-fn setup_system(mut commands: Commands) {
-    commands.spawn((Camera2d, PanCam::default()));
-    load_orbital_data(&mut commands);
-}
+const ORBIT_SEGMENTS: usize = 1000;
+const AU: LazyCell<f64> = LazyCell::new(|| {
+    PlanetaryElements::get_planetary_elements()
+        .get("Earth")
+        .unwrap()
+        .orbital_elements
+        .a as f64
+});
 
-fn load_orbital_data(commands: &mut Commands) {
-    let orbital_data = fs::read_to_string("assets/orbital-data.json").unwrap();
-    let orbital_data: HashMap<String, Value> = serde_json::from_str(&orbital_data).unwrap();
-    let bodies = orbital_data.get("bodies").unwrap();
-    let bodies = bodies.as_object().unwrap();
+fn setup_system(mut commands: Commands, mut shapes: ShapeCommands) {
+    // spawn a 3D orthographic camera looking at the XY plane
+    commands.spawn((
+        Camera3d::default(),
+        Projection::from(OrthographicProjection {
+            far: 10_000.0,
+            near: -10_000.0,
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(0.0, 0.0, 1000.0).looking_at(Vec3::ZERO, Vec3::Y),
+        PanCam::default(),
+    ));
 
-    let mut bodies_res = HashMap::new();
-    for (body_name, body_data) in bodies {
-        if body_name == "sun" {
-            continue;
+    // spawn the bodies
+    let planetary_elements = PlanetaryElements::get_planetary_elements();
+
+    commands.insert_resource(PlanetaryElements {
+        bodies: planetary_elements.clone(),
+    });
+
+    // Configure retained shape settings for orbit lines
+    shapes.set_color(Color::srgb(0., 1., 1.));
+    shapes.thickness = 1.5;
+
+    for (_, body) in planetary_elements {
+        let orbital_elements = body.orbital_elements;
+        let period = orbital_elements.period(MU_SUN).unwrap();
+        // calculate the number of segments based on the period and the number of segments
+        let dt = period / ORBIT_SEGMENTS as f64;
+        let mut vertices = Vec::with_capacity(ORBIT_SEGMENTS);
+        for i in 0..=ORBIT_SEGMENTS {
+            let t = i as f64 * dt;
+            let orbital_elements: OrbitalElements =
+                propagate_elliptic(orbital_elements, MU_SUN, t).unwrap();
+            let (r, _v): (Vector3, Vector3) = coe_to_rv(&orbital_elements, MU_SUN);
+            let r = r * 100. / *AU;
+            vertices.push(Vec2::new(r.x as f32, r.y as f32));
         }
-        let kind = body_data.get("kind").unwrap().as_str().unwrap().to_string();
-        let central_body = body_data
-            .get("central_body")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
-        let mu = body_data.get("mu").unwrap().as_f64().unwrap();
-        let radius_m = body_data.get("radius_m").unwrap().as_f64().unwrap();
-        let orbit = body_data.get("orbit").unwrap();
-        let orbit_serde: OrbitalElementsSerde = serde_json::from_value(orbit.clone()).unwrap();
-        let orbit = OrbitalElements::new(
-            orbit_serde.a_m,
-            orbit_serde.e,
-            orbit_serde.i_rad,
-            orbit_serde.raan_rad,
-            orbit_serde.arg_periapsis_rad,
-            orbit_serde.mean_anomaly_rad,
-        );
-        bodies_res.insert(
-            body_name.to_string(),
-            BodyData {
-                kind,
-                central_body,
-                mu,
-                radius_m,
-                orbit,
-                epoch: orbit_serde.epoch,
-                frame: orbit_serde.frame,
-            },
-        );
+        // Retained: spawn one line per segment, once
+        let mut last = None;
+        for v in vertices.into_iter().map(|v| Vec3::new(v.x, v.y, -1.0)) {
+            if let Some(prev) = last {
+                shapes.line(prev, v);
+            }
+            last = Some(v);
+        }
+
+        // Spawn body component for position updates
+        commands.spawn(body);
     }
-    commands.insert_resource(Bodies(bodies_res));
 }
 
-#[derive(Debug, Resource)]
-struct Bodies(pub HashMap<String, BodyData>);
+fn update_system(query: Query<(&Body,)>, time: Res<Time>, mut painter: ShapePainter) {
+    let _t = time.elapsed_secs_f64();
+    let days = _t * 60. * 60. * 24.; // convert to days
+    let days_per_step = days * 10.;
 
-#[derive(Debug, Component)]
-struct BodyData {
-    kind: String,
-    central_body: String,
-    mu: f64,
-    radius_m: f64,
-    orbit: OrbitalElements,
-    epoch: String,
-    frame: Option<String>,
+    for (body,) in query.iter() {
+        let curr_elems: OrbitalElements =
+            propagate_elliptic(body.orbital_elements, MU_SUN, days_per_step).unwrap();
+
+        let (r_body, _v): (Vector3, Vector3) = coe_to_rv(&curr_elems, MU_SUN);
+        let r_body = r_body * 100. / *AU;
+        let vec3 = Vec3::new(r_body.x as f32, r_body.y as f32, 0.);
+
+        painter.translate(vec3);
+        painter.set_color(Color::xyz(1., 0., 0.));
+        painter.circle(10.);
+        painter.reset();
+    }
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-struct OrbitalElementsSerde {
-    a_m: f64,
-    e: f64,
-    i_rad: f64,
-    raan_rad: f64,
-    arg_periapsis_rad: f64,
-    mean_anomaly_rad: f64,
-    epoch: String,
-    frame: Option<String>,
-}
-
-fn update_system(mut commands: Commands) {}
