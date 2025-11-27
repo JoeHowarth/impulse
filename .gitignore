@@ -11,3 +11,9 @@ replays
 journal*
 logs/
 bevy-examples
+
+# Local Claude settings
+.claude/
+
+# Diagnostics and debug output
+diagnostics/
