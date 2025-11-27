@@ -5,27 +5,32 @@ use astrora_core::{
         elements::OrbitalElements,
     },
 };
+// Note: In newer Bevy versions, HashMap is usually in bevy::utils::HashMap
 use bevy::{platform::collections::HashMap, prelude::*};
+use std::f64::consts::PI;
 
-pub const MU_SUN: f64 = 1.32712440018e20;
+// --- Physical Constants (SI Units: m, s, kg) ---
+pub const AU: f64 = 1.495_978_707e11; 
+pub const MU_SUN: f64 = 1.327_124_400_18e20;
 
 /// Advance a bound (elliptic) Keplerian orbit by dt seconds.
 pub fn propagate_elliptic(
     el: OrbitalElements,
-    mu: f64, // gravitational parameter of central body [m^3/s^2]
-    dt: f64, // time step [s] - can be negative
+    mu: f64, // CRITICAL: This must be the MU of the PARENT body
+    dt: f64, 
 ) -> PoliastroResult<OrbitalElements> {
     // 1. true anomaly -> mean anomaly at t0
-    let M0 = true_to_mean_anomaly(el.nu, el.e)?;
+    let m0 = true_to_mean_anomaly(el.nu, el.e)?;
 
     // 2. mean motion n = sqrt(mu / a^3)
-    let n = (mu / (el.a * el.a * el.a)).sqrt();
+    let n = (mu / (el.a.powi(3))).sqrt();
 
     // 3. advance mean anomaly
-    let M1 = (M0 + n * dt).rem_euclid(2.0 * std::f64::consts::PI);
+    let m1 = (m0 + n * dt).rem_euclid(2.0 * PI);
 
     // 4. mean anomaly -> new true anomaly
-    let nu1 = mean_to_true_anomaly(M1, el.e, None, None)?;
+    // Note: Assuming regular precision tolerance (1e-6) usually handled inside astrora or use defaults
+    let nu1 = mean_to_true_anomaly(m1, el.e, None, None)?;
 
     // 5. same geometry, updated anomaly
     Ok(OrbitalElements {
@@ -41,8 +46,13 @@ pub fn propagate_elliptic(
 #[derive(Component, Clone, Debug)]
 pub struct Body {
     pub name: String,
-    pub orbital_elements: OrbitalElements,
+    /// Name of the body this orbits around. None for the Sun.
+    pub parent_name: Option<String>, 
+    /// The standard gravitational parameter (mu = G * M) of THIS body [m^3/s^2].
+    /// Used when calculating orbits of children (moons).
+    pub std_grav_param: f64,
     pub radius: f64,
+    pub orbital_elements: OrbitalElements,
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -51,128 +61,131 @@ pub struct PlanetaryElements {
 }
 
 impl PlanetaryElements {
+    /// Returns the mu (gravitational parameter) of a parent body.
+    /// Useful for the propagation system to lookup the correct mu.
+    pub fn get_parent_mu(&self, current_body: &Body) -> Option<f64> {
+        current_body.parent_name.as_ref()
+            .and_then(|p_name| self.bodies.get(p_name))
+            .map(|b| b.std_grav_param)
+    }
+
+    #[rustfmt::skip]
     pub fn get_planetary_elements() -> HashMap<String, Body> {
-        HashMap::from([
-            (
-                "Mercury".to_string(),
-                Body {
-                    name: "Mercury".to_string(),
-                    orbital_elements: OrbitalElements {
-                        a: 5.790934e10,
-                        e: 0.20564000,
-                        i: 0.122277767394723,
-                        raan: 0.843692160414059,
-                        argp: 0.508239878180749,
-                        nu: 3.080352286349359,
+        let mut bodies = HashMap::new();
+
+        // Helper macro: Name, Parent, mu, radius, a, e, i, raan, argp, nu
+        macro_rules! add_body {
+            ($name:expr, $parent:expr, $mu:expr, $rad:expr, 
+             $a:expr, $e:expr, $i:expr, $raan:expr, $argp:expr, $nu:expr) => {
+                bodies.insert(
+                    $name.to_string(),
+                    Body {
+                        name: $name.to_string(),
+                        parent_name: $parent.map(|s: &str| s.to_string()),
+                        std_grav_param: $mu,
+                        radius: $rad,
+                        orbital_elements: OrbitalElements {
+                            a: $a,
+                            e: $e,
+                            i: $i,
+                            raan: $raan,
+                            argp: $argp,
+                            nu: $nu,
+                        },
                     },
-                    radius: 0.0,
-                },
-            ),
-            (
-                "Venus".to_string(),
-                Body {
-                    name: "Venus".to_string(),
-                    orbital_elements: OrbitalElements {
-                        a: 1.082041e11,
-                        e: 0.00676000,
-                        i: 0.059306287982767,
-                        raan: 1.338143937504052,
-                        argp: 0.961676417848876,
-                        nu: 0.886774803963541,
-                    },
-                    radius: 0.0,
-                },
-            ),
-            (
-                "Earth".to_string(),
-                Body {
-                    name: "Earth".to_string(),
-                    orbital_elements: OrbitalElements {
-                        a: 1.495979e11,
-                        e: 0.01673000,
-                        i: 0.000000000000000,
-                        raan: 0.000000000000000,
-                        argp: 1.796467399077764,
-                        nu: 6.238783421468145,
-                    },
-                    radius: 0.0,
-                },
-            ),
-            (
-                "Mars".to_string(),
-                Body {
-                    name: "Mars".to_string(),
-                    orbital_elements: OrbitalElements {
-                        a: 2.279423e11,
-                        e: 0.09337000,
-                        i: 0.032323497746935,
-                        raan: 0.867603171166381,
-                        argp: 4.998099378936161,
-                        nu: 0.407151718007528,
-                    },
-                    radius: 0.0,
-                },
-            ),
-            (
-                "Jupiter".to_string(),
-                Body {
-                    name: "Jupiter".to_string(),
-                    orbital_elements: OrbitalElements {
-                        a: 7.782829e11,
-                        e: 0.04854000,
-                        i: 0.022671826983406,
-                        raan: 1.750390706825113,
-                        argp: 4.781853084614064,
-                        nu: 0.385411781617430,
-                    },
-                    radius: 0.0,
-                },
-            ),
-            (
-                "Saturn".to_string(),
-                Body {
-                    name: "Saturn".to_string(),
-                    orbital_elements: OrbitalElements {
-                        a: 1.427388e12,
-                        e: 0.05551000,
-                        i: 0.043528511544739,
-                        raan: 1.983392161966356,
-                        argp: 5.920505888615164,
-                        nu: 5.457177281331235,
-                    },
-                    radius: 0.0,
-                },
-            ),
-            (
-                "Uranus".to_string(),
-                Body {
-                    name: "Uranus".to_string(),
-                    orbital_elements: OrbitalElements {
-                        a: 2.870484e12,
-                        e: 0.04686000,
-                        i: 0.013491395117916,
-                        raan: 1.290845514775006,
-                        argp: 1.718625714438817,
-                        nu: 2.529765523437681,
-                    },
-                    radius: 0.0,
-                },
-            ),
-            (
-                "Neptune".to_string(),
-                Body {
-                    name: "Neptune".to_string(),
-                    orbital_elements: OrbitalElements {
-                        a: 4.498408e12,
-                        e: 0.00895000,
-                        i: 0.030892327760300,
-                        raan: 2.300169421203327,
-                        argp: 4.797735580807212,
-                        nu: 4.477485531393506,
-                    },
-                    radius: 0.0,
-                },
-            ),
-        ])
+                );
+            };
+        }
+
+        // --- THE SUN ---
+        // Serves as the static center. Elements are zeroed or irrelevant.
+        add_body!("Sun", None, MU_SUN, 6.9634e8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+        // --- PLANETS (Heliocentric) ---
+        // Data adapted from J2000 reference frames. 
+        // Note: 'nu' is True Anomaly at Epoch J2000.
+
+        // Mercury
+        add_body!("Mercury", Some("Sun"), 2.2032e13, 2.4397e6, 
+            5.790905e10, 0.205630, 0.122258, 0.843547, 0.508309, 3.08075
+        );
+        // Venus
+        add_body!("Venus", Some("Sun"), 3.24859e14, 6.0518e6,
+            1.08208e11, 0.006772, 0.059248, 1.3383, 0.9579, 0.8797
+        );
+        // Earth
+        add_body!("Earth", Some("Sun"), 3.986004418e14, 6.371e6,
+            1.49598e11, 0.016708, 0.00005, 0.0, 1.7967, 6.2383
+        );
+        // Mars
+        add_body!("Mars", Some("Sun"), 4.2828e13, 3.3895e6,
+            2.27939e11, 0.09340, 0.03229, 0.8653, 4.9997, 0.3404
+        );
+        // Jupiter
+        add_body!("Jupiter", Some("Sun"), 1.266865e17, 6.9911e7,
+            7.7857e11, 0.04890, 0.02276, 1.7550, 4.7786, 0.3567
+        );
+        // Saturn
+        add_body!("Saturn", Some("Sun"), 3.793118e16, 5.8232e7,
+            1.43353e12, 0.05650, 0.04336, 1.9847, 5.9048, 5.4880
+        );
+        // Uranus
+        add_body!("Uranus", Some("Sun"), 5.793939e15, 2.5362e7,
+            2.87246e12, 0.04638, 0.01343, 1.2955, 1.6969, 2.5205
+        );
+        // Neptune
+        add_body!("Neptune", Some("Sun"), 6.836529e15, 2.4622e7,
+            4.49506e12, 0.00945, 0.03087, 2.2989, 4.7477, 4.4774
+        );
+
+        // --- ASTEROIDS (Heliocentric) ---
+        
+        // 1 Ceres
+        add_body!("Ceres", Some("Sun"), 6.26e10, 4.73e5,
+            4.137e11, 0.0760, 0.1850, 1.401, 1.284, 1.993
+        );
+        // 4 Vesta
+        add_body!("Vesta", Some("Sun"), 1.72e10, 2.62e5,
+            3.532e11, 0.0891, 0.1246, 1.811, 2.622, 0.698
+        );
+
+        // --- MOONS (Planetocentric) ---
+        // Note: Semi-major axis is in meters from Planet Center.
+        // Elements are relative to the local Laplacian plane or Equator (approximated).
+
+        // Earth's Moon
+        add_body!("Moon", Some("Earth"), 4.9048e12, 1.737e6,
+            3.844e8, 0.0549, 0.0898, 2.181, 3.490, 2.356 
+        );
+
+        // Mars: Phobos
+        add_body!("Phobos", Some("Mars"), 7.1e5, 1.12e4,
+            9.376e6, 0.0151, 0.018, 0.0, 0.0, 0.0
+        );
+
+        // Jupiter: Galilean Moons
+        // Io
+        add_body!("Io", Some("Jupiter"), 5.959e12, 1.821e6,
+            4.217e8, 0.0041, 0.0006, 0.0, 0.0, 1.469
+        );
+        // Europa
+        add_body!("Europa", Some("Jupiter"), 3.202e12, 1.560e6,
+            6.710e8, 0.0094, 0.0082, 0.0, 0.0, 1.815
+        );
+        // Ganymede
+        add_body!("Ganymede", Some("Jupiter"), 9.887e12, 2.634e6,
+            1.070e9, 0.0011, 0.0031, 0.0, 0.0, 2.164
+        );
+        // Callisto
+        add_body!("Callisto", Some("Jupiter"), 7.179e12, 2.410e6,
+            1.882e9, 0.0074, 0.0034, 0.0, 0.0, 2.513
+        );
+
+        // Saturn: Titan
+        add_body!("Titan", Some("Saturn"), 8.978e12, 2.574e6,
+            1.221e9, 0.0288, 0.006, 0.0, 0.0, 0.0
+        );
+
+        bodies
     }
 }
