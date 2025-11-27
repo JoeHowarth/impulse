@@ -18,11 +18,15 @@ pub struct SimDateText;
 #[derive(Component)]
 pub struct SimSpeedText;
 
-/// Cached body positions for the current frame (visual coordinates).
+/// Cached body positions and visibility for the current frame.
 /// Updated by the render system, read by the label system.
 #[derive(Resource, Default)]
 pub struct BodyPositions {
     pub positions: HashMap<String, Vec3>,
+    /// Visibility (0.0 = hidden, 1.0 = fully visible) based on screen-space separation
+    pub visibility: HashMap<String, f32>,
+    /// Display radius in world units for each body (for label positioning)
+    pub display_sizes: HashMap<String, f32>,
 }
 
 /// Spawns the time control UI panel in the bottom-left corner.
@@ -99,23 +103,41 @@ pub fn spawn_body_label(commands: &mut Commands, name: &str) {
 /// Updates body label positions by projecting world coordinates to screen space.
 pub fn update_labels(
     body_positions: Res<BodyPositions>,
-    mut labels: Query<(&mut Node, &BodyLabel)>,
+    mut labels: Query<(&mut Node, &mut TextColor, &BodyLabel)>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
 
-    for (mut node, label) in &mut labels {
+    for (mut node, mut text_color, label) in &mut labels {
         let Some(&world_pos) = body_positions.positions.get(&label.body_name) else {
             continue;
         };
 
-        // Project world position to screen coordinates
-        if let Ok(viewport_pos) = camera.world_to_viewport(camera_transform, world_pos) {
-            // Offset label slightly from body center
-            node.left = Val::Px(viewport_pos.x + 8.0);
-            node.top = Val::Px(viewport_pos.y - 6.0);
+        // Get visibility (default to 1.0 for bodies without parents like Sun)
+        let visibility = body_positions
+            .visibility
+            .get(&label.body_name)
+            .copied()
+            .unwrap_or(1.0);
+
+        // Update label alpha based on visibility
+        text_color.0 = Color::srgba(1.0, 1.0, 1.0, 0.8 * visibility);
+
+        // Get display radius for this body (default to 0 for small offset)
+        let display_radius = body_positions
+            .display_sizes
+            .get(&label.body_name)
+            .copied()
+            .unwrap_or(0.0);
+
+        // Project right edge of body to screen (offset by radius in world x)
+        let right_edge_world = world_pos + Vec3::new(display_radius, 0.0, 0.0);
+        if let Ok(edge_screen) = camera.world_to_viewport(camera_transform, right_edge_world) {
+            // Small padding from edge
+            node.left = Val::Px(edge_screen.x + 4.0);
+            node.top = Val::Px(edge_screen.y - 6.0);
         }
     }
 }
