@@ -12,3 +12,4 @@ This project uses a local Bevy dependency via git submodule, allowing us to:
 - Make custom modifications to Bevy if needed
 - Reference example code directly
 - Ensure all dependencies use the same Bevy version via `[patch.crates-io]`
+- Do not use cargo run
