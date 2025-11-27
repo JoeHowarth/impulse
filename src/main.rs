@@ -2,13 +2,9 @@
 
 use std::cell::LazyCell;
 
-use astrora_core::core::{
-    Vector3,
-    elements::{OrbitalElements, coe_to_rv},
-};
+use astrora_core::core::{Vector3, elements::coe_to_rv};
 use bevy::{
     asset::Assets,
-    color::palettes::css::WHITE,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     gizmos::{config::{GizmoConfigStore, GizmoLineJoint}, GizmoAsset},
     math::Vec3,
@@ -26,19 +22,34 @@ use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
 use simulation::SimulationTime;
 use ui::BodyPositions;
 
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Number of line segments per orbit (higher = smoother, more memory)
+const ORBIT_SEGMENTS: usize = 10000;
+
+/// Visual scaling factor: 1 AU = this many world units
+const VISUAL_SCALE: f64 = 100.0;
+
+/// Astronomical unit in meters (lazy-loaded from orbital_data)
+const AU: LazyCell<f64> = LazyCell::new(|| orbital_data::AU);
+
+/// LOD: bodies closer than this screen distance to parent are invisible
+const LOD_MIN_SCREEN_DIST: f32 = 5.0;
+
+/// LOD: bodies farther than this screen distance from parent are fully visible
+const LOD_MAX_SCREEN_DIST: f32 = 25.0;
+
+// ============================================================================
+// Components
+// ============================================================================
+
 /// Links an orbit gizmo entity to its parent body for position updates.
 #[derive(Component)]
 struct OrbitGizmo {
-    /// Name of the parent body this orbit is centered on
     parent_name: String,
 }
-
-// --- Config ---
-const ORBIT_SEGMENTS: usize = 10000;
-const VISUAL_SCALE: f64 = 100.0; // Visual scaling factor relative to AU
-
-// Lazy load AU from orbital_data
-const AU: LazyCell<f64> = LazyCell::new(|| orbital_data::AU);
 
 fn main() {
     App::new()
@@ -55,6 +66,7 @@ fn main() {
             Update,
             (
                 simulation::handle_time_controls,
+                update_body_positions,
                 update_orbit_positions,
                 render_system,
                 ui::update_labels,
@@ -145,43 +157,73 @@ fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
         points.push(points[0]);
     }
 
-    // Log point count for debugging
-    info!(
-        "Creating orbit gizmo for {} with {} points",
-        body.name,
-        points.len()
-    );
-
-    // Draw with semi-transparent white
     let color = Color::srgba(1.0, 1.0, 1.0, 0.3);
     gizmo.linestrip(points, color);
 
     gizmo
 }
 
+/// Computes positions, visibility, and display sizes for all bodies.
+/// Runs once per frame before orbit updates and rendering.
+fn update_body_positions(
+    body_query: Query<&Body>,
+    res_elements: Res<PlanetaryElements>,
+    camera_query: Query<&Projection, With<Camera3d>>,
+    sim_time: Res<SimulationTime>,
+    mut body_positions: ResMut<BodyPositions>,
+) {
+    let cam_scale = camera_query
+        .single()
+        .map(|p| match p {
+            Projection::Orthographic(ortho) => ortho.scale,
+            _ => 1.0,
+        })
+        .unwrap_or(1.0);
+
+    let t = sim_time.sim_time;
+
+    // Build position cache
+    let mut positions: HashMap<String, Vec3> = HashMap::new();
+    positions.insert("Sun".to_string(), Vec3::ZERO);
+
+    for body in body_query.iter() {
+        resolve_position(&body.name, &res_elements.bodies, &mut positions, t);
+    }
+
+    // Compute visibility and display sizes
+    let mut visibility: HashMap<String, f32> = HashMap::new();
+    let mut display_sizes: HashMap<String, f32> = HashMap::new();
+    visibility.insert("Sun".to_string(), 1.0);
+
+    for body in body_query.iter() {
+        let pos = positions.get(&body.name).copied().unwrap_or(Vec3::ZERO);
+        visibility.insert(body.name.clone(), calculate_visibility(body, pos, &positions, cam_scale));
+        display_sizes.insert(body.name.clone(), compute_display_size(body, cam_scale));
+    }
+
+    // Store in resource
+    body_positions.positions = positions;
+    body_positions.visibility = visibility;
+    body_positions.display_sizes = display_sizes;
+}
+
 /// Update orbit gizmo Transform positions to match their parent body positions.
 fn update_orbit_positions(
     mut orbit_query: Query<(&OrbitGizmo, &mut Transform)>,
-    res_elements: Res<PlanetaryElements>,
-    sim_time: Res<SimulationTime>,
+    body_positions: Res<BodyPositions>,
 ) {
-    let sim_time_seconds = sim_time.sim_time;
-    let mut position_cache: HashMap<String, Vec3> = HashMap::new();
-    position_cache.insert("Sun".to_string(), Vec3::ZERO);
-
     for (orbit_gizmo, mut transform) in &mut orbit_query {
-        let parent_pos = resolve_position(
-            &orbit_gizmo.parent_name,
-            &res_elements.bodies,
-            &mut position_cache,
-            sim_time_seconds,
-        );
+        let parent_pos = body_positions
+            .positions
+            .get(&orbit_gizmo.parent_name)
+            .copied()
+            .unwrap_or(Vec3::ZERO);
         transform.translation = parent_pos;
     }
 }
 
 // ============================================================================
-// Rendering
+// Coordinate Conversion & Position Resolution
 // ============================================================================
 
 /// Converts physics coordinates (meters) to visual coordinates.
@@ -239,9 +281,9 @@ fn resolve_position(
     abs_pos
 }
 
-// LOD thresholds for screen-space distance (in pixels roughly)
-const LOD_MIN_SCREEN_DIST: f32 = 5.0; // Below this = invisible
-const LOD_MAX_SCREEN_DIST: f32 = 25.0; // Above this = fully visible
+// ============================================================================
+// Visibility & Rendering
+// ============================================================================
 
 /// Calculate visibility (0.0-1.0) based on screen-space separation from parent.
 fn calculate_visibility(
@@ -267,94 +309,34 @@ fn calculate_visibility(
         .clamp(0.0, 1.0)
 }
 
-/// Main render system: draws bodies (orbits are now handled by retained gizmos).
+/// Draws all visible bodies. Positions and visibility are precomputed by update_body_positions.
 fn render_system(
     body_query: Query<&Body>,
-    res_elements: Res<PlanetaryElements>,
+    body_positions: Res<BodyPositions>,
     mut painter: ShapePainter,
-    camera_query: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
-    mut body_positions: ResMut<BodyPositions>,
-    sim_time: Res<SimulationTime>,
-    mut frame_count: Local<u32>,
 ) {
-    let Ok((_camera, _camera_transform, projection)) = camera_query.single() else {
-        return;
-    };
-
-    let cam_scale = match projection {
-        Projection::Orthographic(ortho) => ortho.scale,
-        _ => 1.0,
-    };
-
-    let sim_time_seconds = sim_time.sim_time;
-
-    // Build position and visibility caches
-    let mut positions: HashMap<String, Vec3> = HashMap::new();
-    let mut visibility: HashMap<String, f32> = HashMap::new();
-    positions.insert("Sun".to_string(), Vec3::ZERO);
-    visibility.insert("Sun".to_string(), 1.0);
-
-    // First pass: calculate positions and visibility
     for body in body_query.iter() {
-        let pos = resolve_position(&body.name, &res_elements.bodies, &mut positions, sim_time_seconds);
-        let vis = calculate_visibility(body, pos, &positions, cam_scale);
-        visibility.insert(body.name.clone(), vis);
-    }
-
-    // Second pass: render bodies
-    let mut display_sizes: HashMap<String, f32> = HashMap::new();
-
-    for body in body_query.iter() {
-        let pos = *positions.get(&body.name).unwrap_or(&Vec3::ZERO);
-        let vis = *visibility.get(&body.name).unwrap_or(&0.0);
+        let pos = body_positions.positions.get(&body.name).copied().unwrap_or(Vec3::ZERO);
+        let vis = body_positions.visibility.get(&body.name).copied().unwrap_or(0.0);
+        let size = body_positions.display_sizes.get(&body.name).copied().unwrap_or(1.0);
 
         if vis < 0.01 {
             continue;
         }
 
-        // Draw body
-        let display_radius = compute_display_size(body, cam_scale);
-        display_sizes.insert(body.name.clone(), display_radius);
-        draw_body(&mut painter, body, pos, cam_scale, vis);
+        painter.set_translation(pos);
+        let base_color = body.color.to_srgba();
+        painter.set_color(Color::srgba(base_color.red, base_color.green, base_color.blue, vis));
+        painter.circle(size);
     }
-
-    // Log timing and debug info every 60 frames (~1 second)
-    *frame_count += 1;
-    if *frame_count >= 60 {
-        *frame_count = 0;
-        info!("Render: cam_scale={:.4}", cam_scale);
-    }
-
-    // Store positions, visibility, and display sizes for label system
-    body_positions.positions = positions;
-    body_positions.visibility = visibility;
-    body_positions.display_sizes = display_sizes;
 }
 
-/// Computes the display radius for a body (without drawing).
+/// Computes the display radius for a body based on camera scale.
+/// Uses logarithmic scaling so all bodies remain visible, with a minimum of true physical size.
 fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
-    // Use logarithmic scaling for radius so all bodies are visible
-    // log10(radius) ranges from ~4 (Phobos) to ~9 (Sun)
-    // Scale to reasonable display sizes (1.5 to ~8 base units)
     let log_radius = (body.radius as f32).log10();
     let log_scaled_size = ((log_radius - 4.0).max(1.0) * 1.5).min(8.0) * cam_scale;
-
-    // Calculate actual physical radius in visual coordinates
     let phys_radius = (body.radius * VISUAL_SCALE / *AU) as f32;
-
-    // Use whichever is larger - ensures body is at least its true size when zoomed in
     log_scaled_size.max(phys_radius)
-}
-
-/// Draws a body circle.
-fn draw_body(painter: &mut ShapePainter, body: &Body, pos: Vec3, cam_scale: f32, visibility: f32) {
-    painter.set_translation(pos);
-
-    // Apply visibility fade to body color
-    let base_color = body.color.to_srgba();
-    painter.set_color(Color::srgba(base_color.red, base_color.green, base_color.blue, visibility));
-
-    let display_size = compute_display_size(body, cam_scale);
-    painter.circle(display_size);
 }
 

@@ -64,14 +64,6 @@ pub struct PlanetaryElements {
 }
 
 impl PlanetaryElements {
-    /// Returns the mu (gravitational parameter) of a parent body.
-    /// Useful for the propagation system to lookup the correct mu.
-    pub fn get_parent_mu(&self, current_body: &Body) -> Option<f64> {
-        current_body.parent_name.as_ref()
-            .and_then(|p_name| self.bodies.get(p_name))
-            .map(|b| b.std_grav_param)
-    }
-
     #[rustfmt::skip]
     pub fn get_planetary_elements() -> HashMap<String, Body> {
         let mut bodies = HashMap::new();
