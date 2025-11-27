@@ -10,3 +10,4 @@ replays
 *.iml
 journal*
 logs/
+bevy-examples
