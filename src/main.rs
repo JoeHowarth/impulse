@@ -7,16 +7,16 @@ use astrora_core::core::{
     elements::{OrbitalElements, coe_to_rv},
 };
 use bevy::{
+    asset::Assets,
     color::palettes::css::WHITE,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
-    gizmos::config::{GizmoConfigStore, GizmoLineJoint},
+    gizmos::{config::{GizmoConfigStore, GizmoLineJoint}, GizmoAsset},
     math::Vec3,
     platform::collections::HashMap,
     prelude::*,
 };
 use bevy_pancam::{PanCam, PanCamPlugin};
 use bevy_vector_shapes::prelude::*;
-use big_space::prelude::*;
 
 mod orbital_data;
 mod simulation;
@@ -26,12 +26,11 @@ use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
 use simulation::SimulationTime;
 use ui::BodyPositions;
 
-/// Pre-computed orbit path in local coordinates (relative to parent).
-/// Computed once at startup, translated at render time.
+/// Links an orbit gizmo entity to its parent body for position updates.
 #[derive(Component)]
-struct CachedOrbit {
-    /// Points along the orbit in local coordinates (meters, then scaled to visual)
-    points: Vec<Vec3>,
+struct OrbitGizmo {
+    /// Name of the parent body this orbit is centered on
+    parent_name: String,
 }
 
 // --- Config ---
@@ -43,10 +42,9 @@ const AU: LazyCell<f64> = LazyCell::new(|| orbital_data::AU);
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.build().disable::<TransformPlugin>())
+        .add_plugins(DefaultPlugins)
         .add_plugins(PanCamPlugin)
         .add_plugins(ShapePlugin::default())
-        .add_plugins(BigSpaceDefaultPlugins)
         // Performance diagnostics - logs to console every second
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(LogDiagnosticsPlugin::default())
@@ -57,6 +55,7 @@ fn main() {
             Update,
             (
                 simulation::handle_time_controls,
+                update_orbit_positions,
                 render_system,
                 ui::update_labels,
                 ui::update_time_ui,
@@ -66,13 +65,13 @@ fn main() {
         .run();
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
     // Spawn camera
     commands.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
             far: 100_000.0,
-            near: -100_000.0,
+            near: 0.1,
             scale: 1.0,
             ..OrthographicProjection::default_3d()
         }),
@@ -86,11 +85,29 @@ fn setup(mut commands: Commands) {
         bodies: bodies.clone(),
     });
 
-    // Spawn bodies with pre-computed orbit cache
+    // Spawn bodies and their orbit gizmos
     for body in bodies.values() {
-        let cached_orbit = compute_orbit_cache(body, &bodies);
-        commands.spawn((body.clone(), cached_orbit));
+        // Spawn the body entity
+        commands.spawn(body.clone());
         ui::spawn_body_label(&mut commands, &body.name);
+
+        // Create orbit gizmo if body has a parent
+        if let Some(parent_name) = &body.parent_name {
+            if let Some(parent_body) = bodies.get(parent_name) {
+                let orbit_asset = create_orbit_gizmo_asset(body, parent_body);
+                commands.spawn((
+                    Gizmo {
+                        handle: gizmo_assets.add(orbit_asset),
+                        // Push orbits slightly behind other geometry (small positive = behind, but not at far plane)
+                        depth_bias: 0.1,
+                        ..default()
+                    },
+                    OrbitGizmo {
+                        parent_name: parent_name.clone(),
+                    },
+                ));
+            }
+        }
     }
 
     // Spawn time control panel
@@ -103,33 +120,64 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     config.line.joints = GizmoLineJoint::None;
 }
 
-/// Pre-compute orbit points for a body (in local visual coordinates).
-fn compute_orbit_cache(body: &Body, all_bodies: &HashMap<String, Body>) -> CachedOrbit {
+/// Create a GizmoAsset containing the orbit linestrip (points at origin, will be translated by Transform).
+fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
+    let mut gizmo = GizmoAsset::new();
+
+    let period = body
+        .orbital_elements
+        .period(parent_body.std_grav_param)
+        .unwrap_or(0.0);
+    let step_dt = period / ORBIT_SEGMENTS as f64;
+
+    // Collect orbit points in local coordinates (relative to parent)
     let mut points = Vec::with_capacity(ORBIT_SEGMENTS + 1);
-
-    // Only compute if body has a parent
-    if let Some(parent_name) = &body.parent_name {
-        if let Some(parent_body) = all_bodies.get(parent_name) {
-            let period = body
-                .orbital_elements
-                .period(parent_body.std_grav_param)
-                .unwrap_or(0.0);
-            let step_dt = period / ORBIT_SEGMENTS as f64;
-
-            // Don't include endpoint (t=period) since it overlaps with start (t=0)
-            for i in 0..ORBIT_SEGMENTS {
-                let t = i as f64 * step_dt;
-                if let Ok(elems) =
-                    propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t)
-                {
-                    let (r_local, _) = coe_to_rv(&elems, parent_body.std_grav_param);
-                    points.push(phys_to_visual(r_local));
-                }
-            }
+    for i in 0..ORBIT_SEGMENTS {
+        let t = i as f64 * step_dt;
+        if let Ok(elems) = propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t) {
+            let (r_local, _) = coe_to_rv(&elems, parent_body.std_grav_param);
+            points.push(phys_to_visual(r_local));
         }
     }
 
-    CachedOrbit { points }
+    // Close the orbit loop
+    if !points.is_empty() {
+        points.push(points[0]);
+    }
+
+    // Log point count for debugging
+    info!(
+        "Creating orbit gizmo for {} with {} points",
+        body.name,
+        points.len()
+    );
+
+    // Draw with semi-transparent white
+    let color = Color::srgba(1.0, 1.0, 1.0, 0.3);
+    gizmo.linestrip(points, color);
+
+    gizmo
+}
+
+/// Update orbit gizmo Transform positions to match their parent body positions.
+fn update_orbit_positions(
+    mut orbit_query: Query<(&OrbitGizmo, &mut Transform)>,
+    res_elements: Res<PlanetaryElements>,
+    sim_time: Res<SimulationTime>,
+) {
+    let sim_time_seconds = sim_time.sim_time;
+    let mut position_cache: HashMap<String, Vec3> = HashMap::new();
+    position_cache.insert("Sun".to_string(), Vec3::ZERO);
+
+    for (orbit_gizmo, mut transform) in &mut orbit_query {
+        let parent_pos = resolve_position(
+            &orbit_gizmo.parent_name,
+            &res_elements.bodies,
+            &mut position_cache,
+            sim_time_seconds,
+        );
+        transform.translation = parent_pos;
+    }
 }
 
 // ============================================================================
@@ -219,31 +267,17 @@ fn calculate_visibility(
         .clamp(0.0, 1.0)
 }
 
-/// Calculate "importance" (0.0-1.0) based on gravitational parameter relative to max in frame.
-/// This makes orbits scale relative to the dominant body currently visible.
-fn calculate_importance(mu: f64, max_mu: f64) -> f32 {
-    let log_mu = (mu as f32).log10();
-    let log_max = (max_mu as f32).log10();
-    // Scale relative to max, with a floor so tiny bodies don't completely disappear
-    // Using log scale: (log(mu) - 5) / (log(max) - 5) gives reasonable spread
-    let floor = 5.0;
-    ((log_mu - floor) / (log_max - floor)).clamp(0.2, 1.0)
-}
-
-/// Main render system: draws bodies and their orbits.
+/// Main render system: draws bodies (orbits are now handled by retained gizmos).
 fn render_system(
-    query: Query<(&Body, &CachedOrbit)>,
+    body_query: Query<&Body>,
     res_elements: Res<PlanetaryElements>,
     mut painter: ShapePainter,
-    mut gizmos: Gizmos,
     camera_query: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
     mut body_positions: ResMut<BodyPositions>,
     sim_time: Res<SimulationTime>,
     mut frame_count: Local<u32>,
 ) {
-    use std::time::Instant;
-
-    let Ok((camera, camera_transform, projection)) = camera_query.single() else {
+    let Ok((_camera, _camera_transform, projection)) = camera_query.single() else {
         return;
     };
 
@@ -260,62 +294,22 @@ fn render_system(
     positions.insert("Sun".to_string(), Vec3::ZERO);
     visibility.insert("Sun".to_string(), 1.0);
 
-    let mut total_position_time = std::time::Duration::ZERO;
-    let mut total_orbit_time = std::time::Duration::ZERO;
-
-    // First pass: calculate positions, visibility, and find max mass among bodies actually in viewport
-    let mut max_mu_in_frame: f64 = 0.0;
-    for (body, _) in query.iter() {
-        let t0 = Instant::now();
+    // First pass: calculate positions and visibility
+    for body in body_query.iter() {
         let pos = resolve_position(&body.name, &res_elements.bodies, &mut positions, sim_time_seconds);
-        total_position_time += t0.elapsed();
-
         let vis = calculate_visibility(body, pos, &positions, cam_scale);
         visibility.insert(body.name.clone(), vis);
-
-        // Only include in max_mu if body is actually in the viewport (with margin)
-        // This ensures when zoomed into Earth, Jupiter doesn't dominate max_mu
-        if vis > 0.01 && body.parent_name.is_some() {
-            if let Ok(viewport_pos) = camera.world_to_viewport(camera_transform, pos) {
-                // Check if within viewport with some margin
-                if let Some(viewport) = camera.logical_viewport_size() {
-                    let margin = 200.0; // Allow some off-screen bodies
-                    if viewport_pos.x >= -margin
-                        && viewport_pos.x <= viewport.x + margin
-                        && viewport_pos.y >= -margin
-                        && viewport_pos.y <= viewport.y + margin
-                    {
-                        max_mu_in_frame = max_mu_in_frame.max(body.std_grav_param);
-                    }
-                }
-            }
-        }
     }
 
-    // Fallback: if no orbiting bodies in viewport, use largest planet (Jupiter-scale)
-    if max_mu_in_frame == 0.0 {
-        max_mu_in_frame = 1.0e17; // Roughly Jupiter's mu
-    }
-
-    // Second pass: render orbits and bodies
+    // Second pass: render bodies
     let mut display_sizes: HashMap<String, f32> = HashMap::new();
 
-    for (body, cached_orbit) in query.iter() {
+    for body in body_query.iter() {
         let pos = *positions.get(&body.name).unwrap_or(&Vec3::ZERO);
         let vis = *visibility.get(&body.name).unwrap_or(&0.0);
 
         if vis < 0.01 {
             continue;
-        }
-
-        let importance = calculate_importance(body.std_grav_param, max_mu_in_frame);
-
-        // Draw orbit
-        if let Some(parent_name) = &body.parent_name {
-            let parent_pos = *positions.get(parent_name).unwrap_or(&Vec3::ZERO);
-            let t1 = Instant::now();
-            draw_cached_orbit(&mut gizmos, cached_orbit, parent_pos, vis, importance);
-            total_orbit_time += t1.elapsed();
         }
 
         // Draw body
@@ -328,20 +322,7 @@ fn render_system(
     *frame_count += 1;
     if *frame_count >= 60 {
         *frame_count = 0;
-        info!(
-            "Render: cam_scale={:.4}, max_mu={:.2e}",
-            cam_scale,
-            max_mu_in_frame
-        );
-        // Log a few specific bodies for debugging
-        for name in ["Earth", "Moon", "Jupiter", "Io"] {
-            if let Some(&vis) = visibility.get(name) {
-                if let Some(body) = res_elements.bodies.get(name) {
-                    let imp = calculate_importance(body.std_grav_param, max_mu_in_frame);
-                    info!("  {}: vis={:.2}, imp={:.2}, mu={:.2e}", name, vis, imp, body.std_grav_param);
-                }
-            }
-        }
+        info!("Render: cam_scale={:.4}", cam_scale);
     }
 
     // Store positions, visibility, and display sizes for label system
@@ -377,28 +358,3 @@ fn draw_body(painter: &mut ShapePainter, body: &Body, pos: Vec3, cam_scale: f32,
     painter.circle(display_size);
 }
 
-/// Draw orbit from pre-computed cache using gizmos linestrip.
-fn draw_cached_orbit(
-    gizmos: &mut Gizmos,
-    cached: &CachedOrbit,
-    parent_pos: Vec3,
-    visibility: f32,
-    importance: f32,
-) {
-    if cached.points.is_empty() {
-        return;
-    }
-
-    // Orbit alpha based on LOD visibility and body importance
-    let orbit_alpha = 0.4 * visibility * importance;
-    let color = Color::srgba(1.0, 1.0, 1.0, orbit_alpha);
-
-    // Build world-space points including closing point
-    let points = cached
-        .points
-        .iter()
-        .map(|&p| parent_pos + p)
-        .chain(std::iter::once(parent_pos + cached.points[0]));
-
-    gizmos.linestrip(points, color);
-}
