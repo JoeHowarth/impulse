@@ -20,7 +20,6 @@ mod ui;
 
 use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
 use simulation::SimulationTime;
-use ui::BodyPositions;
 
 // ============================================================================
 // Constants
@@ -42,13 +41,29 @@ const LOD_MIN_SCREEN_DIST: f32 = 5.0;
 const LOD_MAX_SCREEN_DIST: f32 = 25.0;
 
 // ============================================================================
+// Type Aliases (for clarity when storing Entity references)
+// ============================================================================
+
+/// Entity reference to a Body entity
+type BodyEntity = Entity;
+
+// ============================================================================
 // Components
 // ============================================================================
+
+/// Computed per-frame data for a body (position, visibility, display size).
+/// Written by update_body_positions, read by rendering and UI systems.
+#[derive(Component, Default)]
+struct ComputedBody {
+    position: Vec3,
+    visibility: f32,
+    display_size: f32,
+}
 
 /// Links an orbit gizmo entity to its parent body for position updates.
 #[derive(Component)]
 struct OrbitGizmo {
-    parent_name: String,
+    parent: BodyEntity,
 }
 
 fn main() {
@@ -59,7 +74,6 @@ fn main() {
         // Performance diagnostics - logs to console every second
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(LogDiagnosticsPlugin::default())
-        .init_resource::<BodyPositions>()
         .init_resource::<SimulationTime>()
         .add_systems(Startup, (setup, configure_gizmos))
         .add_systems(
@@ -91,33 +105,38 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         PanCam::default(),
     ));
 
-    // Load planetary data (cached static, cloned into resource)
+    // Load planetary data
     let bodies = PlanetaryElements::get_planetary_elements();
     commands.insert_resource(PlanetaryElements {
         bodies: bodies.clone(),
     });
 
-    // Spawn bodies and their orbit gizmos
+    // First pass: spawn all bodies and build name -> entity map
+    let mut body_entities: HashMap<String, BodyEntity> = HashMap::new();
     for body in bodies.values() {
-        // Spawn the body entity
-        commands.spawn(body.clone());
-        ui::spawn_body_label(&mut commands, &body.name);
+        let entity = commands.spawn((body.clone(), ComputedBody::default())).id();
+        body_entities.insert(body.name.clone(), entity);
+    }
+
+    // Second pass: spawn labels and orbit gizmos (now we can look up parent entities)
+    for body in bodies.values() {
+        let body_entity = body_entities[&body.name];
+        ui::spawn_body_label(&mut commands, &body.name, body_entity);
 
         // Create orbit gizmo if body has a parent
         if let Some(parent_name) = &body.parent_name {
-            if let Some(parent_body) = bodies.get(parent_name) {
-                let orbit_asset = create_orbit_gizmo_asset(body, parent_body);
-                commands.spawn((
-                    Gizmo {
-                        handle: gizmo_assets.add(orbit_asset),
-                        // Push orbits slightly behind other geometry (small positive = behind, but not at far plane)
-                        depth_bias: 0.1,
-                        ..default()
-                    },
-                    OrbitGizmo {
-                        parent_name: parent_name.clone(),
-                    },
-                ));
+            if let Some(&parent_entity) = body_entities.get(parent_name) {
+                if let Some(parent_body) = bodies.get(parent_name) {
+                    let orbit_asset = create_orbit_gizmo_asset(body, parent_body);
+                    commands.spawn((
+                        Gizmo {
+                            handle: gizmo_assets.add(orbit_asset),
+                            depth_bias: 0.1,
+                            ..default()
+                        },
+                        OrbitGizmo { parent: parent_entity },
+                    ));
+                }
             }
         }
     }
@@ -166,11 +185,10 @@ fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
 /// Computes positions, visibility, and display sizes for all bodies.
 /// Runs once per frame before orbit updates and rendering.
 fn update_body_positions(
-    body_query: Query<&Body>,
+    mut body_query: Query<(&Body, &mut ComputedBody)>,
     res_elements: Res<PlanetaryElements>,
     camera_query: Query<&Projection, With<Camera3d>>,
     sim_time: Res<SimulationTime>,
-    mut body_positions: ResMut<BodyPositions>,
 ) {
     let cam_scale = camera_query
         .single()
@@ -182,41 +200,32 @@ fn update_body_positions(
 
     let t = sim_time.sim_time;
 
-    // Build position cache
+    // Build position cache (still need string keys for recursive resolution)
     let mut positions: HashMap<String, Vec3> = HashMap::new();
     positions.insert("Sun".to_string(), Vec3::ZERO);
 
-    for body in body_query.iter() {
+    for (body, _) in body_query.iter() {
         resolve_position(&body.name, &res_elements.bodies, &mut positions, t);
     }
 
-    // Compute visibility and display sizes
-    let mut visibility: HashMap<String, f32> = HashMap::new();
-    let mut display_sizes: HashMap<String, f32> = HashMap::new();
-    visibility.insert("Sun".to_string(), 1.0);
-
-    for body in body_query.iter() {
+    // Update ComputedBody components
+    for (body, mut computed) in body_query.iter_mut() {
         let pos = positions.get(&body.name).copied().unwrap_or(Vec3::ZERO);
-        visibility.insert(body.name.clone(), calculate_visibility(body, pos, &positions, cam_scale));
-        display_sizes.insert(body.name.clone(), compute_display_size(body, cam_scale));
+        computed.position = pos;
+        computed.visibility = calculate_visibility(body, pos, &positions, cam_scale);
+        computed.display_size = compute_display_size(body, cam_scale);
     }
-
-    // Store in resource
-    body_positions.positions = positions;
-    body_positions.visibility = visibility;
-    body_positions.display_sizes = display_sizes;
 }
 
 /// Update orbit gizmo Transform positions to match their parent body positions.
 fn update_orbit_positions(
     mut orbit_query: Query<(&OrbitGizmo, &mut Transform)>,
-    body_positions: Res<BodyPositions>,
+    body_query: Query<&ComputedBody>,
 ) {
     for (orbit_gizmo, mut transform) in &mut orbit_query {
-        let parent_pos = body_positions
-            .positions
-            .get(&orbit_gizmo.parent_name)
-            .copied()
+        let parent_pos = body_query
+            .get(orbit_gizmo.parent)
+            .map(|c| c.position)
             .unwrap_or(Vec3::ZERO);
         transform.translation = parent_pos;
     }
@@ -310,24 +319,21 @@ fn calculate_visibility(
 }
 
 /// Draws all visible bodies. Positions and visibility are precomputed by update_body_positions.
-fn render_system(
-    body_query: Query<&Body>,
-    body_positions: Res<BodyPositions>,
-    mut painter: ShapePainter,
-) {
-    for body in body_query.iter() {
-        let pos = body_positions.positions.get(&body.name).copied().unwrap_or(Vec3::ZERO);
-        let vis = body_positions.visibility.get(&body.name).copied().unwrap_or(0.0);
-        let size = body_positions.display_sizes.get(&body.name).copied().unwrap_or(1.0);
-
-        if vis < 0.01 {
+fn render_system(body_query: Query<(&Body, &ComputedBody)>, mut painter: ShapePainter) {
+    for (body, computed) in body_query.iter() {
+        if computed.visibility < 0.01 {
             continue;
         }
 
-        painter.set_translation(pos);
+        painter.set_translation(computed.position);
         let base_color = body.color.to_srgba();
-        painter.set_color(Color::srgba(base_color.red, base_color.green, base_color.blue, vis));
-        painter.circle(size);
+        painter.set_color(Color::srgba(
+            base_color.red,
+            base_color.green,
+            base_color.blue,
+            computed.visibility,
+        ));
+        painter.circle(computed.display_size);
     }
 }
 
