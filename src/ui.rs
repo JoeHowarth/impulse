@@ -504,14 +504,14 @@ pub fn spawn_transfer_popup(
 /// Builds transfer options from the cache for a specific target.
 pub fn build_transfer_options(
     cache: &TransferCache,
-    target_name: &str,
+    target_entity: Entity,
     current_day: i32,
 ) -> Vec<TransferOption> {
     let mut options = Vec::new();
 
     // 1. Now (tomorrow to avoid immediate expiration)
     // We use current_day + 1 so the transfer doesn't expire immediately
-    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_name, current_day + 1, current_day + 3) {
+    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_entity, current_day + 1, current_day + 3) {
         options.push(TransferOption {
             label: "Now".to_string(),
             departure_day: dep_day - current_day,
@@ -520,7 +520,7 @@ pub fn build_transfer_options(
     }
 
     // 2. Best in 30 days
-    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_name, current_day, current_day + 30) {
+    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_entity, current_day, current_day + 30) {
         // Only add if different from "Now" option
         let is_different = options.first().map_or(true, |o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0 || (dep_day - current_day) > 2
@@ -535,7 +535,7 @@ pub fn build_transfer_options(
     }
 
     // 3. Best in 180 days
-    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_name, current_day, current_day + 180) {
+    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_entity, current_day, current_day + 180) {
         // Only add if different from previous options
         let is_different = options.iter().all(|o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0
@@ -550,7 +550,7 @@ pub fn build_transfer_options(
     }
 
     // 4. Best in 500 days (full search window)
-    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_name, current_day, current_day + 500) {
+    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_entity, current_day, current_day + 500) {
         // Only add if different from previous options
         let is_different = options.iter().all(|o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0
@@ -620,7 +620,7 @@ pub fn handle_popup_spawn(
 
     // Build transfer options
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-    let options = build_transfer_options(&cache, &target_body.name, current_day);
+    let options = build_transfer_options(&cache, target_entity, current_day);
 
     info!("Spawning popup for {} with {} options", target_body.name, options.len());
 
@@ -719,7 +719,7 @@ pub fn update_popup_options(
     let available_dv = player_query.single().map(|s| s.delta_v_remaining).unwrap_or(0.0);
 
     // Rebuild options
-    let options = build_transfer_options(&cache, &target_body.name, current_day);
+    let options = build_transfer_options(&cache, target_entity, current_day);
 
     // Preserve hover state if still valid
     let preserved_hover = popup.hovered_option.filter(|&idx| idx < options.len());

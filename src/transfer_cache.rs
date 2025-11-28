@@ -16,22 +16,22 @@ use crate::simulation::SimulationTime;
 // Resources
 // ============================================================================
 
-/// Cache key for Lambert solutions: (target_name, departure_day, tof_days)
+/// Cache key for Lambert solutions: (target_entity, departure_day, tof_days)
 /// departure_day is days since J2000 epoch (can be negative)
-type CacheKey = (String, i32, i32);
+type CacheKey = (Entity, i32, i32);
 
 /// Cached Lambert transfer solutions from current body to all siblings.
-/// Stores computed solutions keyed by (target_name, departure_day, tof_days).
+/// Stores computed solutions keyed by (target_entity, departure_day, tof_days).
 #[derive(Resource, Default)]
 pub struct TransferCache {
-    /// Map from (target_name, departure_day, tof_days) to computed solution
+    /// Map from (target_entity, departure_day, tof_days) to computed solution
     pub solutions: HashMap<CacheKey, TransferSolution>,
     /// Last sim_time day we updated the cache (for incremental updates)
     pub last_update_day: i32,
     /// Search window: how many days ahead to search for departures
     pub window_days: i32,
-    /// Source body name (invalidate cache if this changes)
-    pub source_body: Option<String>,
+    /// Source body entity (invalidate cache if this changes)
+    pub source_body: Option<Entity>,
 }
 
 // ============================================================================
@@ -108,11 +108,10 @@ pub fn init_transfer_cache(
         return;
     };
 
-    // Find all siblings (bodies with the same parent)
-    let siblings: Vec<&Body> = bodies
+    // Find all siblings (bodies with the same parent entity)
+    let siblings: Vec<(Entity, &Body)> = bodies
         .iter()
-        .map(|(_, b)| b)
-        .filter(|b| b.parent_name == source_body.parent_name && b.name != source_body.name)
+        .filter(|(e, b)| b.parent_entity == source_body.parent_entity && *e != current_entity)
         .collect();
 
     if siblings.is_empty() {
@@ -123,16 +122,16 @@ pub fn init_transfer_cache(
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
     cache.last_update_day = current_day;
     cache.window_days = SEARCH_WINDOW_DAYS;
-    cache.source_body = Some(source_body.name.clone());
+    cache.source_body = Some(current_entity);
 
     // Compute all solutions in the window for each sibling
     let mut computed = 0;
-    for target_body in &siblings {
+    for (target_entity, target_body) in &siblings {
         for dep_offset in 0..=SEARCH_WINDOW_DAYS {
             let departure_day = current_day + dep_offset;
             for &tof_days in &TOF_CANDIDATES {
                 if let Some(solution) = compute_cached_transfer(source_body, target_body, departure_day, tof_days) {
-                    cache.solutions.insert((target_body.name.clone(), departure_day, tof_days), solution);
+                    cache.solutions.insert((*target_entity, departure_day, tof_days), solution);
                     computed += 1;
                 }
             }
@@ -178,23 +177,21 @@ pub fn update_transfer_cache(
         return;
     };
 
-    let current_name = &source_body.name;
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
     // Check if source body changed -> need full rebuild
-    if cache.source_body.as_ref() != Some(current_name) {
-        info!("Source body changed to {}, rebuilding cache...", current_name);
+    if cache.source_body != Some(current_entity) {
+        info!("Source body changed to {}, rebuilding cache...", source_body.name);
 
         cache.solutions.clear();
-        cache.source_body = Some(current_name.clone());
+        cache.source_body = Some(current_entity);
         cache.last_update_day = current_day;
         cache.window_days = SEARCH_WINDOW_DAYS;
 
-        // Find all siblings (bodies with the same parent)
-        let siblings: Vec<&Body> = bodies
+        // Find all siblings (bodies with the same parent entity)
+        let siblings: Vec<(Entity, &Body)> = bodies
             .iter()
-            .map(|(_, b)| b)
-            .filter(|b| b.parent_name == source_body.parent_name && b.name != source_body.name)
+            .filter(|(e, b)| b.parent_entity == source_body.parent_entity && *e != current_entity)
             .collect();
 
         if siblings.is_empty() {
@@ -204,12 +201,12 @@ pub fn update_transfer_cache(
 
         // Compute all solutions in the window for each sibling
         let mut computed = 0;
-        for target_body in &siblings {
+        for (target_entity, target_body) in &siblings {
             for dep_offset in 0..=SEARCH_WINDOW_DAYS {
                 let departure_day = current_day + dep_offset;
                 for &tof_days in &TOF_CANDIDATES {
                     if let Some(solution) = compute_cached_transfer(source_body, target_body, departure_day, tof_days) {
-                        cache.solutions.insert((target_body.name.clone(), departure_day, tof_days), solution);
+                        cache.solutions.insert((*target_entity, departure_day, tof_days), solution);
                         computed += 1;
                     }
                 }
@@ -218,7 +215,7 @@ pub fn update_transfer_cache(
 
         info!(
             "Transfer cache rebuilt: {} solutions for {} targets from {}",
-            computed, siblings.len(), current_name
+            computed, siblings.len(), source_body.name
         );
         return;
     }
@@ -228,11 +225,10 @@ pub fn update_transfer_cache(
         return;
     }
 
-    // Find all siblings (same parent as source)
-    let siblings: Vec<&Body> = bodies
+    // Find all siblings (same parent entity as source)
+    let siblings: Vec<(Entity, &Body)> = bodies
         .iter()
-        .map(|(_, b)| b)
-        .filter(|b| b.parent_name == source_body.parent_name && b.name != source_body.name)
+        .filter(|(e, b)| b.parent_entity == source_body.parent_entity && *e != current_entity)
         .collect();
 
     let before_count = cache.solutions.len();
@@ -248,10 +244,10 @@ pub fn update_transfer_cache(
     let mut added = 0;
     for offset in 0..days_advanced {
         let new_departure_day = cache.last_update_day + cache.window_days + 1 + offset;
-        for target_body in &siblings {
+        for (target_entity, target_body) in &siblings {
             for &tof_days in &TOF_CANDIDATES {
                 if let Some(solution) = compute_cached_transfer(source_body, target_body, new_departure_day, tof_days) {
-                    cache.solutions.insert((target_body.name.clone(), new_departure_day, tof_days), solution);
+                    cache.solutions.insert((*target_entity, new_departure_day, tof_days), solution);
                     added += 1;
                 }
             }
@@ -276,15 +272,15 @@ pub fn update_transfer_cache(
 /// Returns (departure_day, solution).
 pub fn find_best_transfer_in_range<'a>(
     cache: &'a TransferCache,
-    target_name: &str,
+    target_entity: Entity,
     start_day: i32,
     end_day: i32,
 ) -> Option<(i32, &'a TransferSolution)> {
     cache
         .solutions
         .iter()
-        .filter(|((name, dep_day, _), _)| {
-            name == target_name && *dep_day >= start_day && *dep_day < end_day
+        .filter(|((entity, dep_day, _), _)| {
+            *entity == target_entity && *dep_day >= start_day && *dep_day < end_day
         })
         .min_by(|(_, a), (_, b)| a.total_dv.partial_cmp(&b.total_dv).unwrap())
         .map(|((_, dep_day, _), sol)| (*dep_day, sol))
