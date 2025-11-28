@@ -17,6 +17,7 @@ use bevy_pancam::{PanCam, PanCamPlugin};
 use bevy_vector_shapes::prelude::*;
 
 mod orbital_data;
+mod ship;
 mod simulation;
 mod transfer;
 mod transfer_vis;
@@ -28,10 +29,11 @@ mod ui;
 
 /// Which body the player is currently "at" for transfer planning.
 /// Transfers are computed FROM this body to clicked targets.
-#[derive(Resource)]
+/// None during transit between bodies.
+#[derive(Resource, Default)]
 pub struct CurrentBody {
-    pub entity: Entity,
-    pub name: String,
+    pub entity: Option<Entity>,
+    pub name: Option<String>,
 }
 
 /// Transfer popup state - tracks if a popup is open and for which target.
@@ -112,6 +114,7 @@ fn main() {
         .init_resource::<transfer_vis::ActiveTransfer>()
         .init_resource::<transfer_vis::TransferCache>()
         .init_resource::<TransferPopup>()
+        .init_resource::<ship::ScheduledTransfers>()
         .add_systems(
             Startup,
             (
@@ -122,13 +125,24 @@ fn main() {
             )
                 .chain(),
         )
+        // Ship and simulation systems (run first)
         .add_systems(
             Update,
             (
                 simulation::handle_time_controls,
+                ship::execute_scheduled_transfers,
+                ship::check_ship_arrival,
+                ship::handle_time_reversal,
                 transfer_vis::update_transfer_cache,
                 transfer_vis::check_transfer_expiration,
                 update_body_positions,
+            )
+                .chain(),
+        )
+        // UI interaction systems
+        .add_systems(
+            Update,
+            (
                 handle_body_click,
                 ui::handle_popup_spawn,
                 ui::update_popup_options,
@@ -138,14 +152,25 @@ fn main() {
                 ui::handle_option_hover,
                 transfer_vis::update_transfer_visualization,
                 ui::handle_option_selection,
+            )
+                .chain()
+                .after(update_body_positions),
+        )
+        // Rendering systems (run last)
+        .add_systems(
+            Update,
+            (
                 update_orbit_positions,
                 render_system,
+                ship::render_ship,
+                ship::render_departure_markers,
                 transfer_vis::render_burn_arrows,
                 ui::update_labels,
                 ui::update_time_ui,
                 ui::update_transfer_panel,
             )
-                .chain(),
+                .chain()
+                .after(ui::handle_option_selection),
         )
         .run();
 }
@@ -184,9 +209,18 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
     // Initialize CurrentBody resource (start at Earth)
     if let Some(entity) = earth_entity {
         commands.insert_resource(CurrentBody {
-            entity,
-            name: "Earth".to_string(),
+            entity: Some(entity),
+            name: Some("Earth".to_string()),
         });
+
+        // Spawn player ship at Earth with 50 km/s delta-v
+        commands.spawn((
+            ship::Ship {
+                delta_v_remaining: 50_000.0, // 50 km/s
+                name: "Player Ship".to_string(),
+            },
+            ship::ShipState::Orbiting { body: entity },
+        ));
     }
 
     // Second pass: spawn labels and orbit gizmos (now we can look up parent entities)
@@ -426,6 +460,7 @@ fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
 
 /// Detects clicks on bodies and opens transfer popup for valid targets.
 /// Only bodies with the same parent as CurrentBody are valid targets.
+/// Disabled when CurrentBody is None (ship in transit).
 fn handle_body_click(
     mouse_button: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -446,11 +481,13 @@ fn handle_body_click(
     // Get camera for world projection
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
 
-    // Get current body's parent
+    // Get current body - if None, ship is in transit, disable clicks
     let Some(ref current) = current_body else { return };
+    let Some(current_entity) = current.entity else { return }; // Ship in transit
+
     let current_parent = body_query
         .iter()
-        .find(|(e, _, _)| *e == current.entity)
+        .find(|(e, _, _)| *e == current_entity)
         .and_then(|(_, b, _)| b.parent_name.clone());
 
     // Find the closest body to the click that:
@@ -466,7 +503,7 @@ fn handle_body_click(
         }
 
         // Skip current body
-        if entity == current.entity {
+        if entity == current_entity {
             continue;
         }
 

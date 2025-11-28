@@ -176,6 +176,10 @@ pub struct TransferTitleText;
 #[derive(Component)]
 pub struct TransferStatsText;
 
+/// Marker for ship status text
+#[derive(Component)]
+pub struct ShipStatusText;
+
 /// Spawns the transfer info UI panel in the bottom-right corner.
 pub fn spawn_transfer_panel(commands: &mut Commands) {
     commands
@@ -186,7 +190,7 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
                 right: Val::Px(16.0),
                 padding: UiRect::all(Val::Px(12.0)),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(4.0),
+                row_gap: Val::Px(6.0),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
@@ -194,6 +198,17 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
             TransferInfoPanel,
         ))
         .with_children(|parent| {
+            // Ship status (location + delta-v)
+            parent.spawn((
+                Text::new("Ship: Earth | 10,000 m/s"),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.3, 0.9, 0.9, 1.0)), // Cyan to match ship
+                ShipStatusText,
+            ));
+
             // Title (e.g., "Earth → Mars Transfer")
             parent.spawn((
                 Text::new("No Transfer"),
@@ -218,21 +233,56 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
         });
 }
 
-/// Updates the transfer info panel with current transfer data.
+/// Updates the transfer info panel with current transfer data and ship status.
 pub fn update_transfer_panel(
     active_transfer: Res<ActiveTransfer>,
     transfers: Query<&Transfer>,
     bodies: Query<&Body>,
-    mut title_query: Query<&mut Text, (With<TransferTitleText>, Without<TransferStatsText>)>,
-    mut stats_query: Query<&mut Text, (With<TransferStatsText>, Without<TransferTitleText>)>,
-    mut logged: Local<bool>,
+    ships: Query<(&crate::ship::Ship, &crate::ship::ShipState)>,
+    scheduled_transfers: Res<crate::ship::ScheduledTransfers>,
+    sim_time: Res<SimulationTime>,
+    mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<TransferTitleText>, Without<TransferStatsText>)>,
+    mut title_query: Query<&mut Text, (With<TransferTitleText>, Without<ShipStatusText>, Without<TransferStatsText>)>,
+    mut stats_query: Query<&mut Text, (With<TransferStatsText>, Without<TransferTitleText>, Without<ShipStatusText>)>,
 ) {
+    // Update ship status
+    if let Some((ship, state)) = ships.iter().next() {
+        let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+
+        let location = match state {
+            crate::ship::ShipState::Orbiting { body } => {
+                bodies.get(*body).map(|b| b.name.as_str()).unwrap_or("???").to_string()
+            }
+            crate::ship::ShipState::Transferring { target, arrival_time, .. } => {
+                let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("???");
+                let arrival_day = (*arrival_time / 86400.0).floor() as i32;
+                let days_to_arrival = arrival_day - current_day;
+                format!("-> {} ({} days)", target_name, days_to_arrival)
+            }
+        };
+
+        // Check for scheduled transfer
+        let scheduled_info = if let Some(scheduled) = scheduled_transfers.transfers.first() {
+            let days_to_departure = scheduled.departure_day - current_day;
+            let target_name = bodies.get(scheduled.target).map(|b| b.name.as_str()).unwrap_or("???");
+            format!(" | Dep to {} in {}d", target_name, days_to_departure)
+        } else {
+            String::new()
+        };
+
+        if let Ok(mut text) = ship_query.single_mut() {
+            **text = format!(
+                "Ship: {} | {:.0} m/s{}",
+                location,
+                ship.delta_v_remaining,
+                scheduled_info
+            );
+        }
+    }
+
+    // Update transfer info
     let Some(transfer_entity) = active_transfer.entity else {
         // No active transfer
-        if !*logged {
-            info!("update_transfer_panel: no active_transfer.entity");
-            *logged = true;
-        }
         if let Ok(mut title) = title_query.single_mut() {
             **title = "No Transfer".to_string();
         }
@@ -242,22 +292,9 @@ pub fn update_transfer_panel(
         return;
     };
 
-    if !*logged {
-        info!("update_transfer_panel: active_transfer.entity = {:?}", transfer_entity);
-    }
-
     let Ok(transfer) = transfers.get(transfer_entity) else {
-        if !*logged {
-            info!("update_transfer_panel: transfers.get() failed for {:?}", transfer_entity);
-            *logged = true;
-        }
         return;
     };
-
-    if !*logged {
-        info!("update_transfer_panel: found transfer, updating UI");
-        *logged = true;
-    }
 
     // Get body names
     let source_name = bodies
@@ -315,11 +352,13 @@ pub struct TransferOption {
 }
 
 /// Spawns a transfer popup near the clicked body position.
+/// `available_dv` is used to grey out options that require more delta-v.
 pub fn spawn_transfer_popup(
     commands: &mut Commands,
     target_name: &str,
     options: &[TransferOption],
     screen_pos: Vec2,
+    available_dv: f64,
 ) -> Entity {
     commands
         .spawn((
@@ -386,6 +425,19 @@ pub fn spawn_transfer_popup(
                 let tof_days = (opt.solution.time_of_flight / 86400.0) as i32;
                 let dv = opt.solution.total_dv as i32;
                 let dep_in = opt.departure_day; // Relative to current day
+                let affordable = opt.solution.total_dv <= available_dv;
+
+                // Grey out unaffordable options
+                let bg_color = if affordable {
+                    Color::srgba(0.2, 0.25, 0.35, 1.0)
+                } else {
+                    Color::srgba(0.15, 0.15, 0.18, 1.0)
+                };
+                let text_color = if affordable {
+                    Color::srgba(0.9, 0.9, 0.95, 1.0)
+                } else {
+                    Color::srgba(0.5, 0.5, 0.55, 1.0)
+                };
 
                 parent
                     .spawn((
@@ -394,7 +446,7 @@ pub fn spawn_transfer_popup(
                             padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(0.2, 0.25, 0.35, 1.0)),
+                        BackgroundColor(bg_color),
                         BorderRadius::all(Val::Px(4.0)),
                         TransferOptionButton { index: i },
                     ))
@@ -407,7 +459,7 @@ pub fn spawn_transfer_popup(
                             font_size: 11.0,
                             ..default()
                         },
-                        TextColor(Color::srgba(0.9, 0.9, 0.95, 1.0)),
+                        TextColor(text_color),
                     ));
             }
 
@@ -493,6 +545,7 @@ pub fn handle_popup_spawn(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
+    ships: Query<&crate::ship::Ship>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Check if we need to spawn a popup
@@ -524,6 +577,9 @@ pub fn handle_popup_spawn(
         }
     };
 
+    // Get available delta-v from ship
+    let available_dv = ships.iter().next().map(|s| s.delta_v_remaining).unwrap_or(0.0);
+
     // Build transfer options
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
     let options = build_transfer_options(&cache, &target_body.name, current_day);
@@ -540,6 +596,7 @@ pub fn handle_popup_spawn(
         &target_body.name,
         &popup.options,
         screen_pos,
+        available_dv,
     );
 
     popup.popup_entity = Some(popup_entity);
@@ -588,6 +645,7 @@ pub fn update_popup_options(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
+    ships: Query<&crate::ship::Ship>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only process if popup is open
@@ -619,6 +677,9 @@ pub fn update_popup_options(
         Err(_) => return,
     };
 
+    // Get available delta-v from ship
+    let available_dv = ships.iter().next().map(|s| s.delta_v_remaining).unwrap_or(0.0);
+
     // Rebuild options
     let options = build_transfer_options(&cache, &target_body.name, current_day);
 
@@ -641,6 +702,7 @@ pub fn update_popup_options(
         &target_body.name,
         &popup.options,
         screen_pos,
+        available_dv,
     );
     popup.popup_entity = Some(new_popup_entity);
 }
@@ -697,14 +759,16 @@ pub fn handle_option_hover(
 }
 
 /// System to handle transfer option button selection.
-/// When a button is clicked, spawn the selected transfer visualization.
+/// When a button is clicked, schedule the transfer (deduct delta-v on departure).
 pub fn handle_option_selection(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     mut popup: ResMut<TransferPopup>,
     mut active_transfer: ResMut<ActiveTransfer>,
+    mut scheduled_transfers: ResMut<crate::ship::ScheduledTransfers>,
     current_body: Option<Res<CurrentBody>>,
     bodies: Query<(Entity, &Body)>,
+    ships: Query<(Entity, &crate::ship::Ship)>,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
     // For despawning old transfer
@@ -731,21 +795,57 @@ pub fn handle_option_selection(
             continue;
         };
 
+        let Some(ref current_name) = current.name else {
+            warn!("CurrentBody has no name (ship in transit?)");
+            continue;
+        };
+
         let Some(target_entity) = popup.target_entity else {
             warn!("No target entity set");
             continue;
         };
 
+        // Get player ship (assume first ship for now)
+        let Some((ship_entity, ship)) = ships.iter().next() else {
+            warn!("No ship found");
+            continue;
+        };
+
+        // Check if ship has enough delta-v
+        if ship.delta_v_remaining < option.solution.total_dv {
+            warn!(
+                "Insufficient delta-v! Need {:.0} m/s, have {:.0} m/s",
+                option.solution.total_dv, ship.delta_v_remaining
+            );
+            continue;
+        }
+
         info!(
-            "Selected transfer: {} (dep +{}d, {} m/s)",
-            option.label, option.departure_day, option.solution.total_dv as i32
+            "Scheduling transfer: {} (dep +{}d, {} m/s, remaining after: {:.0} m/s)",
+            option.label,
+            option.departure_day,
+            option.solution.total_dv as i32,
+            ship.delta_v_remaining - option.solution.total_dv
         );
 
         // Find source and target entities
-        let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == current.name) else {
-            warn!("Source body not found: {}", current.name);
+        let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == *current_name) else {
+            warn!("Source body not found: {}", current_name);
             continue;
         };
+
+        // Calculate absolute departure day
+        let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+        let departure_day = current_day + option.departure_day;
+        let departure_time = departure_day as f64 * 86400.0;
+
+        // Schedule the transfer (delta-v deducted when it executes)
+        scheduled_transfers.transfers.push(crate::ship::ScheduledTransfer {
+            ship: ship_entity,
+            target: target_entity,
+            solution: option.solution.clone(),
+            departure_day,
+        });
 
         // Despawn old transfer entities
         for entity in old_transfers.iter() {
@@ -757,11 +857,6 @@ pub fn handle_option_selection(
         for entity in old_markers.iter() {
             commands.entity(entity).despawn();
         }
-
-        // Calculate absolute departure time
-        let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-        let departure_day = current_day + option.departure_day;
-        let departure_time = departure_day as f64 * 86400.0;
 
         // Spawn the new transfer visualization
         let transfer_entity = spawn_transfer_from_solution(

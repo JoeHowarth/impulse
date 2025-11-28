@@ -162,8 +162,13 @@ pub fn init_transfer_cache(
         return;
     };
 
-    let Some(source_body) = bodies.iter().find(|b| b.name == current.name) else {
-        warn!("Source body '{}' not found", current.name);
+    let Some(ref current_name) = current.name else {
+        warn!("CurrentBody has no name (ship in transit?)");
+        return;
+    };
+
+    let Some(source_body) = bodies.iter().find(|b| b.name == *current_name) else {
+        warn!("Source body '{}' not found", current_name);
         return;
     };
 
@@ -225,6 +230,11 @@ pub fn spawn_initial_transfer(
         return;
     };
 
+    let Some(ref current_name) = current.name else {
+        warn!("CurrentBody has no name (ship in transit?)");
+        return;
+    };
+
     // Find best solution to Mars (default target)
     let best = find_best_transfer_today(&cache, current_day, Some("Mars"));
     let Some((key, solution)) = best else {
@@ -239,7 +249,7 @@ pub fn spawn_initial_transfer(
     );
 
     // Find source and target entities
-    let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == current.name) else {
+    let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == *current_name) else {
         return;
     };
     let Some((target_entity, _)) = bodies.iter().find(|(_, b)| b.name == target_name) else {
@@ -515,15 +525,57 @@ pub fn update_transfer_cache(
         return;
     };
 
+    let Some(ref current_name) = current.name else {
+        // Ship in transit - don't update cache
+        return;
+    };
+
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
-    // Check if source body changed -> need full rebuild (handled by init_transfer_cache)
-    if cache.source_body.as_ref() != Some(&current.name) {
-        // Source changed - clear cache and let init_transfer_cache rebuild on next frame
+    // Check if source body changed -> need full rebuild
+    if cache.source_body.as_ref() != Some(current_name) {
+        info!("Source body changed to {}, rebuilding cache...", current_name);
+
         cache.solutions.clear();
-        cache.source_body = Some(current.name.clone());
+        cache.source_body = Some(current_name.clone());
         cache.last_update_day = current_day;
-        info!("Source body changed to {}, cache cleared", current.name);
+        cache.window_days = SEARCH_WINDOW_DAYS;
+
+        // Find source body
+        let Some(source_body) = bodies.iter().find(|b| b.name == *current_name) else {
+            warn!("Source body '{}' not found", current_name);
+            return;
+        };
+
+        // Find all siblings (bodies with the same parent)
+        let siblings: Vec<&Body> = bodies
+            .iter()
+            .filter(|b| b.parent_name == source_body.parent_name && b.name != source_body.name)
+            .collect();
+
+        if siblings.is_empty() {
+            warn!("No sibling bodies found for '{}'", source_body.name);
+            return;
+        }
+
+        // Compute all solutions in the window for each sibling
+        let mut computed = 0;
+        for target_body in &siblings {
+            for dep_offset in 0..=SEARCH_WINDOW_DAYS {
+                let departure_day = current_day + dep_offset;
+                for &tof_days in &TOF_CANDIDATES {
+                    if let Some(solution) = compute_cached_transfer(source_body, target_body, departure_day, tof_days) {
+                        cache.solutions.insert((target_body.name.clone(), departure_day, tof_days), solution);
+                        computed += 1;
+                    }
+                }
+            }
+        }
+
+        info!(
+            "Transfer cache rebuilt: {} solutions for {} targets from {}",
+            computed, siblings.len(), current_name
+        );
         return;
     }
 
@@ -532,7 +584,7 @@ pub fn update_transfer_cache(
         return;
     }
 
-    let Some(source_body) = bodies.iter().find(|b| b.name == current.name) else {
+    let Some(source_body) = bodies.iter().find(|b| b.name == *current_name) else {
         return;
     };
 
@@ -575,8 +627,8 @@ pub fn update_transfer_cache(
     cache.last_update_day = current_day;
 }
 
-/// Checks if the active transfer's departure time has passed and despawns it if so.
-/// This prevents showing stale transfer arcs for windows that have already closed.
+/// Checks if the active transfer has been completed (arrival time passed) and despawns it.
+/// The arc stays visible during the entire transfer so the player can see the path.
 pub fn check_transfer_expiration(
     mut commands: Commands,
     mut active_transfer: ResMut<ActiveTransfer>,
@@ -596,11 +648,12 @@ pub fn check_transfer_expiration(
         return;
     };
 
-    // Check if departure time has passed
-    if sim_time.sim_time > transfer.departure_time {
+    // Check if arrival time has passed (departure + TOF)
+    let arrival_time = transfer.departure_time + transfer.solution.time_of_flight;
+    if sim_time.sim_time > arrival_time {
         info!(
-            "Transfer expired: departure was at day {}, current day is {}",
-            (transfer.departure_time / 86400.0).floor() as i32,
+            "Transfer completed: arrival was at day {}, current day is {}",
+            (arrival_time / 86400.0).floor() as i32,
             (sim_time.sim_time / 86400.0).floor() as i32
         );
 
@@ -641,6 +694,11 @@ pub fn update_transfer_visualization(
         return;
     };
 
+    let Some(ref current_name) = current.name else {
+        // Ship in transit - don't update visualization
+        return;
+    };
+
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
     // Check if we should show a preview (popup open AND hovering)
@@ -669,7 +727,7 @@ pub fn update_transfer_visualization(
     // If we have preview data, spawn a preview arc
     if let Some((target_name, solution, dep_day)) = preview_data {
         // Find source and target entities
-        if let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == current.name) {
+        if let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == *current_name) {
             if let Some((target_entity, _)) = bodies.iter().find(|(_, b)| b.name == target_name) {
                 // Check if this is different from the selected transfer (if any)
                 let should_show_preview = if active_transfer.user_selected {
