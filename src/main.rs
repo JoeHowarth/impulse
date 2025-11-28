@@ -18,6 +18,7 @@ mod orbital_data;
 mod ship;
 mod simulation;
 mod transfer;
+mod transfer_cache;
 mod transfer_vis;
 mod ui;
 
@@ -83,14 +84,14 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(LogDiagnosticsPlugin::default())
         .insert_resource(SimulationTime::from_start_day(start_day))
-        .init_resource::<transfer_vis::TransferCache>()
+        .init_resource::<transfer_cache::TransferCache>()
         .init_resource::<ui::TransferPopup>()
         .add_systems(
             Startup,
             (
                 setup,
                 ApplyDeferred,
-                transfer_vis::init_transfer_cache,
+                transfer_cache::init_transfer_cache,
                 configure_gizmos,
             )
                 .chain(),
@@ -102,7 +103,7 @@ fn main() {
                 simulation::handle_time_controls,
                 ship::execute_scheduled_transfers,
                 ship::check_ship_arrival,
-                transfer_vis::update_transfer_cache,
+                transfer_cache::update_transfer_cache,
                 transfer_vis::check_transfer_expiration,
                 update_body_positions,
             )

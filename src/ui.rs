@@ -5,7 +5,8 @@ use bevy::asset::Assets;
 use bevy::gizmos::GizmoAsset;
 
 use crate::simulation::SimulationTime;
-use crate::transfer_vis::{Transfer, TransferCache, find_best_transfer_in_range};
+use crate::transfer_vis::Transfer;
+use crate::transfer_cache::{TransferCache, find_best_transfer_in_range};
 use crate::transfer::TransferSolution;
 use crate::orbital_data::Body;
 use crate::ComputedBody;
