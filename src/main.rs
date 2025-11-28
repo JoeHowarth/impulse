@@ -91,6 +91,7 @@ fn main() {
             (
                 setup,
                 ApplyDeferred,
+                init_parent_entities,
                 transfer_cache::init_transfer_cache,
                 configure_gizmos,
             )
@@ -211,11 +212,31 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         }
     }
 
+    // Note: Parent entities will be linked after all entities are spawned
+    // This happens in a deferred system (init_parent_entities) that runs after setup
+
     // Spawn time control panel
     ui::spawn_time_panel(&mut commands);
 
     // Spawn transfer info panel
     ui::spawn_transfer_panel(&mut commands);
+}
+
+/// Links parent entities in Body components after all bodies are spawned.
+/// This must run after ApplyDeferred to ensure all entities exist.
+fn init_parent_entities(mut bodies: Query<(Entity, &mut Body)>) {
+    // Build entity map by name
+    let entity_map: HashMap<String, Entity> = bodies
+        .iter()
+        .map(|(entity, body)| (body.name.clone(), entity))
+        .collect();
+
+    // Link parent entities
+    for (_, mut body) in bodies.iter_mut() {
+        if let Some(parent_name) = &body.parent_name {
+            body.parent_entity = entity_map.get(parent_name).copied();
+        }
+    }
 }
 
 /// Configure gizmo line settings for orbit rendering.
@@ -258,8 +279,8 @@ fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
 /// Computes positions, visibility, and display sizes for all bodies.
 /// Runs once per frame before orbit updates and rendering.
 fn update_body_positions(
-    mut body_query: Query<(&Body, &mut ComputedBody)>,
-    res_elements: Res<PlanetaryElements>,
+    body_query: Query<(Entity, &Body)>,
+    mut computed_query: Query<&mut ComputedBody>,
     camera_query: Query<&Projection, With<Camera3d>>,
     sim_time: Res<SimulationTime>,
 ) {
@@ -273,20 +294,22 @@ fn update_body_positions(
 
     let t = sim_time.sim_time;
 
-    // Build position cache (still need string keys for recursive resolution)
-    let mut positions: HashMap<String, Vec3> = HashMap::new();
-    positions.insert("Sun".to_string(), Vec3::ZERO);
+    // Build position cache using entity keys
+    let mut positions: HashMap<Entity, Vec3> = HashMap::new();
 
-    for (body, _) in body_query.iter() {
-        resolve_position(&body.name, &res_elements.bodies, &mut positions, t);
+    // First pass: compute all positions
+    for (entity, _) in body_query.iter() {
+        resolve_position_with_queries(entity, &body_query, &mut positions, t);
     }
 
-    // Update ComputedBody components
-    for (body, mut computed) in body_query.iter_mut() {
-        let pos = positions.get(&body.name).copied().unwrap_or(Vec3::ZERO);
-        computed.position = pos;
-        computed.visibility = calculate_visibility(body, pos, &positions, cam_scale);
-        computed.display_size = compute_display_size(body, cam_scale);
+    // Second pass: update ComputedBody components with computed positions and metadata
+    for (entity, body) in body_query.iter() {
+        if let Ok(mut computed) = computed_query.get_mut(entity) {
+            let pos = positions.get(&entity).copied().unwrap_or(Vec3::ZERO);
+            computed.position = pos;
+            computed.visibility = calculate_visibility(body, pos, &positions, cam_scale);
+            computed.display_size = compute_display_size(body, cam_scale);
+        }
     }
 }
 
@@ -318,32 +341,43 @@ pub fn phys_to_visual(v: Vector3) -> Vec3 {
     )
 }
 
-/// Recursively resolves a body's absolute position in visual coordinates.
-fn resolve_position(
-    name: &str,
-    bodies: &HashMap<String, Body>,
-    cache: &mut HashMap<String, Vec3>,
+/// Recursively resolves a body's absolute position in visual coordinates using entity keys.
+fn resolve_position_with_queries(
+    entity: Entity,
+    bodies: &Query<(Entity, &Body)>,
+    cache: &mut HashMap<Entity, Vec3>,
     t: f64,
 ) -> Vec3 {
     // Return cached position if available
-    if let Some(&pos) = cache.get(name) {
+    if let Some(&pos) = cache.get(&entity) {
         return pos;
     }
 
-    let Some(body) = bodies.get(name) else {
+    // Find the body component for this entity
+    let body = bodies
+        .iter()
+        .find(|(e, _)| *e == entity)
+        .map(|(_, b)| b);
+
+    let Some(body) = body else {
         return Vec3::ZERO;
     };
 
     // Resolve parent's position first
     let parent_pos = body
-        .parent_name
-        .as_ref()
-        .map(|p| resolve_position(p, bodies, cache, t))
+        .parent_entity
+        .map(|p| resolve_position_with_queries(p, bodies, cache, t))
         .unwrap_or(Vec3::ZERO);
 
     // Calculate local position relative to parent
-    let local_pos = if let Some(parent_name) = &body.parent_name {
-        if let Some(parent_body) = bodies.get(parent_name) {
+    let local_pos = if let Some(parent_entity) = body.parent_entity {
+        // Find parent body
+        let parent_body = bodies
+            .iter()
+            .find(|(e, _)| *e == parent_entity)
+            .map(|(_, b)| b);
+
+        if let Some(parent_body) = parent_body {
             propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t)
                 .ok()
                 .map(|elems| {
@@ -359,7 +393,7 @@ fn resolve_position(
     };
 
     let abs_pos = parent_pos + phys_to_visual(local_pos);
-    cache.insert(name.to_string(), abs_pos);
+    cache.insert(entity, abs_pos);
     abs_pos
 }
 
@@ -371,15 +405,15 @@ fn resolve_position(
 fn calculate_visibility(
     body: &Body,
     body_pos: Vec3,
-    positions: &HashMap<String, Vec3>,
+    positions: &HashMap<Entity, Vec3>,
     cam_scale: f32,
 ) -> f32 {
     // Bodies without parents (Sun) are always visible
-    let Some(parent_name) = &body.parent_name else {
+    let Some(parent_entity) = body.parent_entity else {
         return 1.0;
     };
 
-    let parent_pos = positions.get(parent_name).copied().unwrap_or(Vec3::ZERO);
+    let parent_pos = positions.get(&parent_entity).copied().unwrap_or(Vec3::ZERO);
     let world_dist = (body_pos - parent_pos).length();
 
     // Convert to approximate screen distance

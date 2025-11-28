@@ -48,6 +48,8 @@ pub struct Body {
     pub name: String,
     /// Name of the body this orbits around. None for the Sun.
     pub parent_name: Option<String>,
+    /// Parent body entity (set during setup, None for Sun)
+    pub parent_entity: Option<Entity>,
     /// The standard gravitational parameter (mu = G * M) of THIS body [m^3/s^2].
     /// Used when calculating orbits of children (moons).
     pub std_grav_param: f64,
@@ -77,6 +79,7 @@ impl PlanetaryElements {
                     Body {
                         name: $name.to_string(),
                         parent_name: $parent.map(|s: &str| s.to_string()),
+                        parent_entity: None, // Set during setup
                         std_grav_param: $mu,
                         radius: $rad,
                         color: $color,
