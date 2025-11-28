@@ -283,26 +283,20 @@ pub fn spawn_transfer_visualization(
 // Helper Functions
 // ============================================================================
 
-/// Creates a GizmoAsset containing the transfer arc linestrip.
-/// Uses universal variable propagation for accurate trajectory.
-fn create_transfer_arc(solution: &TransferSolution, mu: f64) -> GizmoAsset {
-    let mut gizmo = GizmoAsset::new();
-
+/// Generates arc points by propagating the transfer orbit using Kepler's equations.
+/// Returns a vector of visual coordinates for drawing the transfer arc.
+fn generate_arc_points(solution: &TransferSolution, mu: f64, segments: usize) -> Vec<Vec3> {
     let tof = solution.time_of_flight;
-    let step_dt = tof / TRANSFER_ARC_SEGMENTS as f64;
-
-    // Collect arc points by propagating state vector (r, v) using universal variables
-    let mut points = Vec::with_capacity(TRANSFER_ARC_SEGMENTS + 1);
+    let step_dt = tof / segments as f64;
+    let mut points = Vec::with_capacity(segments + 1);
 
     // First point is the known departure position
     points.push(phys_to_visual(solution.departure_pos));
 
-    let r0 = solution.departure_pos;
-    let v0 = solution.departure_vel;
-
-    for i in 1..TRANSFER_ARC_SEGMENTS {
+    // Propagate intermediate points
+    for i in 1..segments {
         let t = i as f64 * step_dt;
-        if let Some(r_vec) = propagate_kepler(r0, v0, mu, t) {
+        if let Some(r_vec) = propagate_kepler(solution.departure_pos, solution.departure_vel, mu, t) {
             points.push(phys_to_visual(r_vec));
         }
     }
@@ -310,7 +304,21 @@ fn create_transfer_arc(solution: &TransferSolution, mu: f64) -> GizmoAsset {
     // Last point is the known arrival position
     points.push(phys_to_visual(solution.arrival_pos));
 
+    points
+}
+
+/// Creates a GizmoAsset containing the transfer arc linestrip.
+/// Uses universal variable propagation for accurate trajectory.
+fn create_transfer_arc(solution: &TransferSolution, mu: f64) -> GizmoAsset {
+    let mut gizmo = GizmoAsset::new();
+
+    // Generate arc points using shared helper
+    let points = generate_arc_points(solution, mu, TRANSFER_ARC_SEGMENTS);
+
     // Verify propagation matches expected endpoints (warn only if mismatch)
+    let r0 = solution.departure_pos;
+    let v0 = solution.departure_vel;
+    let tof = solution.time_of_flight;
     if let Some(propagated_end) = propagate_kepler(r0, v0, mu, tof) {
         let error = (propagated_end - solution.arrival_pos).norm();
         let arrival_dist = solution.arrival_pos.norm();
@@ -568,22 +576,9 @@ fn spawn_preview_arc(
     solution: &TransferSolution,
 ) -> Entity {
     let mut gizmo = GizmoAsset::new();
-    let tof = solution.time_of_flight;
-    let step_dt = tof / TRANSFER_ARC_SEGMENTS as f64;
 
-    let mut points = Vec::with_capacity(TRANSFER_ARC_SEGMENTS + 1);
-    points.push(phys_to_visual(solution.departure_pos));
-
-    let r0 = solution.departure_pos;
-    let v0 = solution.departure_vel;
-
-    for i in 1..TRANSFER_ARC_SEGMENTS {
-        let t = i as f64 * step_dt;
-        if let Some(r_vec) = propagate_kepler(r0, v0, MU_SUN, t) {
-            points.push(phys_to_visual(r_vec));
-        }
-    }
-    points.push(phys_to_visual(solution.arrival_pos));
+    // Generate arc points using shared helper
+    let points = generate_arc_points(solution, MU_SUN, TRANSFER_ARC_SEGMENTS);
     gizmo.linestrip(points, PREVIEW_TRANSFER_COLOR);
 
     commands.spawn((
