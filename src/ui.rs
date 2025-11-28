@@ -8,7 +8,7 @@ use crate::simulation::SimulationTime;
 use crate::transfer_vis::{ActiveTransfer, Transfer, TransferCache, find_best_transfer_in_range};
 use crate::transfer::TransferSolution;
 use crate::orbital_data::Body;
-use crate::{ComputedBody, TransferPopup, CurrentBody};
+use crate::{ComputedBody, TransferPopup};
 
 /// Links a UI label to its body entity
 #[derive(Component)]
@@ -545,7 +545,7 @@ pub fn handle_popup_spawn(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    ships: Query<&crate::ship::Ship>,
+    player_query: Query<&crate::ship::Ship, With<crate::ship::PlayerControlled>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Check if we need to spawn a popup
@@ -577,8 +577,8 @@ pub fn handle_popup_spawn(
         }
     };
 
-    // Get available delta-v from ship
-    let available_dv = ships.iter().next().map(|s| s.delta_v_remaining).unwrap_or(0.0);
+    // Get available delta-v from player ship
+    let available_dv = player_query.single().map(|s| s.delta_v_remaining).unwrap_or(0.0);
 
     // Build transfer options
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
@@ -645,7 +645,7 @@ pub fn update_popup_options(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    ships: Query<&crate::ship::Ship>,
+    player_query: Query<&crate::ship::Ship, With<crate::ship::PlayerControlled>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only process if popup is open
@@ -677,8 +677,8 @@ pub fn update_popup_options(
         Err(_) => return,
     };
 
-    // Get available delta-v from ship
-    let available_dv = ships.iter().next().map(|s| s.delta_v_remaining).unwrap_or(0.0);
+    // Get available delta-v from player ship
+    let available_dv = player_query.single().map(|s| s.delta_v_remaining).unwrap_or(0.0);
 
     // Rebuild options
     let options = build_transfer_options(&cache, &target_body.name, current_day);
@@ -766,9 +766,7 @@ pub fn handle_option_selection(
     mut popup: ResMut<TransferPopup>,
     mut active_transfer: ResMut<ActiveTransfer>,
     mut scheduled_transfers: ResMut<crate::ship::ScheduledTransfers>,
-    current_body: Option<Res<CurrentBody>>,
-    bodies: Query<(Entity, &Body)>,
-    ships: Query<(Entity, &crate::ship::Ship)>,
+    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState), With<crate::ship::PlayerControlled>>,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
     // For despawning old transfer
@@ -790,24 +788,22 @@ pub fn handle_option_selection(
             continue;
         };
 
-        let Some(ref current) = current_body else {
-            warn!("No current body set");
+        // Get player ship and current body
+        let Ok((ship_entity, ship, ship_state)) = player_query.single() else {
+            warn!("No player ship found");
             continue;
         };
 
-        let Some(ref current_name) = current.name else {
-            warn!("CurrentBody has no name (ship in transit?)");
-            continue;
+        let source_entity = match ship_state {
+            crate::ship::ShipState::Orbiting { body } => *body,
+            crate::ship::ShipState::Transferring { .. } => {
+                warn!("Ship is in transit");
+                continue;
+            }
         };
 
         let Some(target_entity) = popup.target_entity else {
             warn!("No target entity set");
-            continue;
-        };
-
-        // Get player ship (assume first ship for now)
-        let Some((ship_entity, ship)) = ships.iter().next() else {
-            warn!("No ship found");
             continue;
         };
 
@@ -827,12 +823,6 @@ pub fn handle_option_selection(
             option.solution.total_dv as i32,
             ship.delta_v_remaining - option.solution.total_dv
         );
-
-        // Find source and target entities
-        let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == *current_name) else {
-            warn!("Source body not found: {}", current_name);
-            continue;
-        };
 
         // Calculate absolute departure day
         let current_day = (sim_time.sim_time / 86400.0).floor() as i32;

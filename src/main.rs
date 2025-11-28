@@ -27,15 +27,6 @@ mod ui;
 // Transfer Planning Resources
 // ============================================================================
 
-/// Which body the player is currently "at" for transfer planning.
-/// Transfers are computed FROM this body to clicked targets.
-/// None during transit between bodies.
-#[derive(Resource, Default)]
-pub struct CurrentBody {
-    pub entity: Option<Entity>,
-    pub name: Option<String>,
-}
-
 /// Transfer popup state - tracks if a popup is open and for which target.
 #[derive(Resource, Default)]
 pub struct TransferPopup {
@@ -206,20 +197,15 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         }
     }
 
-    // Initialize CurrentBody resource (start at Earth)
-    if let Some(entity) = earth_entity {
-        commands.insert_resource(CurrentBody {
-            entity: Some(entity),
-            name: Some("Earth".to_string()),
-        });
-
-        // Spawn player ship at Earth with 50 km/s delta-v
+    // Spawn player ship at Earth with 50 km/s delta-v
+    if let Some(earth) = earth_entity {
         commands.spawn((
             ship::Ship {
                 delta_v_remaining: 50_000.0, // 50 km/s
                 name: "Player Ship".to_string(),
             },
-            ship::ShipState::Orbiting { body: entity },
+            ship::ShipState::Orbiting { body: earth },
+            ship::PlayerControlled,
         ));
     }
 
@@ -459,14 +445,14 @@ fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
 // ============================================================================
 
 /// Detects clicks on bodies and opens transfer popup for valid targets.
-/// Only bodies with the same parent as CurrentBody are valid targets.
-/// Disabled when CurrentBody is None (ship in transit).
+/// Only bodies with the same parent as the player's current body are valid targets.
+/// Disabled when ship is in transit.
 fn handle_body_click(
     mouse_button: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     body_query: Query<(Entity, &Body, &ComputedBody)>,
-    current_body: Option<Res<CurrentBody>>,
+    player_query: Query<&ship::ShipState, With<ship::PlayerControlled>>,
     mut popup: ResMut<TransferPopup>,
 ) {
     // Only process left clicks
@@ -481,9 +467,12 @@ fn handle_body_click(
     // Get camera for world projection
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
 
-    // Get current body - if None, ship is in transit, disable clicks
-    let Some(ref current) = current_body else { return };
-    let Some(current_entity) = current.entity else { return }; // Ship in transit
+    // Get player's current body - if transferring, disable clicks
+    let Ok(player_state) = player_query.single() else { return };
+    let current_entity = match player_state {
+        ship::ShipState::Orbiting { body } => *body,
+        ship::ShipState::Transferring { .. } => return, // Ship in transit
+    };
 
     let current_parent = body_query
         .iter()

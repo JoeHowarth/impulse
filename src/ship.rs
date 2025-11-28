@@ -7,13 +7,18 @@ use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
 
 use crate::transfer::{TransferSolution, propagate_kepler_full};
-use crate::orbital_data::MU_SUN;
+use crate::orbital_data::{Body, MU_SUN};
 use crate::phys_to_visual;
 use crate::ComputedBody;
 
 // ============================================================================
 // Components
 // ============================================================================
+
+/// Marker for the player-controlled ship.
+/// Systems use this to find the ship whose state determines valid click targets, etc.
+#[derive(Component)]
+pub struct PlayerControlled;
 
 /// A ship that can travel between celestial bodies.
 #[derive(Component)]
@@ -70,7 +75,6 @@ pub struct ScheduledTransfer {
 pub fn execute_scheduled_transfers(
     mut scheduled: ResMut<ScheduledTransfers>,
     mut ships: Query<(&mut Ship, &mut ShipState)>,
-    mut current_body: ResMut<crate::CurrentBody>,
     sim_time: Res<crate::simulation::SimulationTime>,
 ) {
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
@@ -96,10 +100,6 @@ pub fn execute_scheduled_transfers(
                     arrival_time,
                     target: transfer.target,
                 };
-
-                // Clear CurrentBody during transit
-                current_body.entity = None;
-                current_body.name = None;
             }
             false // Remove from scheduled
         } else {
@@ -112,8 +112,7 @@ pub fn execute_scheduled_transfers(
 /// Deducts arrival delta-v and transitions ship to Orbiting state.
 pub fn check_ship_arrival(
     mut ships: Query<(&mut Ship, &mut ShipState)>,
-    bodies: Query<&crate::orbital_data::Body>,
-    mut current_body: ResMut<crate::CurrentBody>,
+    bodies: Query<&Body>,
     sim_time: Res<crate::simulation::SimulationTime>,
 ) {
     for (mut ship, mut state) in &mut ships {
@@ -130,7 +129,7 @@ pub fn check_ship_arrival(
                 let arrival_dv = solution.arrival_dv.norm();
                 ship.delta_v_remaining -= arrival_dv;
 
-                // Get target body name
+                // Get target body name for logging
                 let target_name = bodies
                     .get(target)
                     .map(|b| b.name.clone())
@@ -143,10 +142,6 @@ pub fn check_ship_arrival(
 
                 // Transition to orbiting
                 *state = ShipState::Orbiting { body: target };
-
-                // Update CurrentBody
-                current_body.entity = Some(target);
-                current_body.name = Some(target_name);
             }
         }
     }
@@ -156,16 +151,12 @@ pub fn check_ship_arrival(
 /// cancel the transfer and refund the delta-v.
 pub fn handle_time_reversal(
     mut ships: Query<(&mut Ship, &mut ShipState)>,
-    _bodies: Query<&crate::orbital_data::Body>,
-    mut current_body: ResMut<crate::CurrentBody>,
     sim_time: Res<crate::simulation::SimulationTime>,
 ) {
     for (mut ship, mut state) in &mut ships {
         // Check if we're transferring and time went backward past departure
         let revert_info = if let ShipState::Transferring { solution, departure_time, .. } = &*state {
             if sim_time.sim_time < *departure_time {
-                // Find the source body (we need to store this or compute from solution)
-                // For now, we'll just refund the delta-v and mark as needing revert
                 Some(solution.departure_dv.norm())
             } else {
                 None
@@ -183,16 +174,11 @@ pub fn handle_time_reversal(
                 ship.name, departure_dv
             );
 
-            // We need to know the source body - for now, default to clearing state
-            // This is a limitation - ideally we'd store the source in the transfer state
-            // For single-ship case, we can look at what body the transfer was from
+            // TODO: This is a limitation - we don't know the source body.
+            // Will be fixed when Transfer component stores source entity.
             *state = ShipState::Orbiting {
                 body: Entity::PLACEHOLDER,
             };
-
-            // Clear CurrentBody (player will need to click a body to re-establish)
-            current_body.entity = None;
-            current_body.name = None;
         }
     }
 }

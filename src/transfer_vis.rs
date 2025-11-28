@@ -150,31 +150,39 @@ fn compute_cached_transfer(
 }
 
 /// Populates the transfer cache with all solutions in the search window.
-/// Computes transfers from CurrentBody to all siblings (same parent).
+/// Computes transfers from player's current body to all siblings (same parent).
 pub fn init_transfer_cache(
-    bodies: Query<&Body>,
+    bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
-    current_body: Option<Res<crate::CurrentBody>>,
+    player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
     mut cache: ResMut<TransferCache>,
 ) {
-    let Some(ref current) = current_body else {
-        warn!("CurrentBody not set, cannot initialize transfer cache");
+    // Get player's current body
+    let Ok(player_state) = player_query.single() else {
+        warn!("No player ship found, cannot initialize transfer cache");
         return;
     };
 
-    let Some(ref current_name) = current.name else {
-        warn!("CurrentBody has no name (ship in transit?)");
-        return;
+    let current_entity = match player_state {
+        crate::ship::ShipState::Orbiting { body } => *body,
+        crate::ship::ShipState::Transferring { .. } => {
+            warn!("Ship in transit, cannot initialize transfer cache");
+            return;
+        }
     };
 
-    let Some(source_body) = bodies.iter().find(|b| b.name == *current_name) else {
-        warn!("Source body '{}' not found", current_name);
+    // Get source body by entity
+    let Some(source_body) = bodies.iter()
+        .find(|(e, _)| *e == current_entity)
+        .map(|(_, b)| b) else {
+        warn!("Source body entity not found");
         return;
     };
 
     // Find all siblings (bodies with the same parent)
     let siblings: Vec<&Body> = bodies
         .iter()
+        .map(|(_, b)| b)
         .filter(|b| b.parent_name == source_body.parent_name && b.name != source_body.name)
         .collect();
 
@@ -213,26 +221,31 @@ pub fn init_transfer_cache(
 
 /// Spawns the initial transfer visualization from the cache.
 /// Shows the best transfer to Mars (default target for initial display).
+/// NOTE: This function is dead code and will be removed in Phase 3.
+#[allow(dead_code)]
 pub fn spawn_initial_transfer(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
     cache: Res<TransferCache>,
-    current_body: Option<Res<crate::CurrentBody>>,
+    player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
     mut active_transfer: ResMut<ActiveTransfer>,
 ) {
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
-    // Get current body for source entity
-    let Some(ref current) = current_body else {
-        warn!("CurrentBody not set");
+    // Get player's current body
+    let Ok(player_state) = player_query.single() else {
+        warn!("No player ship found");
         return;
     };
 
-    let Some(ref current_name) = current.name else {
-        warn!("CurrentBody has no name (ship in transit?)");
-        return;
+    let source_entity = match player_state {
+        crate::ship::ShipState::Orbiting { body } => *body,
+        crate::ship::ShipState::Transferring { .. } => {
+            warn!("Ship in transit");
+            return;
+        }
     };
 
     // Find best solution to Mars (default target)
@@ -248,10 +261,7 @@ pub fn spawn_initial_transfer(
         target_name, dep_day, tof_days, solution.total_dv, dep_day + tof_days
     );
 
-    // Find source and target entities
-    let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == *current_name) else {
-        return;
-    };
+    // Find target entity
     let Some((target_entity, _)) = bodies.iter().find(|(_, b)| b.name == target_name) else {
         return;
     };
@@ -516,20 +526,32 @@ pub fn render_burn_arrows(
 /// - Prunes old solutions (departure day < current day)
 /// - Adds new solutions at the far end of the window
 pub fn update_transfer_cache(
-    bodies: Query<&Body>,
+    bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
-    current_body: Option<Res<crate::CurrentBody>>,
+    player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
     mut cache: ResMut<TransferCache>,
 ) {
-    let Some(ref current) = current_body else {
+    // Get player's current body
+    let Ok(player_state) = player_query.single() else {
         return;
     };
 
-    let Some(ref current_name) = current.name else {
-        // Ship in transit - don't update cache
+    let current_entity = match player_state {
+        crate::ship::ShipState::Orbiting { body } => *body,
+        crate::ship::ShipState::Transferring { .. } => {
+            // Ship in transit - don't update cache
+            return;
+        }
+    };
+
+    // Get source body by entity
+    let Some(source_body) = bodies.iter()
+        .find(|(e, _)| *e == current_entity)
+        .map(|(_, b)| b) else {
         return;
     };
 
+    let current_name = &source_body.name;
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
     // Check if source body changed -> need full rebuild
@@ -541,15 +563,10 @@ pub fn update_transfer_cache(
         cache.last_update_day = current_day;
         cache.window_days = SEARCH_WINDOW_DAYS;
 
-        // Find source body
-        let Some(source_body) = bodies.iter().find(|b| b.name == *current_name) else {
-            warn!("Source body '{}' not found", current_name);
-            return;
-        };
-
         // Find all siblings (bodies with the same parent)
         let siblings: Vec<&Body> = bodies
             .iter()
+            .map(|(_, b)| b)
             .filter(|b| b.parent_name == source_body.parent_name && b.name != source_body.name)
             .collect();
 
@@ -584,13 +601,10 @@ pub fn update_transfer_cache(
         return;
     }
 
-    let Some(source_body) = bodies.iter().find(|b| b.name == *current_name) else {
-        return;
-    };
-
     // Find all siblings (same parent as source)
     let siblings: Vec<&Body> = bodies
         .iter()
+        .map(|(_, b)| b)
         .filter(|b| b.parent_name == source_body.parent_name && b.name != source_body.name)
         .collect();
 
@@ -681,7 +695,7 @@ pub fn update_transfer_visualization(
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
-    current_body: Option<Res<crate::CurrentBody>>,
+    player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
     popup: Res<crate::TransferPopup>,
     mut active_transfer: ResMut<ActiveTransfer>,
     preview_arcs: Query<Entity, With<PreviewTransferArc>>,
@@ -690,13 +704,17 @@ pub fn update_transfer_visualization(
     transfers: Query<Entity, With<Transfer>>,
     markers: Query<Entity, With<BurnMarker>>,
 ) {
-    let Some(ref current) = current_body else {
+    // Get player's current body
+    let Ok(player_state) = player_query.single() else {
         return;
     };
 
-    let Some(ref current_name) = current.name else {
-        // Ship in transit - don't update visualization
-        return;
+    let source_entity = match player_state {
+        crate::ship::ShipState::Orbiting { body } => *body,
+        crate::ship::ShipState::Transferring { .. } => {
+            // Ship in transit - don't update visualization
+            return;
+        }
     };
 
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
@@ -726,49 +744,47 @@ pub fn update_transfer_visualization(
 
     // If we have preview data, spawn a preview arc
     if let Some((target_name, solution, dep_day)) = preview_data {
-        // Find source and target entities
-        if let Some((source_entity, _)) = bodies.iter().find(|(_, b)| b.name == *current_name) {
-            if let Some((target_entity, _)) = bodies.iter().find(|(_, b)| b.name == target_name) {
-                // Check if this is different from the selected transfer (if any)
-                let should_show_preview = if active_transfer.user_selected {
-                    // Always show preview when user has a selection (it's a different target or option)
-                    true
-                } else {
-                    // No user selection - this becomes the primary visualization
-                    // Despawn any existing non-preview transfer and related entities
-                    for entity in transfers.iter() {
-                        commands.entity(entity).despawn();
-                    }
-                    for entity in non_preview_arcs.iter() {
-                        commands.entity(entity).despawn();
-                    }
-                    for entity in markers.iter() {
-                        commands.entity(entity).despawn();
-                    }
-                    active_transfer.entity = None;
-                    false
-                };
-
-                if should_show_preview {
-                    // Spawn preview arc (dimmer color, no burn markers)
-                    let preview_entity = spawn_preview_arc(
-                        &mut commands,
-                        &mut gizmo_assets,
-                        solution,
-                    );
-                    active_transfer.preview_entity = Some(preview_entity);
-                } else {
-                    // Spawn as primary transfer (full color with burn markers)
-                    let transfer_entity = spawn_transfer_visualization(
-                        &mut commands,
-                        &mut gizmo_assets,
-                        source_entity,
-                        target_entity,
-                        solution,
-                        dep_day as f64 * 86400.0,
-                    );
-                    active_transfer.entity = Some(transfer_entity);
+        // Find target entity
+        if let Some((target_entity, _)) = bodies.iter().find(|(_, b)| b.name == target_name) {
+            // Check if this is different from the selected transfer (if any)
+            let should_show_preview = if active_transfer.user_selected {
+                // Always show preview when user has a selection (it's a different target or option)
+                true
+            } else {
+                // No user selection - this becomes the primary visualization
+                // Despawn any existing non-preview transfer and related entities
+                for entity in transfers.iter() {
+                    commands.entity(entity).despawn();
                 }
+                for entity in non_preview_arcs.iter() {
+                    commands.entity(entity).despawn();
+                }
+                for entity in markers.iter() {
+                    commands.entity(entity).despawn();
+                }
+                active_transfer.entity = None;
+                false
+            };
+
+            if should_show_preview {
+                // Spawn preview arc (dimmer color, no burn markers)
+                let preview_entity = spawn_preview_arc(
+                    &mut commands,
+                    &mut gizmo_assets,
+                    solution,
+                );
+                active_transfer.preview_entity = Some(preview_entity);
+            } else {
+                // Spawn as primary transfer (full color with burn markers)
+                let transfer_entity = spawn_transfer_visualization(
+                    &mut commands,
+                    &mut gizmo_assets,
+                    source_entity,
+                    target_entity,
+                    solution,
+                    dep_day as f64 * 86400.0,
+                );
+                active_transfer.entity = Some(transfer_entity);
             }
         }
     } else if !active_transfer.user_selected {
