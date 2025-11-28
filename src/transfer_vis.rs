@@ -58,11 +58,7 @@ pub struct Transfer {
 
 /// Marker for the transfer arc gizmo entity.
 #[derive(Component)]
-pub struct TransferArc {
-    /// Parent transfer entity (used for future arc updates)
-    #[allow(dead_code)]
-    pub transfer: Entity,
-}
+pub struct TransferArc;
 
 /// Marker for burn visualization points.
 #[derive(Component)]
@@ -254,27 +250,31 @@ pub fn spawn_transfer_visualization(
         })
         .id();
 
-    // Spawn the arc gizmo
-    commands.spawn((
+    // Spawn the arc gizmo as a child of the transfer
+    let arc_entity = commands.spawn((
         Gizmo {
             handle: gizmo_assets.add(arc_asset),
             depth_bias: 0.05,
             ..default()
         },
-        TransferArc { transfer: transfer_entity },
-    ));
+        TransferArc,
+    )).id();
 
-    // Spawn burn markers
-    commands.spawn(BurnMarker {
+    // Spawn burn markers as children of the transfer
+    let departure_marker = commands.spawn(BurnMarker {
         transfer: transfer_entity,
         is_departure: true,
         delta_v: solution.departure_dv,
-    });
-    commands.spawn(BurnMarker {
+    }).id();
+
+    let arrival_marker = commands.spawn(BurnMarker {
         transfer: transfer_entity,
         is_departure: false,
         delta_v: solution.arrival_dv,
-    });
+    }).id();
+
+    // Set up parent-child relationships
+    commands.entity(transfer_entity).add_children(&[arc_entity, departure_marker, arrival_marker]);
 
     transfer_entity
 }
@@ -521,8 +521,6 @@ pub fn update_transfer_cache(
 pub fn check_transfer_expiration(
     mut commands: Commands,
     transfers: Query<(Entity, &Transfer)>,
-    arcs: Query<(Entity, &TransferArc)>,
-    markers: Query<(Entity, &BurnMarker)>,
     sim_time: Res<SimulationTime>,
 ) {
     for (transfer_entity, transfer) in transfers.iter() {
@@ -535,20 +533,8 @@ pub fn check_transfer_expiration(
                 (sim_time.sim_time / 86400.0).floor() as i32
             );
 
-            // Despawn the transfer entity
+            // Despawn the transfer entity and all children (arc and burn markers)
             commands.entity(transfer_entity).despawn();
-
-            // Despawn associated arc and burn markers
-            for (arc_entity, arc) in arcs.iter() {
-                if arc.transfer == transfer_entity {
-                    commands.entity(arc_entity).despawn();
-                }
-            }
-            for (marker_entity, marker) in markers.iter() {
-                if marker.transfer == transfer_entity {
-                    commands.entity(marker_entity).despawn();
-                }
-            }
         }
     }
 }
