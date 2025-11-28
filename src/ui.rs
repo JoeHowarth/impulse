@@ -5,7 +5,7 @@ use bevy::asset::Assets;
 use bevy::gizmos::GizmoAsset;
 
 use crate::simulation::SimulationTime;
-use crate::transfer_vis::{ActiveTransfer, Transfer, TransferCache, find_best_transfer_in_range};
+use crate::transfer_vis::{Transfer, TransferCache, find_best_transfer_in_range};
 use crate::transfer::TransferSolution;
 use crate::orbital_data::Body;
 use crate::{ComputedBody, TransferPopup};
@@ -235,53 +235,58 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
 
 /// Updates the transfer info panel with current transfer data and ship status.
 pub fn update_transfer_panel(
-    active_transfer: Res<ActiveTransfer>,
     transfers: Query<&Transfer>,
     bodies: Query<&Body>,
-    ships: Query<(&crate::ship::Ship, &crate::ship::ShipState)>,
-    scheduled_transfers: Res<crate::ship::ScheduledTransfers>,
+    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState), With<crate::ship::PlayerControlled>>,
     sim_time: Res<SimulationTime>,
     mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<TransferTitleText>, Without<TransferStatsText>)>,
     mut title_query: Query<&mut Text, (With<TransferTitleText>, Without<ShipStatusText>, Without<TransferStatsText>)>,
     mut stats_query: Query<&mut Text, (With<TransferStatsText>, Without<TransferTitleText>, Without<ShipStatusText>)>,
 ) {
     // Update ship status
-    if let Some((ship, state)) = ships.iter().next() {
-        let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+    let Ok((ship_entity, ship, state)) = player_query.single() else {
+        return;
+    };
 
-        let location = match state {
-            crate::ship::ShipState::Orbiting { body } => {
-                bodies.get(*body).map(|b| b.name.as_str()).unwrap_or("???").to_string()
-            }
-            crate::ship::ShipState::Transferring { target, arrival_time, .. } => {
-                let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("???");
-                let arrival_day = (*arrival_time / 86400.0).floor() as i32;
-                let days_to_arrival = arrival_day - current_day;
-                format!("-> {} ({} days)", target_name, days_to_arrival)
-            }
-        };
+    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
-        // Check for scheduled transfer
-        let scheduled_info = if let Some(scheduled) = scheduled_transfers.transfers.first() {
-            let days_to_departure = scheduled.departure_day - current_day;
-            let target_name = bodies.get(scheduled.target).map(|b| b.name.as_str()).unwrap_or("???");
-            format!(" | Dep to {} in {}d", target_name, days_to_departure)
-        } else {
-            String::new()
-        };
-
-        if let Ok(mut text) = ship_query.single_mut() {
-            **text = format!(
-                "Ship: {} | {:.0} m/s{}",
-                location,
-                ship.delta_v_remaining,
-                scheduled_info
-            );
+    let location = match state {
+        crate::ship::ShipState::Orbiting { body } => {
+            bodies.get(*body).map(|b| b.name.as_str()).unwrap_or("???").to_string()
         }
+        crate::ship::ShipState::Transferring { target, arrival_time, .. } => {
+            let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("???");
+            let arrival_day = (*arrival_time / 86400.0).floor() as i32;
+            let days_to_arrival = arrival_day - current_day;
+            format!("-> {} ({} days)", target_name, days_to_arrival)
+        }
+    };
+
+    // Check for pending transfer (Transfer entity where departure hasn't happened yet)
+    let scheduled_info = transfers.iter()
+        .find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time)
+        .map(|t| {
+            let dep_day = (t.departure_time / 86400.0).floor() as i32;
+            let days_to_departure = dep_day - current_day;
+            let target_name = bodies.get(t.target).map(|b| b.name.as_str()).unwrap_or("???");
+            format!(" | Dep to {} in {}d", target_name, days_to_departure)
+        })
+        .unwrap_or_default();
+
+    if let Ok(mut text) = ship_query.single_mut() {
+        **text = format!(
+            "Ship: {} | {:.0} m/s{}",
+            location,
+            ship.delta_v_remaining,
+            scheduled_info
+        );
     }
 
+    // Find the player's active transfer (if any)
+    let player_transfer = transfers.iter().find(|t| t.ship == ship_entity);
+
     // Update transfer info
-    let Some(transfer_entity) = active_transfer.entity else {
+    let Some(transfer) = player_transfer else {
         // No active transfer
         if let Ok(mut title) = title_query.single_mut() {
             **title = "No Transfer".to_string();
@@ -289,10 +294,6 @@ pub fn update_transfer_panel(
         if let Ok(mut stats) = stats_query.single_mut() {
             **stats = String::new();
         }
-        return;
-    };
-
-    let Ok(transfer) = transfers.get(transfer_entity) else {
         return;
     };
 
@@ -764,8 +765,6 @@ pub fn handle_option_selection(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     mut popup: ResMut<TransferPopup>,
-    mut active_transfer: ResMut<ActiveTransfer>,
-    mut scheduled_transfers: ResMut<crate::ship::ScheduledTransfers>,
     player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState), With<crate::ship::PlayerControlled>>,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
@@ -774,9 +773,6 @@ pub fn handle_option_selection(
     old_arcs: Query<Entity, With<crate::transfer_vis::TransferArc>>,
     old_markers: Query<Entity, With<crate::transfer_vis::BurnMarker>>,
 ) {
-    use bevy::gizmos::GizmoAsset;
-    use crate::transfer_vis::{Transfer, TransferArc, BurnMarker};
-
     for (interaction, button) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
@@ -824,18 +820,10 @@ pub fn handle_option_selection(
             ship.delta_v_remaining - option.solution.total_dv
         );
 
-        // Calculate absolute departure day
+        // Calculate departure time
         let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
         let departure_day = current_day + option.departure_day;
         let departure_time = departure_day as f64 * 86400.0;
-
-        // Schedule the transfer (delta-v deducted when it executes)
-        scheduled_transfers.transfers.push(crate::ship::ScheduledTransfer {
-            ship: ship_entity,
-            target: target_entity,
-            solution: option.solution.clone(),
-            departure_day,
-        });
 
         // Despawn old transfer entities
         for entity in old_transfers.iter() {
@@ -849,7 +837,7 @@ pub fn handle_option_selection(
         }
 
         // Spawn the new transfer visualization
-        let transfer_entity = spawn_transfer_from_solution(
+        spawn_transfer_from_solution(
             &mut commands,
             &mut gizmo_assets,
             ship_entity,
@@ -858,9 +846,6 @@ pub fn handle_option_selection(
             &option.solution,
             departure_time,
         );
-
-        active_transfer.entity = Some(transfer_entity);
-        active_transfer.user_selected = true; // Prevent auto-update from overwriting
 
         // Close the popup
         despawn_transfer_popup(&mut commands, &mut popup);

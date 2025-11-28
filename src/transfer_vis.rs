@@ -79,16 +79,6 @@ pub struct BurnMarker {
 // Resources
 // ============================================================================
 
-/// Currently active transfer for UI display.
-#[derive(Resource, Default)]
-pub struct ActiveTransfer {
-    pub entity: Option<Entity>,
-    /// If true, the user manually selected this transfer via popup.
-    /// Auto-update will not overwrite user selections.
-    pub user_selected: bool,
-    /// Preview transfer entity (shown when hovering, dimmer color)
-    pub preview_entity: Option<Entity>,
-}
 
 /// Marker for preview transfer arc (dimmer color, shown during hover)
 #[derive(Component)]
@@ -221,106 +211,6 @@ pub fn init_transfer_cache(
     );
 }
 
-/// Spawns the initial transfer visualization from the cache.
-/// Shows the best transfer to Mars (default target for initial display).
-/// NOTE: This function is dead code and will be removed in Phase 3.
-#[allow(dead_code)]
-pub fn spawn_initial_transfer(
-    mut commands: Commands,
-    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
-    bodies: Query<(Entity, &Body)>,
-    sim_time: Res<SimulationTime>,
-    cache: Res<TransferCache>,
-    player_query: Query<(Entity, &crate::ship::ShipState), With<crate::ship::PlayerControlled>>,
-    mut active_transfer: ResMut<ActiveTransfer>,
-) {
-    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-
-    // Get player ship and current body
-    let Ok((ship_entity, player_state)) = player_query.single() else {
-        warn!("No player ship found");
-        return;
-    };
-
-    let source_entity = match player_state {
-        crate::ship::ShipState::Orbiting { body } => *body,
-        crate::ship::ShipState::Transferring { .. } => {
-            warn!("Ship in transit");
-            return;
-        }
-    };
-
-    // Find best solution to Mars (default target)
-    let best = find_best_transfer_today(&cache, current_day, Some("Mars"));
-    let Some((key, solution)) = best else {
-        warn!("No valid transfer found in cache for Mars");
-        return;
-    };
-
-    let (target_name, dep_day, tof_days) = key;
-    info!(
-        "Best transfer to {}: dep_day={} tof={}d dv={:.0} m/s (arr_day={})",
-        target_name, dep_day, tof_days, solution.total_dv, dep_day + tof_days
-    );
-
-    // Find target entity
-    let Some((target_entity, _)) = bodies.iter().find(|(_, b)| b.name == target_name) else {
-        return;
-    };
-
-    // Spawn the visualization
-    let transfer_entity = spawn_transfer_visualization(
-        &mut commands,
-        &mut gizmo_assets,
-        ship_entity,
-        source_entity,
-        target_entity,
-        solution,
-        dep_day as f64 * 86400.0,
-    );
-
-    active_transfer.entity = Some(transfer_entity);
-}
-
-/// Finds the best (lowest delta-v) transfer departing on the current day.
-/// Falls back to the nearest future day if no solutions exist for today.
-/// If target_name is provided, only considers transfers to that target.
-fn find_best_transfer_today<'a>(
-    cache: &'a TransferCache,
-    current_day: i32,
-    target_name: Option<&str>,
-) -> Option<(CacheKey, &'a TransferSolution)> {
-    // Filter by target if specified
-    let filter_target = |key: &&(String, i32, i32)| {
-        target_name.map_or(true, |t| key.0 == t)
-    };
-
-    // First, try to find a solution departing today
-    let today_best = cache
-        .solutions
-        .iter()
-        .filter(|(key, _)| filter_target(&key) && key.1 == current_day)
-        .min_by(|(_, a), (_, b)| a.total_dv.partial_cmp(&b.total_dv).unwrap());
-
-    if let Some((k, v)) = today_best {
-        return Some((k.clone(), v));
-    }
-
-    // Fall back to the earliest future day that has solutions
-    let min_future_day = cache
-        .solutions
-        .keys()
-        .filter(|key| filter_target(&key) && key.1 > current_day)
-        .map(|key| key.1)
-        .min()?;
-
-    cache
-        .solutions
-        .iter()
-        .filter(|(key, _)| filter_target(&key) && key.1 == min_future_day)
-        .min_by(|(_, a), (_, b)| a.total_dv.partial_cmp(&b.total_dv).unwrap())
-        .map(|(k, v)| (k.clone(), v))
-}
 
 /// Finds the best (lowest delta-v) transfer in a day range for a specific target.
 /// Returns (departure_day, solution).
@@ -338,26 +228,6 @@ pub fn find_best_transfer_in_range<'a>(
         })
         .min_by(|(_, a), (_, b)| a.total_dv.partial_cmp(&b.total_dv).unwrap())
         .map(|((_, dep_day, _), sol)| (*dep_day, sol))
-}
-
-/// Finds the best (lowest delta-v) transfer in the entire future window.
-/// Useful for showing the optimal launch window.
-#[allow(dead_code)]
-fn find_best_transfer_in_window<'a>(
-    cache: &'a TransferCache,
-    current_day: i32,
-    target_name: Option<&str>,
-) -> Option<(CacheKey, &'a TransferSolution)> {
-    let filter_target = |key: &&(String, i32, i32)| {
-        target_name.map_or(true, |t| key.0 == t)
-    };
-
-    cache
-        .solutions
-        .iter()
-        .filter(|(key, _)| filter_target(&key) && key.1 >= current_day)
-        .min_by(|(_, a), (_, b)| a.total_dv.partial_cmp(&b.total_dv).unwrap())
-        .map(|(k, v)| (k.clone(), v))
 }
 
 /// Spawns the transfer visualization entities and returns the transfer entity.
@@ -646,49 +516,40 @@ pub fn update_transfer_cache(
     cache.last_update_day = current_day;
 }
 
-/// Checks if the active transfer has been completed (arrival time passed) and despawns it.
+/// Checks if any transfers have been completed (arrival time passed) and despawns them.
 /// The arc stays visible during the entire transfer so the player can see the path.
 pub fn check_transfer_expiration(
     mut commands: Commands,
-    mut active_transfer: ResMut<ActiveTransfer>,
-    transfers: Query<&Transfer>,
+    transfers: Query<(Entity, &Transfer)>,
+    arcs: Query<(Entity, &TransferArc)>,
+    markers: Query<(Entity, &BurnMarker)>,
     sim_time: Res<SimulationTime>,
-    old_transfers: Query<Entity, With<Transfer>>,
-    old_arcs: Query<Entity, With<TransferArc>>,
-    old_markers: Query<Entity, With<BurnMarker>>,
 ) {
-    let Some(transfer_entity) = active_transfer.entity else {
-        return;
-    };
+    for (transfer_entity, transfer) in transfers.iter() {
+        // Check if arrival time has passed (departure + TOF)
+        let arrival_time = transfer.departure_time + transfer.solution.time_of_flight;
+        if sim_time.sim_time > arrival_time {
+            info!(
+                "Transfer completed: arrival was at day {}, current day is {}",
+                (arrival_time / 86400.0).floor() as i32,
+                (sim_time.sim_time / 86400.0).floor() as i32
+            );
 
-    let Ok(transfer) = transfers.get(transfer_entity) else {
-        // Transfer entity no longer exists, clear the reference
-        active_transfer.entity = None;
-        return;
-    };
+            // Despawn the transfer entity
+            commands.entity(transfer_entity).despawn();
 
-    // Check if arrival time has passed (departure + TOF)
-    let arrival_time = transfer.departure_time + transfer.solution.time_of_flight;
-    if sim_time.sim_time > arrival_time {
-        info!(
-            "Transfer completed: arrival was at day {}, current day is {}",
-            (arrival_time / 86400.0).floor() as i32,
-            (sim_time.sim_time / 86400.0).floor() as i32
-        );
-
-        // Despawn all transfer-related entities
-        for entity in old_transfers.iter() {
-            commands.entity(entity).despawn();
+            // Despawn associated arc and burn markers
+            for (arc_entity, arc) in arcs.iter() {
+                if arc.transfer == transfer_entity {
+                    commands.entity(arc_entity).despawn();
+                }
+            }
+            for (marker_entity, marker) in markers.iter() {
+                if marker.transfer == transfer_entity {
+                    commands.entity(marker_entity).despawn();
+                }
+            }
         }
-        for entity in old_arcs.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in old_markers.iter() {
-            commands.entity(entity).despawn();
-        }
-
-        active_transfer.entity = None;
-        active_transfer.user_selected = false; // Allow auto-update again
     }
 }
 

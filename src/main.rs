@@ -102,10 +102,8 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(LogDiagnosticsPlugin::default())
         .insert_resource(SimulationTime::from_start_day(start_day))
-        .init_resource::<transfer_vis::ActiveTransfer>()
         .init_resource::<transfer_vis::TransferCache>()
         .init_resource::<TransferPopup>()
-        .init_resource::<ship::ScheduledTransfers>()
         .add_systems(
             Startup,
             (

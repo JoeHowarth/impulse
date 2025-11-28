@@ -47,65 +47,52 @@ pub enum ShipState {
 // Resources
 // ============================================================================
 
-/// Scheduled transfers waiting to execute.
-/// When the departure day arrives, the transfer begins automatically.
-#[derive(Resource, Default)]
-pub struct ScheduledTransfers {
-    pub transfers: Vec<ScheduledTransfer>,
-}
-
-/// A single scheduled transfer.
-pub struct ScheduledTransfer {
-    /// The ship entity performing the transfer
-    pub ship: Entity,
-    /// The destination body entity
-    pub target: Entity,
-    /// The computed transfer solution
-    pub solution: TransferSolution,
-    /// Absolute departure day (days since J2000)
-    pub departure_day: i32,
-}
 
 // ============================================================================
 // Systems
 // ============================================================================
 
-/// Executes scheduled transfers when their departure day arrives.
-/// Deducts departure delta-v and transitions ship to Transferring state.
+/// Executes scheduled transfers when their departure time arrives.
+/// Queries Transfer entities and starts any whose departure_time has passed
+/// (if the ship is still Orbiting).
 pub fn execute_scheduled_transfers(
-    mut scheduled: ResMut<ScheduledTransfers>,
+    transfers: Query<&crate::transfer_vis::Transfer>,
     mut ships: Query<(&mut Ship, &mut ShipState)>,
     sim_time: Res<crate::simulation::SimulationTime>,
 ) {
-    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-
-    scheduled.transfers.retain(|transfer| {
-        if current_day >= transfer.departure_day {
-            if let Ok((mut ship, mut state)) = ships.get_mut(transfer.ship) {
-                // Deduct delta-v (departure burn)
-                let departure_dv = transfer.solution.departure_dv.norm();
-                ship.delta_v_remaining -= departure_dv;
-
-                info!(
-                    "Ship '{}' departing! dv spent: {:.0} m/s, remaining: {:.0} m/s",
-                    ship.name, departure_dv, ship.delta_v_remaining
-                );
-
-                // Transition to transferring
-                let departure_time = transfer.departure_day as f64 * 86400.0;
-                let arrival_time = departure_time + transfer.solution.time_of_flight;
-                *state = ShipState::Transferring {
-                    solution: transfer.solution.clone(),
-                    departure_time,
-                    arrival_time,
-                    target: transfer.target,
-                };
-            }
-            false // Remove from scheduled
-        } else {
-            true // Keep in scheduled
+    for transfer in &transfers {
+        // Only execute if departure time has arrived
+        if sim_time.sim_time < transfer.departure_time {
+            continue;
         }
-    });
+
+        // Only execute if ship is still orbiting (not already transferring)
+        let Ok((mut ship, mut state)) = ships.get_mut(transfer.ship) else {
+            continue;
+        };
+
+        if !matches!(*state, ShipState::Orbiting { .. }) {
+            continue;
+        }
+
+        // Deduct delta-v (departure burn)
+        let departure_dv = transfer.solution.departure_dv.norm();
+        ship.delta_v_remaining -= departure_dv;
+
+        info!(
+            "Ship '{}' departing! dv spent: {:.0} m/s, remaining: {:.0} m/s",
+            ship.name, departure_dv, ship.delta_v_remaining
+        );
+
+        // Transition to transferring
+        let arrival_time = transfer.departure_time + transfer.solution.time_of_flight;
+        *state = ShipState::Transferring {
+            solution: transfer.solution.clone(),
+            departure_time: transfer.departure_time,
+            arrival_time,
+            target: transfer.target,
+        };
+    }
 }
 
 /// Checks if transferring ships have arrived at their destination.
@@ -265,12 +252,26 @@ pub fn render_ship(
     }
 }
 
-/// Renders X markers at departure points for scheduled transfers.
+/// Renders X markers at departure points for pending transfers.
 pub fn render_departure_markers(
-    scheduled: Res<ScheduledTransfers>,
+    transfers: Query<&crate::transfer_vis::Transfer>,
+    ships: Query<&ShipState>,
+    sim_time: Res<crate::simulation::SimulationTime>,
     mut painter: ShapePainter,
 ) {
-    for transfer in &scheduled.transfers {
+    for transfer in &transfers {
+        // Only show marker if transfer hasn't started yet
+        if transfer.departure_time <= sim_time.sim_time {
+            continue;
+        }
+
+        // Only show if ship is still orbiting (not already transferring)
+        if let Ok(state) = ships.get(transfer.ship) {
+            if !matches!(state, ShipState::Orbiting { .. }) {
+                continue;
+            }
+        }
+
         // Draw an X at the departure position
         let departure_pos = phys_to_visual(transfer.solution.departure_pos);
 
