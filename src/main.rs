@@ -7,9 +7,11 @@ use bevy::{
     asset::Assets,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     gizmos::{config::{GizmoConfigStore, GizmoLineJoint}, GizmoAsset},
+    input::mouse::MouseButtonInput,
     math::Vec3,
     platform::collections::HashMap,
     prelude::*,
+    window::PrimaryWindow,
 };
 use bevy_pancam::{PanCam, PanCamPlugin};
 use bevy_vector_shapes::prelude::*;
@@ -19,6 +21,31 @@ mod simulation;
 mod transfer;
 mod transfer_vis;
 mod ui;
+
+// ============================================================================
+// Transfer Planning Resources
+// ============================================================================
+
+/// Which body the player is currently "at" for transfer planning.
+/// Transfers are computed FROM this body to clicked targets.
+#[derive(Resource)]
+pub struct CurrentBody {
+    pub entity: Entity,
+    pub name: String,
+}
+
+/// Transfer popup state - tracks if a popup is open and for which target.
+#[derive(Resource, Default)]
+pub struct TransferPopup {
+    pub target_entity: Option<Entity>,
+    pub popup_entity: Option<Entity>,
+    /// Cached options for the currently displayed popup
+    pub options: Vec<ui::TransferOption>,
+    /// Which option index is being hovered (for preview)
+    pub hovered_option: Option<usize>,
+    /// Day when options were last computed (for live updates)
+    pub options_computed_day: i32,
+}
 
 use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
 use simulation::SimulationTime;
@@ -84,13 +111,13 @@ fn main() {
         .insert_resource(SimulationTime::from_start_day(start_day))
         .init_resource::<transfer_vis::ActiveTransfer>()
         .init_resource::<transfer_vis::TransferCache>()
+        .init_resource::<TransferPopup>()
         .add_systems(
             Startup,
             (
                 setup,
                 ApplyDeferred,
                 transfer_vis::init_transfer_cache,
-                transfer_vis::spawn_initial_transfer,
                 configure_gizmos,
             )
                 .chain(),
@@ -100,8 +127,17 @@ fn main() {
             (
                 simulation::handle_time_controls,
                 transfer_vis::update_transfer_cache,
-                transfer_vis::update_transfer_visualization,
+                transfer_vis::check_transfer_expiration,
                 update_body_positions,
+                handle_body_click,
+                ui::handle_popup_spawn,
+                ui::update_popup_options,
+                ui::update_popup_position,
+                ui::handle_close_button,
+                ui::handle_escape_key,
+                ui::handle_option_hover,
+                transfer_vis::update_transfer_visualization,
+                ui::handle_option_selection,
                 update_orbit_positions,
                 render_system,
                 transfer_vis::render_burn_arrows,
@@ -136,9 +172,21 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
 
     // First pass: spawn all bodies and build name -> entity map
     let mut body_entities: HashMap<String, BodyEntity> = HashMap::new();
+    let mut earth_entity: Option<Entity> = None;
     for body in bodies.values() {
         let entity = commands.spawn((body.clone(), ComputedBody::default())).id();
         body_entities.insert(body.name.clone(), entity);
+        if body.name == "Earth" {
+            earth_entity = Some(entity);
+        }
+    }
+
+    // Initialize CurrentBody resource (start at Earth)
+    if let Some(entity) = earth_entity {
+        commands.insert_resource(CurrentBody {
+            entity,
+            name: "Earth".to_string(),
+        });
     }
 
     // Second pass: spawn labels and orbit gizmos (now we can look up parent entities)
@@ -370,5 +418,96 @@ fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
     let log_scaled_size = ((log_radius - 4.0).max(1.0) * 1.5).min(8.0) * cam_scale;
     let phys_radius = (body.radius * VISUAL_SCALE / *AU) as f32;
     log_scaled_size.max(phys_radius)
+}
+
+// ============================================================================
+// Body Click Detection
+// ============================================================================
+
+/// Detects clicks on bodies and opens transfer popup for valid targets.
+/// Only bodies with the same parent as CurrentBody are valid targets.
+fn handle_body_click(
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    body_query: Query<(Entity, &Body, &ComputedBody)>,
+    current_body: Option<Res<CurrentBody>>,
+    mut popup: ResMut<TransferPopup>,
+) {
+    // Only process left clicks
+    if !mouse_button.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    // Get cursor position
+    let Ok(window) = windows.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+
+    // Get camera for world projection
+    let Ok((camera, camera_transform)) = camera_query.single() else { return };
+
+    // Get current body's parent
+    let Some(ref current) = current_body else { return };
+    let current_parent = body_query
+        .iter()
+        .find(|(e, _, _)| *e == current.entity)
+        .and_then(|(_, b, _)| b.parent_name.clone());
+
+    // Find the closest body to the click that:
+    // 1. Is visible
+    // 2. Has the same parent as current body (same SOI)
+    // 3. Is not the current body
+    let mut best_match: Option<(Entity, f32)> = None; // (entity, screen_distance)
+
+    for (entity, body, computed) in body_query.iter() {
+        // Skip invisible bodies
+        if computed.visibility < 0.01 {
+            continue;
+        }
+
+        // Skip current body
+        if entity == current.entity {
+            continue;
+        }
+
+        // Skip bodies with different parent (different SOI)
+        if body.parent_name != current_parent {
+            continue;
+        }
+
+        // Project body position to screen space
+        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position) else {
+            continue;
+        };
+
+        // Check distance from cursor to body center
+        let screen_dist = cursor_pos.distance(screen_pos);
+
+        // Check if click is within the body's display radius (with some tolerance)
+        let click_radius = computed.display_size * 2.0 + 10.0; // Extra tolerance for small bodies
+        if screen_dist <= click_radius {
+            // Track the closest match
+            match &best_match {
+                None => best_match = Some((entity, screen_dist)),
+                Some((_, best_dist)) if screen_dist < *best_dist => {
+                    best_match = Some((entity, screen_dist))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Handle the click
+    if let Some((clicked_entity, _)) = best_match {
+        let body_name = body_query
+            .get(clicked_entity)
+            .map(|(_, b, _)| b.name.clone())
+            .unwrap_or_default();
+
+        info!("Clicked on body: {} (entity {:?})", body_name, clicked_entity);
+
+        // Store for popup (popup spawning will be added in next step)
+        popup.target_entity = Some(clicked_entity);
+    }
 }
 
