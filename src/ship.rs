@@ -134,42 +134,6 @@ pub fn check_ship_arrival(
     }
 }
 
-/// Handles time reversal: if sim time goes backward past a transfer's departure,
-/// cancel the transfer and refund the delta-v.
-pub fn handle_time_reversal(
-    mut ships: Query<(&mut Ship, &mut ShipState)>,
-    sim_time: Res<crate::simulation::SimulationTime>,
-) {
-    for (mut ship, mut state) in &mut ships {
-        // Check if we're transferring and time went backward past departure
-        let revert_info = if let ShipState::Transferring { solution, departure_time, .. } = &*state {
-            if sim_time.sim_time < *departure_time {
-                Some(solution.departure_dv.norm())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(departure_dv) = revert_info {
-            // Refund departure delta-v
-            ship.delta_v_remaining += departure_dv;
-
-            warn!(
-                "Time reversal detected! Canceling transfer for '{}', refunded {:.0} m/s",
-                ship.name, departure_dv
-            );
-
-            // TODO: This is a limitation - we don't know the source body.
-            // Will be fixed when Transfer component stores source entity.
-            *state = ShipState::Orbiting {
-                body: Entity::PLACEHOLDER,
-            };
-        }
-    }
-}
-
 // ============================================================================
 // Rendering
 // ============================================================================

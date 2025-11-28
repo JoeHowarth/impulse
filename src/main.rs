@@ -121,7 +121,6 @@ fn main() {
                 simulation::handle_time_controls,
                 ship::execute_scheduled_transfers,
                 ship::check_ship_arrival,
-                ship::handle_time_reversal,
                 transfer_vis::update_transfer_cache,
                 transfer_vis::check_transfer_expiration,
                 update_body_positions,

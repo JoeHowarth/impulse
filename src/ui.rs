@@ -837,7 +837,7 @@ pub fn handle_option_selection(
         }
 
         // Spawn the new transfer visualization
-        spawn_transfer_from_solution(
+        crate::transfer_vis::spawn_transfer_visualization(
             &mut commands,
             &mut gizmo_assets,
             ship_entity,
@@ -855,79 +855,3 @@ pub fn handle_option_selection(
     }
 }
 
-/// Spawns a transfer visualization from a solution.
-/// Returns the transfer entity.
-/// NOTE: This is duplicated from transfer_vis::spawn_transfer_visualization
-/// and will be removed in Phase 3.
-fn spawn_transfer_from_solution(
-    commands: &mut Commands,
-    gizmo_assets: &mut ResMut<Assets<GizmoAsset>>,
-    ship_entity: Entity,
-    source_entity: Entity,
-    target_entity: Entity,
-    solution: &TransferSolution,
-    departure_time: f64,
-) -> Entity {
-    use crate::transfer_vis::{Transfer, TransferArc, BurnMarker};
-    use crate::phys_to_visual;
-    use crate::transfer::propagate_kepler;
-    use crate::orbital_data::MU_SUN;
-
-    const TRANSFER_ARC_SEGMENTS: usize = 500;
-    const TRANSFER_COLOR: Color = Color::srgba(1.0, 0.6, 0.2, 0.8);
-
-    // Create the transfer arc gizmo
-    let mut gizmo = GizmoAsset::new();
-    let tof = solution.time_of_flight;
-    let step_dt = tof / TRANSFER_ARC_SEGMENTS as f64;
-
-    let mut points = Vec::with_capacity(TRANSFER_ARC_SEGMENTS + 1);
-    points.push(phys_to_visual(solution.departure_pos));
-
-    let r0 = solution.departure_pos;
-    let v0 = solution.departure_vel;
-
-    for i in 1..TRANSFER_ARC_SEGMENTS {
-        let t = i as f64 * step_dt;
-        if let Some(r_vec) = propagate_kepler(r0, v0, MU_SUN, t) {
-            points.push(phys_to_visual(r_vec));
-        }
-    }
-    points.push(phys_to_visual(solution.arrival_pos));
-    gizmo.linestrip(points, TRANSFER_COLOR);
-
-    // Spawn the Transfer entity
-    let transfer_entity = commands
-        .spawn(Transfer {
-            ship: ship_entity,
-            source: source_entity,
-            target: target_entity,
-            solution: solution.clone(),
-            departure_time,
-        })
-        .id();
-
-    // Spawn the arc gizmo
-    commands.spawn((
-        Gizmo {
-            handle: gizmo_assets.add(gizmo),
-            depth_bias: 0.05,
-            ..default()
-        },
-        TransferArc { transfer: transfer_entity },
-    ));
-
-    // Spawn burn markers
-    commands.spawn(BurnMarker {
-        transfer: transfer_entity,
-        is_departure: true,
-        delta_v: solution.departure_dv,
-    });
-    commands.spawn(BurnMarker {
-        transfer: transfer_entity,
-        is_departure: false,
-        delta_v: solution.arrival_dv,
-    });
-
-    transfer_entity
-}
