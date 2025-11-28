@@ -527,6 +527,21 @@ pub fn build_transfer_options(
         }
     }
 
+    // 4. Best in 500 days (full search window)
+    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, target_name, current_day, current_day + 500) {
+        // Only add if different from previous options
+        let is_different = options.iter().all(|o| {
+            (o.solution.total_dv - sol.total_dv).abs() > 100.0
+        });
+        if is_different {
+            options.push(TransferOption {
+                label: "Best 500d".to_string(),
+                departure_day: dep_day - current_day,
+                solution: sol.clone(),
+            });
+        }
+    }
+
     options
 }
 
