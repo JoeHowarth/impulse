@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-astrora_core = { version = "0.1.1", features = ["serde"] }
+astrora_core = { path = "astrora", features = ["serde"] }
 bevy = { path = "bevy" }
 bevy_pancam = "0.19.0"
 # use git branch wb/updatebevy0.17
@@ -17,6 +17,7 @@ serde_json = "1.0.145"
 rand = "0.8.5"
 
 [patch.crates-io]
+astrora_core = { path = "astrora" }
 bevy = { path = "bevy" }
 bevy_a11y = { path = "bevy/crates/bevy_a11y" }
 bevy_animation = { path = "bevy/crates/bevy_animation" }

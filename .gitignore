@@ -11,6 +11,7 @@ replays
 journal*
 logs/
 bevy-examples
+logs.txt
 
 # Local Claude settings
 .claude/

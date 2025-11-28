@@ -232,8 +232,6 @@ dependencies = [
 [[package]]
 name = "astrora_core"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7208a295c6b588d5011dbcc4aba5df20e801b03998d73136961a0d217e08be0c"
 dependencies = [
  "hifitime",
  "nalgebra",

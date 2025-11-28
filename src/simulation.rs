@@ -5,6 +5,9 @@ use bevy::prelude::*;
 /// Base rate: 1 real second = 10 days of simulation
 pub const SIM_BASE_RATE: f64 = 60.0 * 60.0 * 24.0 * 10.0;
 
+/// Seconds per day
+pub const SECONDS_PER_DAY: f64 = 60.0 * 60.0 * 24.0;
+
 /// Simulation time state, decoupled from wall clock.
 #[derive(Resource)]
 pub struct SimulationTime {
@@ -24,6 +27,32 @@ impl Default for SimulationTime {
             paused: false,
         }
     }
+}
+
+impl SimulationTime {
+    /// Create SimulationTime starting at a specific day
+    pub fn from_start_day(day: i32) -> Self {
+        Self {
+            sim_time: day as f64 * SECONDS_PER_DAY,
+            time_scale: 1.0,
+            paused: false,
+        }
+    }
+}
+
+/// Parse CLI arguments and return the starting day (default 0)
+pub fn parse_start_day() -> i32 {
+    let args: Vec<String> = std::env::args().collect();
+    for i in 0..args.len() {
+        if args[i] == "--day" || args[i] == "-d" {
+            if let Some(day_str) = args.get(i + 1) {
+                if let Ok(day) = day_str.parse::<i32>() {
+                    return day;
+                }
+            }
+        }
+    }
+    0
 }
 
 /// Handles keyboard input for time controls (pause, speed up/down).

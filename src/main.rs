@@ -16,6 +16,8 @@ use bevy_vector_shapes::prelude::*;
 
 mod orbital_data;
 mod simulation;
+mod transfer;
+mod transfer_vis;
 mod ui;
 
 use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
@@ -54,10 +56,10 @@ type BodyEntity = Entity;
 /// Computed per-frame data for a body (position, visibility, display size).
 /// Written by update_body_positions, read by rendering and UI systems.
 #[derive(Component, Default)]
-struct ComputedBody {
-    position: Vec3,
-    visibility: f32,
-    display_size: f32,
+pub struct ComputedBody {
+    pub position: Vec3,
+    pub visibility: f32,
+    pub display_size: f32,
 }
 
 /// Links an orbit gizmo entity to its parent body for position updates.
@@ -67,6 +69,11 @@ struct OrbitGizmo {
 }
 
 fn main() {
+    let start_day = simulation::parse_start_day();
+    if start_day != 0 {
+        eprintln!("Starting simulation at day {}", start_day);
+    }
+
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(PanCamPlugin)
@@ -74,17 +81,33 @@ fn main() {
         // Performance diagnostics - logs to console every second
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(LogDiagnosticsPlugin::default())
-        .init_resource::<SimulationTime>()
-        .add_systems(Startup, (setup, configure_gizmos))
+        .insert_resource(SimulationTime::from_start_day(start_day))
+        .init_resource::<transfer_vis::ActiveTransfer>()
+        .init_resource::<transfer_vis::TransferCache>()
+        .add_systems(
+            Startup,
+            (
+                setup,
+                ApplyDeferred,
+                transfer_vis::init_transfer_cache,
+                transfer_vis::spawn_initial_transfer,
+                configure_gizmos,
+            )
+                .chain(),
+        )
         .add_systems(
             Update,
             (
                 simulation::handle_time_controls,
+                transfer_vis::update_transfer_cache,
+                transfer_vis::update_transfer_visualization,
                 update_body_positions,
                 update_orbit_positions,
                 render_system,
+                transfer_vis::render_burn_arrows,
                 ui::update_labels,
                 ui::update_time_ui,
+                ui::update_transfer_panel,
             )
                 .chain(),
         )
@@ -143,6 +166,9 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
 
     // Spawn time control panel
     ui::spawn_time_panel(&mut commands);
+
+    // Spawn transfer info panel
+    ui::spawn_transfer_panel(&mut commands);
 }
 
 /// Configure gizmo line settings for orbit rendering.
@@ -236,7 +262,7 @@ fn update_orbit_positions(
 // ============================================================================
 
 /// Converts physics coordinates (meters) to visual coordinates.
-fn phys_to_visual(v: Vector3) -> Vec3 {
+pub fn phys_to_visual(v: Vector3) -> Vec3 {
     let scale = VISUAL_SCALE / *AU;
     Vec3::new(
         (v.x * scale) as f32,

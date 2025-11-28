@@ -3,6 +3,8 @@
 use bevy::prelude::*;
 
 use crate::simulation::SimulationTime;
+use crate::transfer_vis::{ActiveTransfer, Transfer};
+use crate::orbital_data::Body;
 use crate::ComputedBody;
 
 /// Links a UI label to its body entity
@@ -152,5 +154,134 @@ pub fn update_time_ui(
         };
 
         **text = format!("{} {}", scale_str, status);
+    }
+}
+
+// ============================================================================
+// Transfer Info Panel
+// ============================================================================
+
+/// Marker for the transfer info panel container
+#[derive(Component)]
+pub struct TransferInfoPanel;
+
+/// Marker for the transfer title text (e.g., "Earth → Mars")
+#[derive(Component)]
+pub struct TransferTitleText;
+
+/// Marker for the transfer stats text (delta-v, TOF)
+#[derive(Component)]
+pub struct TransferStatsText;
+
+/// Spawns the transfer info UI panel in the bottom-right corner.
+pub fn spawn_transfer_panel(commands: &mut Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(16.0),
+                right: Val::Px(16.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+            BorderRadius::all(Val::Px(8.0)),
+            TransferInfoPanel,
+        ))
+        .with_children(|parent| {
+            // Title (e.g., "Earth → Mars Transfer")
+            parent.spawn((
+                Text::new("No Transfer"),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(1.0, 0.6, 0.2, 1.0)), // Orange to match arc
+                TransferTitleText,
+            ));
+
+            // Stats display
+            parent.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.8, 0.85, 0.9, 1.0)),
+                TransferStatsText,
+            ));
+        });
+}
+
+/// Updates the transfer info panel with current transfer data.
+pub fn update_transfer_panel(
+    active_transfer: Res<ActiveTransfer>,
+    transfers: Query<&Transfer>,
+    bodies: Query<&Body>,
+    mut title_query: Query<&mut Text, (With<TransferTitleText>, Without<TransferStatsText>)>,
+    mut stats_query: Query<&mut Text, (With<TransferStatsText>, Without<TransferTitleText>)>,
+    mut logged: Local<bool>,
+) {
+    let Some(transfer_entity) = active_transfer.entity else {
+        // No active transfer
+        if !*logged {
+            info!("update_transfer_panel: no active_transfer.entity");
+            *logged = true;
+        }
+        if let Ok(mut title) = title_query.single_mut() {
+            **title = "No Transfer".to_string();
+        }
+        if let Ok(mut stats) = stats_query.single_mut() {
+            **stats = String::new();
+        }
+        return;
+    };
+
+    if !*logged {
+        info!("update_transfer_panel: active_transfer.entity = {:?}", transfer_entity);
+    }
+
+    let Ok(transfer) = transfers.get(transfer_entity) else {
+        if !*logged {
+            info!("update_transfer_panel: transfers.get() failed for {:?}", transfer_entity);
+            *logged = true;
+        }
+        return;
+    };
+
+    if !*logged {
+        info!("update_transfer_panel: found transfer, updating UI");
+        *logged = true;
+    }
+
+    // Get body names
+    let source_name = bodies
+        .get(transfer.source)
+        .map(|b| b.name.as_str())
+        .unwrap_or("???");
+    let target_name = bodies
+        .get(transfer.target)
+        .map(|b| b.name.as_str())
+        .unwrap_or("???");
+
+    // Update title
+    if let Ok(mut title) = title_query.single_mut() {
+        **title = format!("{} -> {}", source_name, target_name);
+    }
+
+    // Update stats
+    if let Ok(mut stats) = stats_query.single_mut() {
+        let sol = &transfer.solution;
+        let tof_days = sol.time_of_flight / (24.0 * 3600.0);
+
+        **stats = format!(
+            "Dep dv: {:.0} m/s\nArr dv: {:.0} m/s\nTotal: {:.0} m/s\nTOF: {:.0} days",
+            sol.departure_dv.norm(),
+            sol.arrival_dv.norm(),
+            sol.total_dv,
+            tof_days
+        );
     }
 }
