@@ -41,16 +41,18 @@ const ARRIVAL_COLOR: Color = Color::srgb(0.9, 0.3, 0.3);
 // ============================================================================
 
 /// A computed transfer trajectory between two bodies.
+/// This is the single source of truth for scheduled/active transfers.
 #[derive(Component)]
 pub struct Transfer {
+    /// The ship performing this transfer
+    pub ship: Entity,
     /// Departure body entity
     pub source: Entity,
     /// Arrival body entity
     pub target: Entity,
     /// Computed transfer solution (delta-v, orbit, etc.)
     pub solution: TransferSolution,
-    /// Simulation time at departure (used for future animation/progress tracking)
-    #[allow(dead_code)]
+    /// Simulation time at departure
     pub departure_time: f64,
 }
 
@@ -229,13 +231,13 @@ pub fn spawn_initial_transfer(
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
     cache: Res<TransferCache>,
-    player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
+    player_query: Query<(Entity, &crate::ship::ShipState), With<crate::ship::PlayerControlled>>,
     mut active_transfer: ResMut<ActiveTransfer>,
 ) {
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
-    // Get player's current body
-    let Ok(player_state) = player_query.single() else {
+    // Get player ship and current body
+    let Ok((ship_entity, player_state)) = player_query.single() else {
         warn!("No player ship found");
         return;
     };
@@ -270,6 +272,7 @@ pub fn spawn_initial_transfer(
     let transfer_entity = spawn_transfer_visualization(
         &mut commands,
         &mut gizmo_assets,
+        ship_entity,
         source_entity,
         target_entity,
         solution,
@@ -358,11 +361,12 @@ fn find_best_transfer_in_window<'a>(
 }
 
 /// Spawns the transfer visualization entities and returns the transfer entity.
-fn spawn_transfer_visualization(
+pub fn spawn_transfer_visualization(
     commands: &mut Commands,
     gizmo_assets: &mut ResMut<Assets<GizmoAsset>>,
-    earth_entity: Entity,
-    mars_entity: Entity,
+    ship_entity: Entity,
+    source_entity: Entity,
+    target_entity: Entity,
     solution: &TransferSolution,
     departure_time: f64,
 ) -> Entity {
@@ -372,8 +376,9 @@ fn spawn_transfer_visualization(
     // Spawn the Transfer entity
     let transfer_entity = commands
         .spawn(Transfer {
-            source: earth_entity,
-            target: mars_entity,
+            ship: ship_entity,
+            source: source_entity,
+            target: target_entity,
             solution: solution.clone(),
             departure_time,
         })
@@ -687,118 +692,25 @@ pub fn check_transfer_expiration(
     }
 }
 
-/// Updates the transfer visualization based on current state:
-/// - User-selected transfer: always shown (full color)
-/// - Preview transfer: shown when hovering (dimmer color), can coexist with selected
-pub fn update_transfer_visualization(
+/// Updates preview arcs based on popup hover state.
+/// Committed transfers are managed separately (spawned on selection, despawned on expiration).
+pub fn update_preview_arc(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
-    bodies: Query<(Entity, &Body)>,
-    sim_time: Res<SimulationTime>,
-    player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
     popup: Res<crate::TransferPopup>,
-    mut active_transfer: ResMut<ActiveTransfer>,
     preview_arcs: Query<Entity, With<PreviewTransferArc>>,
-    // For cleaning up non-user-selected transfers
-    non_preview_arcs: Query<Entity, (With<TransferArc>, Without<PreviewTransferArc>)>,
-    transfers: Query<Entity, With<Transfer>>,
-    markers: Query<Entity, With<BurnMarker>>,
 ) {
-    // Get player's current body
-    let Ok(player_state) = player_query.single() else {
-        return;
-    };
-
-    let source_entity = match player_state {
-        crate::ship::ShipState::Orbiting { body } => *body,
-        crate::ship::ShipState::Transferring { .. } => {
-            // Ship in transit - don't update visualization
-            return;
-        }
-    };
-
-    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-
-    // Check if we should show a preview (popup open AND hovering)
-    let preview_data: Option<(String, &TransferSolution, i32)> =
-        if let (Some(popup_target), Some(hover_idx)) = (popup.target_entity, popup.hovered_option) {
-            if let Some(option) = popup.options.get(hover_idx) {
-                let target_name = bodies
-                    .get(popup_target)
-                    .map(|(_, b)| b.name.clone())
-                    .unwrap_or_default();
-                let abs_dep_day = current_day + option.departure_day;
-                Some((target_name, &option.solution, abs_dep_day))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
     // Always despawn old preview arcs first
     for entity in preview_arcs.iter() {
         commands.entity(entity).despawn();
     }
-    active_transfer.preview_entity = None;
 
-    // If we have preview data, spawn a preview arc
-    if let Some((target_name, solution, dep_day)) = preview_data {
-        // Find target entity
-        if let Some((target_entity, _)) = bodies.iter().find(|(_, b)| b.name == target_name) {
-            // Check if this is different from the selected transfer (if any)
-            let should_show_preview = if active_transfer.user_selected {
-                // Always show preview when user has a selection (it's a different target or option)
-                true
-            } else {
-                // No user selection - this becomes the primary visualization
-                // Despawn any existing non-preview transfer and related entities
-                for entity in transfers.iter() {
-                    commands.entity(entity).despawn();
-                }
-                for entity in non_preview_arcs.iter() {
-                    commands.entity(entity).despawn();
-                }
-                for entity in markers.iter() {
-                    commands.entity(entity).despawn();
-                }
-                active_transfer.entity = None;
-                false
-            };
-
-            if should_show_preview {
-                // Spawn preview arc (dimmer color, no burn markers)
-                let preview_entity = spawn_preview_arc(
-                    &mut commands,
-                    &mut gizmo_assets,
-                    solution,
-                );
-                active_transfer.preview_entity = Some(preview_entity);
-            } else {
-                // Spawn as primary transfer (full color with burn markers)
-                let transfer_entity = spawn_transfer_visualization(
-                    &mut commands,
-                    &mut gizmo_assets,
-                    source_entity,
-                    target_entity,
-                    solution,
-                    dep_day as f64 * 86400.0,
-                );
-                active_transfer.entity = Some(transfer_entity);
-            }
+    // Check if we should show a preview (popup open AND hovering)
+    if let (Some(_popup_target), Some(hover_idx)) = (popup.target_entity, popup.hovered_option) {
+        if let Some(option) = popup.options.get(hover_idx) {
+            // Spawn preview arc
+            spawn_preview_arc(&mut commands, &mut gizmo_assets, &option.solution);
         }
-    } else if !active_transfer.user_selected {
-        // No preview and no user selection - despawn everything
-        for entity in transfers.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in non_preview_arcs.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in markers.iter() {
-            commands.entity(entity).despawn();
-        }
-        active_transfer.entity = None;
     }
 }
 

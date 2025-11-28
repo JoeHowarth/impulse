@@ -141,7 +141,7 @@ fn main() {
                 ui::handle_close_button,
                 ui::handle_escape_key,
                 ui::handle_option_hover,
-                transfer_vis::update_transfer_visualization,
+                transfer_vis::update_preview_arc,
                 ui::handle_option_selection,
             )
                 .chain()

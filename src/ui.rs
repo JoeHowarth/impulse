@@ -852,6 +852,7 @@ pub fn handle_option_selection(
         let transfer_entity = spawn_transfer_from_solution(
             &mut commands,
             &mut gizmo_assets,
+            ship_entity,
             source_entity,
             target_entity,
             &option.solution,
@@ -871,9 +872,12 @@ pub fn handle_option_selection(
 
 /// Spawns a transfer visualization from a solution.
 /// Returns the transfer entity.
+/// NOTE: This is duplicated from transfer_vis::spawn_transfer_visualization
+/// and will be removed in Phase 3.
 fn spawn_transfer_from_solution(
     commands: &mut Commands,
     gizmo_assets: &mut ResMut<Assets<GizmoAsset>>,
+    ship_entity: Entity,
     source_entity: Entity,
     target_entity: Entity,
     solution: &TransferSolution,
@@ -910,6 +914,7 @@ fn spawn_transfer_from_solution(
     // Spawn the Transfer entity
     let transfer_entity = commands
         .spawn(Transfer {
+            ship: ship_entity,
             source: source_entity,
             target: target_entity,
             solution: solution.clone(),
