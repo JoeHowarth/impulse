@@ -21,23 +21,6 @@ mod transfer;
 mod transfer_vis;
 mod ui;
 
-// ============================================================================
-// Transfer Planning Resources
-// ============================================================================
-
-/// Transfer popup state - tracks if a popup is open and for which target.
-#[derive(Resource, Default)]
-pub struct TransferPopup {
-    pub target_entity: Option<Entity>,
-    pub popup_entity: Option<Entity>,
-    /// Cached options for the currently displayed popup
-    pub options: Vec<ui::TransferOption>,
-    /// Which option index is being hovered (for preview)
-    pub hovered_option: Option<usize>,
-    /// Day when options were last computed (for live updates)
-    pub options_computed_day: i32,
-}
-
 use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
 use simulation::SimulationTime;
 
@@ -101,7 +84,7 @@ fn main() {
         .add_plugins(LogDiagnosticsPlugin::default())
         .insert_resource(SimulationTime::from_start_day(start_day))
         .init_resource::<transfer_vis::TransferCache>()
-        .init_resource::<TransferPopup>()
+        .init_resource::<ui::TransferPopup>()
         .add_systems(
             Startup,
             (
@@ -448,7 +431,7 @@ fn handle_body_click(
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     body_query: Query<(Entity, &Body, &ComputedBody)>,
     player_query: Query<&ship::ShipState, With<ship::PlayerControlled>>,
-    mut popup: ResMut<TransferPopup>,
+    mut popup: ResMut<ui::TransferPopup>,
 ) {
     // Only process left clicks
     if !mouse_button.just_pressed(MouseButton::Left) {

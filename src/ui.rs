@@ -8,7 +8,28 @@ use crate::simulation::SimulationTime;
 use crate::transfer_vis::{Transfer, TransferCache, find_best_transfer_in_range};
 use crate::transfer::TransferSolution;
 use crate::orbital_data::Body;
-use crate::{ComputedBody, TransferPopup};
+use crate::ComputedBody;
+
+// ============================================================================
+// Resources
+// ============================================================================
+
+/// Transfer popup state - tracks if a popup is open and for which target.
+#[derive(Resource, Default)]
+pub struct TransferPopup {
+    pub target_entity: Option<Entity>,
+    pub popup_entity: Option<Entity>,
+    /// Cached options for the currently displayed popup
+    pub options: Vec<TransferOption>,
+    /// Which option index is being hovered (for preview)
+    pub hovered_option: Option<usize>,
+    /// Day when options were last computed (for live updates)
+    pub options_computed_day: i32,
+}
+
+// ============================================================================
+// Components
+// ============================================================================
 
 /// Links a UI label to its body entity
 #[derive(Component)]

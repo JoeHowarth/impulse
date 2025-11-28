@@ -544,7 +544,7 @@ pub fn check_transfer_expiration(
 pub fn update_preview_arc(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
-    popup: Res<crate::TransferPopup>,
+    popup: Res<crate::ui::TransferPopup>,
     preview_arcs: Query<Entity, With<PreviewTransferArc>>,
 ) {
     // Always despawn old preview arcs first
