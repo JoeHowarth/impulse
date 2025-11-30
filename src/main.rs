@@ -104,6 +104,9 @@ fn main() {
                 simulation::handle_time_controls,
                 ship::execute_scheduled_transfers,
                 ship::check_ship_arrival,
+                // Async cache: spawn task when entering transfer, poll for completion
+                transfer_cache::spawn_cache_compute_task,
+                transfer_cache::poll_cache_compute_task,
                 transfer_cache::update_transfer_cache,
                 transfer_vis::check_transfer_expiration,
                 update_body_positions,
@@ -487,18 +490,12 @@ fn handle_body_click(
         ship::ShipState::Transferring { .. } => return, // Ship in transit
     };
 
-    let current_parent = body_query
-        .iter()
-        .find(|(e, _, _)| *e == current_entity)
-        .and_then(|(_, b, _)| b.parent_name.clone());
-
     // Find the closest body to the click that:
     // 1. Is visible
-    // 2. Has the same parent as current body (same SOI)
-    // 3. Is not the current body
+    // 2. Is not the current body
     let mut best_match: Option<(Entity, f32)> = None; // (entity, screen_distance)
 
-    for (entity, body, computed) in body_query.iter() {
+    for (entity, _body, computed) in body_query.iter() {
         // Skip invisible bodies
         if computed.visibility < 0.01 {
             continue;
@@ -506,11 +503,6 @@ fn handle_body_click(
 
         // Skip current body
         if entity == current_entity {
-            continue;
-        }
-
-        // Skip bodies with different parent (different SOI)
-        if body.parent_name != current_parent {
             continue;
         }
 

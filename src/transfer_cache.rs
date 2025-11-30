@@ -1,12 +1,13 @@
 //! Transfer solution caching system.
 //!
-//! Precomputes and caches Lambert transfer solutions for all celestial body pairs
-//! within a rolling time window. This allows instant UI response when selecting
-//! transfer options.
+//! Precomputes and caches Lambert transfer solutions from the player's current body
+//! to all other bodies in the solar system, within a rolling time window. This allows
+//! instant UI response when selecting transfer options.
 
 use bevy::prelude::*;
 use bevy::platform::collections::HashMap;
-use astrora_core::core::elements::coe_to_rv;
+use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+use astrora_core::core::elements::{coe_to_rv, OrbitalElements};
 
 use crate::transfer::{compute_transfer, TransferSolution};
 use crate::orbital_data::{Body, propagate_elliptic, MU_SUN};
@@ -20,7 +21,7 @@ use crate::simulation::SimulationTime;
 /// departure_day is days since J2000 epoch (can be negative)
 type CacheKey = (Entity, i32, i32);
 
-/// Cached Lambert transfer solutions from current body to all siblings.
+/// Cached Lambert transfer solutions from current body to all other bodies.
 /// Stores computed solutions keyed by (target_entity, departure_day, tof_days).
 #[derive(Resource, Default)]
 pub struct TransferCache {
@@ -32,6 +33,35 @@ pub struct TransferCache {
     pub window_days: i32,
     /// Source body entity (invalidate cache if this changes)
     pub source_body: Option<Entity>,
+}
+
+// ============================================================================
+// Async Computation Types
+// ============================================================================
+
+/// Minimal cloned body data needed for async cache computation.
+/// All fields are Send + Sync, allowing computation on worker threads.
+#[derive(Clone)]
+pub struct BodySnapshot {
+    pub entity: Entity,
+    pub orbital_elements: OrbitalElements,
+}
+
+impl BodySnapshot {
+    pub fn from_body(entity: Entity, body: &Body) -> Self {
+        Self {
+            entity,
+            orbital_elements: body.orbital_elements,
+        }
+    }
+}
+
+/// Component tracking a pending async cache computation.
+/// Spawned when ship enters transfer, polled until complete.
+#[derive(Component)]
+pub struct PendingCacheCompute {
+    task: Task<(HashMap<CacheKey, TransferSolution>, i32)>,
+    pub destination: Entity,
 }
 
 // ============================================================================
@@ -74,12 +104,61 @@ fn compute_cached_transfer(
     compute_transfer(source_pos, source_vel, target_pos, target_vel, tof, MU_SUN).ok()
 }
 
+/// Computes a single Lambert transfer from snapshots (for async computation).
+fn compute_snapshot_transfer(
+    source: &BodySnapshot,
+    target: &BodySnapshot,
+    departure_day: i32,
+    tof_days: i32,
+) -> Option<TransferSolution> {
+    let departure_time = departure_day as f64 * 86400.0;
+    let tof = tof_days as f64 * 86400.0;
+    let arrival_time = departure_time + tof;
+
+    // Get source body's heliocentric state at departure
+    let source_elems = propagate_elliptic(source.orbital_elements, MU_SUN, departure_time)
+        .unwrap_or(source.orbital_elements);
+    let (source_pos, source_vel) = coe_to_rv(&source_elems, MU_SUN);
+
+    // Get target body's heliocentric state at arrival
+    let target_elems = propagate_elliptic(target.orbital_elements, MU_SUN, arrival_time)
+        .unwrap_or(target.orbital_elements);
+    let (target_pos, target_vel) = coe_to_rv(&target_elems, MU_SUN);
+
+    // Solve Lambert's problem
+    compute_transfer(source_pos, source_vel, target_pos, target_vel, tof, MU_SUN).ok()
+}
+
+/// Pure function to compute all transfers from source to all targets.
+/// Designed to run on a worker thread - no ECS access.
+/// Returns (solutions_map, last_update_day).
+fn compute_cache_for_body(
+    source: BodySnapshot,
+    targets: Vec<BodySnapshot>,
+    start_day: i32,
+) -> (HashMap<CacheKey, TransferSolution>, i32) {
+    let mut solutions = HashMap::new();
+
+    for target in &targets {
+        for dep_offset in 0..=SEARCH_WINDOW_DAYS {
+            let departure_day = start_day + dep_offset;
+            for &tof_days in &TOF_CANDIDATES {
+                if let Some(solution) = compute_snapshot_transfer(&source, target, departure_day, tof_days) {
+                    solutions.insert((target.entity, departure_day, tof_days), solution);
+                }
+            }
+        }
+    }
+
+    (solutions, start_day)
+}
+
 // ============================================================================
 // Systems
 // ============================================================================
 
 /// Populates the transfer cache with all solutions in the search window.
-/// Computes transfers from player's current body to all siblings (same parent).
+/// Computes transfers from player's current body to all other bodies.
 pub fn init_transfer_cache(
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
@@ -108,14 +187,14 @@ pub fn init_transfer_cache(
         return;
     };
 
-    // Find all siblings (bodies with the same parent entity)
-    let siblings: Vec<(Entity, &Body)> = bodies
+    // Find all other bodies (transfer targets)
+    let targets: Vec<(Entity, &Body)> = bodies
         .iter()
-        .filter(|(e, b)| b.parent_entity == source_body.parent_entity && *e != current_entity)
+        .filter(|(e, _)| *e != current_entity)
         .collect();
 
-    if siblings.is_empty() {
-        warn!("No sibling bodies found for '{}'", source_body.name);
+    if targets.is_empty() {
+        warn!("No target bodies found for '{}'", source_body.name);
         return;
     }
 
@@ -124,9 +203,9 @@ pub fn init_transfer_cache(
     cache.window_days = SEARCH_WINDOW_DAYS;
     cache.source_body = Some(current_entity);
 
-    // Compute all solutions in the window for each sibling
+    // Compute all solutions in the window for each target
     let mut computed = 0;
-    for (target_entity, target_body) in &siblings {
+    for (target_entity, target_body) in &targets {
         for dep_offset in 0..=SEARCH_WINDOW_DAYS {
             let departure_day = current_day + dep_offset;
             for &tof_days in &TOF_CANDIDATES {
@@ -143,18 +222,19 @@ pub fn init_transfer_cache(
     let max_dep = cache.solutions.keys().map(|(_, d, _)| *d).max().unwrap_or(0);
     info!(
         "Transfer cache initialized: {} solutions for {} targets, departure days {}-{}",
-        computed, siblings.len(), min_dep, max_dep
+        computed, targets.len(), min_dep, max_dep
     );
 }
 
 /// Incrementally updates the transfer cache as simulation time advances.
-/// - Checks if source body changed (triggers full rebuild)
+/// - Checks if source body changed (triggers full rebuild, unless async task pending)
 /// - Prunes old solutions (departure day < current day)
 /// - Adds new solutions at the far end of the window
 pub fn update_transfer_cache(
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
     player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
+    pending_tasks: Query<&PendingCacheCompute>,
     mut cache: ResMut<TransferCache>,
 ) {
     // Get player's current body
@@ -181,6 +261,14 @@ pub fn update_transfer_cache(
 
     // Check if source body changed -> need full rebuild
     if cache.source_body != Some(current_entity) {
+        // Check if async task is already computing cache for this destination
+        let async_pending = pending_tasks.iter().any(|p| p.destination == current_entity);
+        if async_pending {
+            // Async task will handle it - skip sync rebuild
+            info!("Source body changed to {}, async task pending - skipping sync rebuild", source_body.name);
+            return;
+        }
+
         info!("Source body changed to {}, rebuilding cache...", source_body.name);
 
         cache.solutions.clear();
@@ -188,20 +276,20 @@ pub fn update_transfer_cache(
         cache.last_update_day = current_day;
         cache.window_days = SEARCH_WINDOW_DAYS;
 
-        // Find all siblings (bodies with the same parent entity)
-        let siblings: Vec<(Entity, &Body)> = bodies
+        // Find all other bodies (transfer targets)
+        let targets: Vec<(Entity, &Body)> = bodies
             .iter()
-            .filter(|(e, b)| b.parent_entity == source_body.parent_entity && *e != current_entity)
+            .filter(|(e, _)| *e != current_entity)
             .collect();
 
-        if siblings.is_empty() {
-            warn!("No sibling bodies found for '{}'", source_body.name);
+        if targets.is_empty() {
+            warn!("No target bodies found for '{}'", source_body.name);
             return;
         }
 
-        // Compute all solutions in the window for each sibling
+        // Compute all solutions in the window for each target
         let mut computed = 0;
-        for (target_entity, target_body) in &siblings {
+        for (target_entity, target_body) in &targets {
             for dep_offset in 0..=SEARCH_WINDOW_DAYS {
                 let departure_day = current_day + dep_offset;
                 for &tof_days in &TOF_CANDIDATES {
@@ -215,7 +303,7 @@ pub fn update_transfer_cache(
 
         info!(
             "Transfer cache rebuilt: {} solutions for {} targets from {}",
-            computed, siblings.len(), source_body.name
+            computed, targets.len(), source_body.name
         );
         return;
     }
@@ -225,10 +313,10 @@ pub fn update_transfer_cache(
         return;
     }
 
-    // Find all siblings (same parent entity as source)
-    let siblings: Vec<(Entity, &Body)> = bodies
+    // Find all other bodies (transfer targets)
+    let targets: Vec<(Entity, &Body)> = bodies
         .iter()
-        .filter(|(e, b)| b.parent_entity == source_body.parent_entity && *e != current_entity)
+        .filter(|(e, _)| *e != current_entity)
         .collect();
 
     let before_count = cache.solutions.len();
@@ -239,12 +327,12 @@ pub fn update_transfer_cache(
     let after_prune = cache.solutions.len();
     let pruned = before_count - after_prune;
 
-    // Add new solutions at the far end of the window for all siblings
+    // Add new solutions at the far end of the window for all targets
     let days_advanced = current_day - cache.last_update_day;
     let mut added = 0;
     for offset in 0..days_advanced {
         let new_departure_day = cache.last_update_day + cache.window_days + 1 + offset;
-        for (target_entity, target_body) in &siblings {
+        for (target_entity, target_body) in &targets {
             for &tof_days in &TOF_CANDIDATES {
                 if let Some(solution) = compute_cached_transfer(source_body, target_body, new_departure_day, tof_days) {
                     cache.solutions.insert((*target_entity, new_departure_day, tof_days), solution);
@@ -284,4 +372,91 @@ pub fn find_best_transfer_in_range<'a>(
         })
         .min_by(|(_, a), (_, b)| a.total_dv.partial_cmp(&b.total_dv).unwrap())
         .map(|((_, dep_day, _), sol)| (*dep_day, sol))
+}
+
+// ============================================================================
+// Async Cache Systems
+// ============================================================================
+
+/// Spawns an async task to precompute the transfer cache when ship enters transfer.
+/// Triggered when ShipState changes to Transferring.
+pub fn spawn_cache_compute_task(
+    mut commands: Commands,
+    ships: Query<&crate::ship::ShipState, (With<crate::ship::PlayerControlled>, Changed<crate::ship::ShipState>)>,
+    bodies: Query<(Entity, &Body)>,
+    pending: Query<Entity, With<PendingCacheCompute>>,
+) {
+    // Only proceed if no task already pending
+    if !pending.is_empty() {
+        return;
+    }
+
+    for state in &ships {
+        // Only trigger on Transferring state
+        let crate::ship::ShipState::Transferring { target, arrival_time, .. } = state else {
+            continue;
+        };
+
+        // Get destination body
+        let Some((_, dest_body)) = bodies.iter().find(|(e, _)| *e == *target) else {
+            warn!("Destination body not found for async cache compute");
+            continue;
+        };
+
+        // Find all other bodies (transfer targets from destination)
+        let targets: Vec<BodySnapshot> = bodies
+            .iter()
+            .filter(|(e, _)| *e != *target)
+            .map(|(e, b)| BodySnapshot::from_body(e, b))
+            .collect();
+
+        if targets.is_empty() {
+            warn!("No target bodies found at destination");
+            continue;
+        }
+
+        // Create snapshot of destination body
+        let source_snapshot = BodySnapshot::from_body(*target, dest_body);
+        let arrival_day = (*arrival_time / 86400.0).floor() as i32;
+        let num_targets = targets.len();
+
+        info!(
+            "Spawning async cache compute for {} targets at {}, starting day {}",
+            num_targets, dest_body.name, arrival_day
+        );
+
+        // Spawn the async task
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            compute_cache_for_body(source_snapshot, targets, arrival_day)
+        });
+
+        commands.spawn(PendingCacheCompute {
+            task,
+            destination: *target,
+        });
+    }
+}
+
+/// Polls pending async cache tasks and applies results when complete.
+pub fn poll_cache_compute_task(
+    mut commands: Commands,
+    mut pending: Query<(Entity, &mut PendingCacheCompute)>,
+    mut cache: ResMut<TransferCache>,
+) {
+    for (entity, mut pending_task) in &mut pending {
+        if let Some((solutions, last_day)) = block_on(future::poll_once(&mut pending_task.task)) {
+            let count = solutions.len();
+
+            // Apply results to cache
+            cache.solutions = solutions;
+            cache.source_body = Some(pending_task.destination);
+            cache.last_update_day = last_day;
+            cache.window_days = SEARCH_WINDOW_DAYS;
+
+            info!("Async cache ready: {} solutions, last_day={}", count, last_day);
+
+            // Clean up the task entity
+            commands.entity(entity).despawn();
+        }
+    }
 }
