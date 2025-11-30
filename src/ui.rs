@@ -274,7 +274,7 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
 pub fn update_transfer_panel(
     transfers: Query<&Transfer>,
     bodies: Query<&Body>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState, &crate::ship::TransferQueue), With<crate::ship::PlayerControlled>>,
+    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
     sim_time: Res<SimulationTime>,
     mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<TransferTitleText>, Without<TransferStatsText>, Without<QueueHintText>)>,
     mut title_query: Query<&mut Text, (With<TransferTitleText>, Without<ShipStatusText>, Without<TransferStatsText>, Without<QueueHintText>)>,
@@ -282,27 +282,22 @@ pub fn update_transfer_panel(
     mut hint_query: Query<&mut Text, (With<QueueHintText>, Without<TransferTitleText>, Without<ShipStatusText>, Without<TransferStatsText>)>,
 ) {
     // Update ship status
-    let Ok((ship_entity, ship, state, queue)) = player_query.single() else {
+    let Ok((ship_entity, ship, ship_location, plan)) = player_query.single() else {
         return;
     };
 
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
-    let location = match state {
-        crate::ship::ShipState::Orbiting { body } => {
+    let location_str = match ship_location {
+        crate::ship::ShipLocation::AtBody(body) => {
             bodies.get(*body).map(|b| b.name.as_str()).unwrap_or("???").to_string()
         }
-        crate::ship::ShipState::Transferring => {
-            // Get transfer data from queue.current
-            if let Some(ref current) = queue.current {
-                let target_name = bodies.get(current.target).map(|b| b.name.as_str()).unwrap_or("???");
-                let arrival_time = current.departure_time + current.solution.time_of_flight;
-                let arrival_day = (arrival_time / 86400.0).floor() as i32;
-                let days_to_arrival = arrival_day - current_day;
-                format!("-> {} ({} days)", target_name, days_to_arrival)
-            } else {
-                "In transit".to_string()
-            }
+        crate::ship::ShipLocation::InTransit { target, solution, departure_time } => {
+            let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("???");
+            let arrival_time = departure_time + solution.time_of_flight;
+            let arrival_day = (arrival_time / 86400.0).floor() as i32;
+            let days_to_arrival = arrival_day - current_day;
+            format!("-> {} ({} days)", target_name, days_to_arrival)
         }
     };
 
@@ -320,23 +315,25 @@ pub fn update_transfer_panel(
     if let Ok(mut text) = ship_query.single_mut() {
         **text = format!(
             "Ship: {} | {:.0} m/s{}",
-            location,
+            location_str,
             ship.delta_v_remaining,
             scheduled_info
         );
     }
 
-    // Update queue hint
+    // Update plan hint
     if let Ok(mut hint) = hint_query.single_mut() {
-        if !queue.queued.is_empty() {
-            let queue_len = queue.queued.len();
-            let queue_targets: Vec<_> = queue.queued.iter()
-                .map(|q| bodies.get(q.target).map(|b| b.name.as_str()).unwrap_or("?"))
+        if !plan.legs.is_empty() {
+            let plan_len = plan.legs.len();
+            let committed = plan.committed_count;
+            let plan_targets: Vec<_> = plan.legs.iter()
+                .map(|leg| bodies.get(leg.target).map(|b| b.name.as_str()).unwrap_or("?"))
                 .collect();
             **hint = format!(
-                "Queue ({}): {} | Enter=confirm, N=cancel",
-                queue_len,
-                queue_targets.join(" → ")
+                "Plan ({}/{}): {} | Enter=commit, N=cancel",
+                committed,
+                plan_len,
+                plan_targets.join(" → ")
             );
         } else {
             **hint = String::new();
@@ -410,6 +407,7 @@ pub struct ClosePopupButton;
 pub struct TransferOption {
     pub label: String,
     pub departure_day: i32,
+    pub tof_days: i32,  // Exact cache key - must match for leg_solution lookup
     pub solution: TransferSolution,
 }
 
@@ -631,16 +629,17 @@ pub fn build_transfer_options(
 
     // 1. Now (tomorrow to avoid immediate expiration)
     // We use current_day + 1 so the transfer doesn't expire immediately
-    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day + 1, current_day + 3) {
+    if let Some((dep_day, tof_days, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day + 1, current_day + 3) {
         options.push(TransferOption {
             label: "Now".to_string(),
             departure_day: dep_day - current_day,
+            tof_days,
             solution: sol.clone(),
         });
     }
 
     // 2. Best in 30 days
-    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 30) {
+    if let Some((dep_day, tof_days, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 30) {
         // Only add if different from "Now" option
         let is_different = options.first().map_or(true, |o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0 || (dep_day - current_day) > 2
@@ -649,13 +648,14 @@ pub fn build_transfer_options(
             options.push(TransferOption {
                 label: "Best 30d".to_string(),
                 departure_day: dep_day - current_day,
+                tof_days,
                 solution: sol.clone(),
             });
         }
     }
 
     // 3. Best in 180 days
-    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 180) {
+    if let Some((dep_day, tof_days, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 180) {
         // Only add if different from previous options
         let is_different = options.iter().all(|o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0
@@ -664,13 +664,14 @@ pub fn build_transfer_options(
             options.push(TransferOption {
                 label: "Best 180d".to_string(),
                 departure_day: dep_day - current_day,
+                tof_days,
                 solution: sol.clone(),
             });
         }
     }
 
     // 4. Best in 500 days (full search window)
-    if let Some((dep_day, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 500) {
+    if let Some((dep_day, tof_days, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 500) {
         // Only add if different from previous options
         let is_different = options.iter().all(|o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0
@@ -679,6 +680,7 @@ pub fn build_transfer_options(
             options.push(TransferOption {
                 label: "Best 500d".to_string(),
                 departure_day: dep_day - current_day,
+                tof_days,
                 solution: sol.clone(),
             });
         }
@@ -704,8 +706,7 @@ pub fn handle_popup_spawn(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState, &crate::ship::TransferQueue), With<crate::ship::PlayerControlled>>,
-    transfers: Query<&Transfer>,
+    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Check if we need to spawn a popup
@@ -719,27 +720,16 @@ pub fn handle_popup_spawn(
     }
 
     // Get player ship state to find source body
-    let Ok((ship_entity, ship, ship_state, queue)) = player_query.single() else {
+    let Ok((_ship_entity, ship, location, plan)) = player_query.single() else {
         return;
     };
 
-    // Determine source entity for transfer options (in order):
-    // 1. Last queued transfer target
-    // 2. Pending Transfer entity target (scheduled but not departed)
-    // 3. Current transfer destination (if transferring) - from queue.current
-    // 4. Current orbiting body
-    let source_entity = if let Some(last) = queue.queued.back() {
-        last.target
-    } else if let Some(pending) = transfers.iter().find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time) {
-        pending.target
-    } else if let Some(ref current) = queue.current {
-        current.target
-    } else {
-        match ship_state {
-            crate::ship::ShipState::Orbiting { body } => *body,
-            crate::ship::ShipState::Transferring => return, // No current data - shouldn't happen
-        }
-    };
+    // Determine source entity: where we'd depart from for next leg
+    // This is the effective body after all current legs
+    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+    let next_leg_index = plan.legs.len();
+    let source_entity = crate::ship::leg_source(location, plan, next_leg_index);
+    let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
 
     // Get target body info
     let Ok((target_body, target_computed)) = bodies.get(target_entity) else {
@@ -762,25 +752,6 @@ pub fn handle_popup_spawn(
 
     // Get available delta-v from player ship
     let available_dv = ship.delta_v_remaining;
-
-    // Calculate base day for transfer options (matching source_entity logic):
-    // 1. Last queued transfer arrival
-    // 2. Pending Transfer entity arrival
-    // 3. Current transfer arrival (if transferring) - from queue.current
-    // 4. Current day (if orbiting)
-    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-    let base_day = if let Some(last) = queue.queued.back() {
-        let arrival_time = last.departure_time + last.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else if let Some(pending) = transfers.iter().find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time) {
-        let arrival_time = pending.departure_time + pending.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else if let Some(ref current) = queue.current {
-        let arrival_time = current.departure_time + current.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else {
-        current_day
-    };
 
     // Check if source is cached - if not, show "computing" message
     let source_name = bodies
@@ -872,8 +843,7 @@ pub fn refresh_popup_on_cache_ready(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState, &crate::ship::TransferQueue), With<crate::ship::PlayerControlled>>,
-    transfers: Query<&Transfer>,
+    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only check if we're waiting for cache
@@ -885,23 +855,15 @@ pub fn refresh_popup_on_cache_ready(
     };
 
     // Get player ship state to find source body
-    let Ok((ship_entity, ship, ship_state, queue)) = player_query.single() else {
+    let Ok((_ship_entity, ship, location, plan)) = player_query.single() else {
         return;
     };
 
-    // Determine source entity (same logic as handle_popup_spawn)
-    let source_entity = if let Some(last) = queue.queued.back() {
-        last.target
-    } else if let Some(pending) = transfers.iter().find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time) {
-        pending.target
-    } else if let Some(ref current) = queue.current {
-        current.target
-    } else {
-        match ship_state {
-            crate::ship::ShipState::Orbiting { body } => *body,
-            crate::ship::ShipState::Transferring => return,
-        }
-    };
+    // Determine source entity and base day using helpers
+    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+    let next_leg_index = plan.legs.len();
+    let source_entity = crate::ship::leg_source(location, plan, next_leg_index);
+    let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
 
     // Check if source is now cached
     if !is_source_cached(&cache, source_entity) {
@@ -926,21 +888,6 @@ pub fn refresh_popup_on_cache_ready(
             despawn_transfer_popup(&mut commands, &mut popup);
             return;
         }
-    };
-
-    // Calculate base day (same logic as handle_popup_spawn)
-    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-    let base_day = if let Some(last) = queue.queued.back() {
-        let arrival_time = last.departure_time + last.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else if let Some(pending) = transfers.iter().find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time) {
-        let arrival_time = pending.departure_time + pending.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else if let Some(ref current) = queue.current {
-        let arrival_time = current.departure_time + current.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else {
-        current_day
     };
 
     // Get available delta-v
@@ -980,8 +927,7 @@ pub fn update_popup_options(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState, &crate::ship::TransferQueue), With<crate::ship::PlayerControlled>>,
-    transfers: Query<&Transfer>,
+    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only process if popup is open
@@ -993,38 +939,15 @@ pub fn update_popup_options(
     };
 
     // Get player ship state to find source body
-    let Ok((ship_entity, ship, ship_state, queue)) = player_query.single() else {
+    let Ok((_ship_entity, ship, location, plan)) = player_query.single() else {
         return;
     };
 
-    // Determine source entity (same logic as handle_popup_spawn)
-    let source_entity = if let Some(last) = queue.queued.back() {
-        last.target
-    } else if let Some(pending) = transfers.iter().find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time) {
-        pending.target
-    } else if let Some(ref current) = queue.current {
-        current.target
-    } else {
-        match ship_state {
-            crate::ship::ShipState::Orbiting { body } => *body,
-            crate::ship::ShipState::Transferring => return,
-        }
-    };
-
-    // Calculate base day (same logic as handle_popup_spawn)
+    // Determine source entity and base day using helpers
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-    let base_day = if let Some(last) = queue.queued.back() {
-        let arrival_time = last.departure_time + last.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else if let Some(pending) = transfers.iter().find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time) {
-        let arrival_time = pending.departure_time + pending.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else if let Some(ref current) = queue.current {
-        let arrival_time = current.departure_time + current.solution.time_of_flight;
-        (arrival_time / 86400.0).floor() as i32
-    } else {
-        current_day
-    };
+    let next_leg_index = plan.legs.len();
+    let source_entity = crate::ship::leg_source(location, plan, next_leg_index);
+    let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
 
     // Check if base day has changed
     if base_day == popup.options_computed_day {
@@ -1127,20 +1050,17 @@ pub fn handle_option_hover(
 }
 
 /// System to handle transfer option button selection.
-/// When a button is clicked, schedule the transfer (deduct delta-v on departure).
-/// If Shift is held, queue the transfer instead of scheduling immediately.
+/// Click appends new leg as uncommitted. Use Enter to commit.
 pub fn handle_option_selection(
     mut commands: Commands,
     mut popup: ResMut<TransferPopup>,
-    mut player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState, &mut crate::ship::TransferQueue), With<crate::ship::PlayerControlled>>,
+    mut player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &mut crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
     sim_time: Res<SimulationTime>,
-    keyboard: Res<ButtonInput<KeyCode>>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
     bodies: Query<&crate::orbital_data::Body>,
     bodies_with_entity: Query<(Entity, &crate::orbital_data::Body)>,
     cache_res: Res<TransferCache>,
     pending_tasks: Query<&PendingCacheCompute>,
-    transfers: Query<&Transfer>,
 ) {
     for (interaction, button) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -1153,8 +1073,8 @@ pub fn handle_option_selection(
             continue;
         };
 
-        // Get player ship and current body
-        let Ok((ship_entity, ship, ship_state, mut queue)) = player_query.single_mut() else {
+        // Get player ship and flight plan
+        let Ok((_ship_entity, ship, location, mut plan)) = player_query.single_mut() else {
             warn!("No player ship found");
             continue;
         };
@@ -1164,194 +1084,65 @@ pub fn handle_option_selection(
             continue;
         };
 
-        // Check if shift is held for queueing
-        let shift_held = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+        let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+        let cache = cache_res.as_ref();
 
-        // Determine source entity for immediate transfers
-        // (queued transfers determine their own source from the queue)
-        let source_entity = match ship_state {
-            crate::ship::ShipState::Orbiting { body } => *body,
-            crate::ship::ShipState::Transferring => {
-                if !shift_held {
-                    warn!("Ship is in transit - use Shift+click to queue");
-                    continue;
-                }
-                // For queueing, get destination from queue.current
-                if let Some(ref current) = queue.current {
-                    current.target
-                } else {
-                    warn!("Ship transferring but no current transfer data");
-                    continue;
-                }
-            }
-        };
+        // Source is where we'd depart from after all current legs
+        let next_leg_index = plan.legs.len();
+        let source_entity = crate::ship::leg_source(location, &plan, next_leg_index);
+        let base_day = crate::ship::leg_base_day(location, &plan, next_leg_index, current_day);
 
-        // Check if ship has enough delta-v (for immediate transfer)
-        // For queued transfers, we validate total queue cost below
-        if !shift_held && ship.delta_v_remaining < option.solution.total_dv {
+        let departure_day = base_day + option.departure_day;
+        let tof_days = option.tof_days;
+
+        // Calculate total delta-v needed (all existing legs + this new one)
+        let existing_dv: f64 = plan.legs.iter()
+            .enumerate()
+            .filter_map(|(i, leg)| {
+                let src = crate::ship::leg_source(location, &plan, i);
+                crate::ship::leg_solution(cache, src, leg).map(|s| s.total_dv)
+            })
+            .sum();
+
+        let total_required = existing_dv + option.solution.total_dv;
+
+        if ship.delta_v_remaining < total_required {
             warn!(
                 "Insufficient delta-v! Need {:.0} m/s, have {:.0} m/s",
-                option.solution.total_dv, ship.delta_v_remaining
+                total_required, ship.delta_v_remaining
             );
             continue;
         }
 
-        let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+        let target_name = bodies.get(target_entity).map(|b| b.name.as_str()).unwrap_or("???");
+        let source_name = bodies.get(source_entity).map(|b| b.name.as_str()).unwrap_or("???");
 
-        if shift_held {
-            // Queue the transfer
-            // Determine source and base_day by checking (in order):
-            // 1. Last queued transfer target/arrival
-            // 2. Pending Transfer entity target/arrival (scheduled but not departed)
-            // 3. Current transfer destination/arrival (if transferring)
-            // 4. Current orbiting body / current day
-            let (queue_source, base_day) = if let Some(last) = queue.queued.back() {
-                // Use last queued transfer
-                let arrival_time = last.departure_time + last.solution.time_of_flight;
-                (last.target, (arrival_time / 86400.0).floor() as i32)
-            } else if let Some(pending) = transfers.iter().find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time) {
-                // Use pending (scheduled but not departed) Transfer entity
-                let arrival_time = pending.departure_time + pending.solution.time_of_flight;
-                (pending.target, (arrival_time / 86400.0).floor() as i32)
-            } else if let Some(ref current) = queue.current {
-                // Use current transfer in progress
-                let arrival_time = current.departure_time + current.solution.time_of_flight;
-                (current.target, (arrival_time / 86400.0).floor() as i32)
-            } else {
-                match ship_state {
-                    crate::ship::ShipState::Orbiting { body } => (*body, current_day),
-                    crate::ship::ShipState::Transferring => {
-                        warn!("Transferring but no current data");
-                        continue;
-                    }
-                }
-            };
+        info!(
+            "Queueing leg {} -> {} (dep day {}, {} m/s)",
+            source_name, target_name, departure_day, option.solution.total_dv as i32
+        );
 
-            // Departure day is relative to when we'll be at the source body
-            let departure_day = base_day + option.departure_day;
+        plan.legs.push_back(crate::ship::PlannedLeg {
+            target: target_entity,
+            departure_day,
+            tof_days,
+        });
 
-            let target_name = bodies
-                .get(target_entity)
-                .map(|b| b.name.clone())
-                .unwrap_or_else(|_| "Unknown".to_string());
-
-            let source_name = bodies
-                .get(queue_source)
-                .map(|b| b.name.clone())
-                .unwrap_or_else(|_| "Unknown".to_string());
-
-            // Look up the correct solution from cache for this source body and departure time
-            let cache = cache_res.as_ref();
-            let (actual_dep_day, solution) = if queue_source != source_entity {
-                // Need to look up from a different source body
-                // First check if that source is cached at all
-                if !is_source_cached(cache, queue_source) {
-                    // Trigger async cache compute for this source body
-                    // Start from base_day (arrival time at queue_source), not departure_day,
-                    // so user can pick any option from the popup
-                    info!(
-                        "Triggering cache compute for {} (needed for queue), starting day {}",
-                        source_name, base_day
-                    );
-                    request_cache_for_source(
-                        &mut commands,
-                        &bodies_with_entity,
-                        &pending_tasks,
-                        cache,
-                        queue_source,
-                        base_day,
-                    );
-                    warn!(
-                        "Cache for {} not ready yet - computing in background. Try again in a moment.",
-                        source_name
-                    );
-                    continue;
-                }
-
-                match find_best_transfer_in_range(cache, queue_source, target_entity, departure_day, departure_day + 30) {
-                    Some((dep_day, sol)) => (dep_day, sol.clone()),
-                    None => {
-                        warn!(
-                            "No cached transfer from {} to {} for queued leg (day {})",
-                            source_name, target_name, departure_day
-                        );
-                        continue;
-                    }
-                }
-            } else {
-                // Same source as current body, use the popup option directly
-                (current_day + option.departure_day, option.solution.clone())
-            };
-
-            let actual_departure_time = actual_dep_day as f64 * 86400.0;
-
-            // Check if ship will have enough delta-v for entire queue plus this transfer
-            let queued_dv: f64 = queue.queued.iter().map(|q| q.solution.total_dv).sum();
-            let total_required = queued_dv + solution.total_dv;
-            if ship.delta_v_remaining < total_required {
-                warn!(
-                    "Insufficient delta-v for queue! Need {:.0} m/s total ({:.0} queued + {:.0} new), have {:.0} m/s",
-                    total_required, queued_dv, solution.total_dv, ship.delta_v_remaining
-                );
-                continue;
-            }
-
+        // Proactively compute cache for target body
+        let arrival_day = departure_day + tof_days;
+        if !is_source_cached(cache, target_entity) {
             info!(
-                "Queueing transfer {} -> {} (dep day {}, {} m/s)",
-                source_name,
-                target_name,
-                actual_dep_day,
-                solution.total_dv as i32
+                "Proactively computing cache for {} (arrival day {})",
+                target_name, arrival_day
             );
-
-            queue.queued.push_back(crate::ship::QueuedTransfer {
-                target: target_entity,
-                source: queue_source,
-                solution,
-                departure_time: actual_departure_time,
-                committed: false,
-            });
-
-            // Proactively spawn cache for the target body so next queue leg is ready
-            let arrival_day = (actual_departure_time / 86400.0).floor() as i32
-                + (option.solution.time_of_flight / 86400.0).floor() as i32;
-            if !is_source_cached(cache, target_entity) {
-                info!(
-                    "Proactively computing cache for {} (arrival day {})",
-                    target_name, arrival_day
-                );
-                request_cache_for_source(
-                    &mut commands,
-                    &bodies_with_entity,
-                    &pending_tasks,
-                    cache,
-                    target_entity,
-                    arrival_day,
-                );
-            }
-        } else {
-            // Immediate transfer - add to queue as committed
-            // sync_transfer_entities will handle spawning the Transfer visualization
-            let departure_day = current_day + option.departure_day;
-            let departure_time = departure_day as f64 * 86400.0;
-
-            info!(
-                "Scheduling transfer: {} (dep +{}d, {} m/s, remaining after: {:.0} m/s)",
-                option.label,
-                option.departure_day,
-                option.solution.total_dv as i32,
-                ship.delta_v_remaining - option.solution.total_dv
+            request_cache_for_source(
+                &mut commands,
+                &bodies_with_entity,
+                &pending_tasks,
+                cache,
+                target_entity,
+                arrival_day,
             );
-
-            // Clear any existing queue and add new transfer as committed
-            queue.queued.clear();
-            queue.queued.push_back(crate::ship::QueuedTransfer {
-                target: target_entity,
-                source: source_entity,
-                solution: option.solution.clone(),
-                departure_time,
-                committed: true,
-            });
         }
 
         // Close the popup

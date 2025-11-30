@@ -102,15 +102,16 @@ fn main() {
             Update,
             (
                 simulation::handle_time_controls,
-                // Queue modifications
-                ship::execute_queue_on_enter,
-                ship::cancel_queue_on_n,
-                ship::expire_uncommitted_queue,
-                // Sync Transfer entities to queue (data-driven)
+                // Flight plan modifications
+                ship::commit_plan,
+                ship::cancel_last_leg,
+                // Transfer execution (runs before expire so committed legs depart first)
+                ship::execute_departure,
+                ship::check_arrival,
+                // Expire uncommitted legs whose departure_day passed
+                ship::expire_stale_legs,
+                // Sync Transfer entities to ShipLocation + committed legs
                 ship::sync_transfer_entities,
-                // Transfer execution
-                ship::execute_scheduled_transfers,
-                ship::check_ship_arrival,
                 // Async cache: spawn task when entering transfer, poll for completion
                 transfer_cache::spawn_cache_compute_task,
                 transfer_cache::poll_cache_compute_task,
@@ -136,7 +137,8 @@ fn main() {
                 ui::handle_option_selection,
             )
                 .chain()
-                .after(update_body_positions),
+                .after(update_body_positions)
+                .after(transfer_cache::update_transfer_cache),
         )
         // Rendering systems (run last)
         .add_systems(
@@ -146,8 +148,8 @@ fn main() {
                 render_system,
                 ship::render_ship,
                 ship::render_departure_markers,
-                ship::render_queue_markers,
-                ship::render_queue_arcs,
+                ship::render_plan_markers,
+                ship::render_plan_arcs,
                 transfer_vis::render_burn_arrows,
                 ui::update_labels,
                 ui::update_time_ui,
@@ -190,16 +192,16 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         }
     }
 
-    // Spawn player ship at Earth with 50 km/s delta-v
+    // Spawn player ship at Earth
     if let Some(earth) = earth_entity {
         commands.spawn((
             ship::Ship {
                 delta_v_remaining: 500_000.0, // m/s
                 name: "Player Ship".to_string(),
             },
-            ship::ShipState::Orbiting { body: earth },
+            ship::ShipLocation::AtBody(earth),
             ship::PlayerControlled,
-            ship::TransferQueue::default(),
+            ship::FlightPlan::default(),
         ));
     }
 
@@ -473,13 +475,12 @@ fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
 
 /// Detects clicks on bodies and opens transfer popup for valid targets.
 /// Only bodies with the same parent as the player's current body are valid targets.
-/// Disabled when ship is in transit.
 fn handle_body_click(
     mouse_button: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     body_query: Query<(Entity, &Body, &ComputedBody)>,
-    player_query: Query<&ship::ShipState, With<ship::PlayerControlled>>,
+    player_query: Query<(&ship::ShipLocation, &ship::FlightPlan), With<ship::PlayerControlled>>,
     mut popup: ResMut<ui::TransferPopup>,
 ) {
     // Only process left clicks
@@ -494,11 +495,15 @@ fn handle_body_click(
     // Get camera for world projection
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
 
-    // Get player's current body - if transferring, disable clicks
-    let Ok(player_state) = player_query.single() else { return };
-    let current_entity = match player_state {
-        ship::ShipState::Orbiting { body } => *body,
-        ship::ShipState::Transferring => return, // Ship in transit
+    // Get player's effective body (where they are or will be)
+    let Ok((location, plan)) = player_query.single() else { return };
+
+    // Determine current effective body for filtering
+    // If there are planned legs, the effective body is the last target
+    let current_entity = if let Some(last_leg) = plan.legs.back() {
+        last_leg.target
+    } else {
+        location.effective_body()
     };
 
     // Find the closest body to the click that:

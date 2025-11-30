@@ -167,18 +167,18 @@ fn compute_cache_for_body(
 pub fn init_transfer_cache(
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
-    player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
+    player_query: Query<&crate::ship::ShipLocation, With<crate::ship::PlayerControlled>>,
     mut cache: ResMut<TransferCache>,
 ) {
     // Get player's current body
-    let Ok(player_state) = player_query.single() else {
+    let Ok(location) = player_query.single() else {
         warn!("No player ship found, cannot initialize transfer cache");
         return;
     };
 
-    let current_entity = match player_state {
-        crate::ship::ShipState::Orbiting { body } => *body,
-        crate::ship::ShipState::Transferring => {
+    let current_entity = match location {
+        crate::ship::ShipLocation::AtBody(body) => *body,
+        crate::ship::ShipLocation::InTransit { .. } => {
             warn!("Ship in transit, cannot initialize transfer cache");
             return;
         }
@@ -253,48 +253,46 @@ pub fn init_transfer_cache(
 
 /// Incrementally updates the transfer cache as simulation time advances.
 /// - Adds current body to cache if not already cached
-/// - Prunes unused sources (keeps current body, transfer destination, queued destinations)
+/// - Prunes unused sources (keeps current body, transfer destination, planned destinations)
 /// - Prunes old solutions (departure day < current day)
 /// - Adds new solutions at the far end of the window for all cached sources
 pub fn update_transfer_cache(
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
     player_query: Query<
-        (&crate::ship::ShipState, &crate::ship::TransferQueue),
+        (&crate::ship::ShipLocation, &crate::ship::FlightPlan),
         With<crate::ship::PlayerControlled>,
     >,
     pending_tasks: Query<&PendingCacheCompute>,
     mut cache: ResMut<TransferCache>,
 ) {
-    // Get player's current state and queue
-    let Ok((player_state, queue)) = player_query.single() else {
+    // Get player's current state and plan
+    let Ok((location, plan)) = player_query.single() else {
         return;
     };
 
     // Build set of relevant sources to keep:
-    // - Current body (if orbiting)
-    // - Current transfer destination (if transferring)
-    // - All queued transfer destinations
+    // - Current body (if at body)
+    // - Current transfer destination (if in transit)
+    // - All planned leg destinations
     let mut relevant_sources: HashSet<Entity> = HashSet::default();
 
-    let current_entity = match player_state {
-        crate::ship::ShipState::Orbiting { body } => {
+    let current_entity = match location {
+        crate::ship::ShipLocation::AtBody(body) => {
             relevant_sources.insert(*body);
             *body
         }
-        crate::ship::ShipState::Transferring => {
+        crate::ship::ShipLocation::InTransit { target, .. } => {
             // Add current transfer destination
-            if let Some(ref current) = queue.current {
-                relevant_sources.insert(current.target);
-            }
+            relevant_sources.insert(*target);
             // Ship in transit - don't update cache (but still prune below)
             Entity::PLACEHOLDER
         }
     };
 
-    // Add all queued destinations (committed or not)
-    for queued in &queue.queued {
-        relevant_sources.insert(queued.target);
+    // Add all planned destinations (committed or not)
+    for leg in &plan.legs {
+        relevant_sources.insert(leg.target);
     }
 
     // Prune sources that are no longer relevant
@@ -330,8 +328,8 @@ pub fn update_transfer_cache(
         );
     }
 
-    // If transferring, don't do incremental updates
-    if matches!(player_state, crate::ship::ShipState::Transferring) {
+    // If in transit, don't do incremental updates
+    if matches!(location, crate::ship::ShipLocation::InTransit { .. }) {
         return;
     }
 
@@ -502,13 +500,15 @@ pub fn update_transfer_cache(
 
 /// Finds the best (lowest delta-v) transfer in a day range for a specific source and target.
 /// Returns (departure_day, solution).
+/// Returns (departure_day, tof_days, solution) for the best transfer in range.
+/// The tof_days is the exact cache key - use this when storing PlannedLeg.
 pub fn find_best_transfer_in_range<'a>(
     cache: &'a TransferCache,
     source_entity: Entity,
     target_entity: Entity,
     start_day: i32,
     end_day: i32,
-) -> Option<(i32, &'a TransferSolution)> {
+) -> Option<(i32, i32, &'a TransferSolution)> {
     cache
         .solutions
         .iter()
@@ -519,7 +519,7 @@ pub fn find_best_transfer_in_range<'a>(
                 && *dep_day < end_day
         })
         .min_by(|(_, a), (_, b)| a.total_dv.partial_cmp(&b.total_dv).unwrap())
-        .map(|((_, _, dep_day, _), sol)| (*dep_day, sol))
+        .map(|((_, _, dep_day, tof_days), sol)| (*dep_day, *tof_days, sol))
 }
 
 /// Checks if a source body has been cached.
@@ -532,44 +532,43 @@ pub fn is_source_cached(cache: &TransferCache, source_entity: Entity) -> bool {
 // ============================================================================
 
 /// Spawns an async task to precompute the transfer cache when ship enters transfer.
-/// Triggered when ShipState changes to Transferring.
+/// Triggered when ShipLocation changes to InTransit.
 pub fn spawn_cache_compute_task(
     mut commands: Commands,
     ships: Query<
-        (&crate::ship::ShipState, &crate::ship::TransferQueue),
+        &crate::ship::ShipLocation,
         (
             With<crate::ship::PlayerControlled>,
-            Changed<crate::ship::ShipState>,
+            Changed<crate::ship::ShipLocation>,
         ),
     >,
     bodies: Query<(Entity, &Body)>,
     pending: Query<&PendingCacheCompute>,
     cache: Res<TransferCache>,
 ) {
-    for (state, queue) in &ships {
-        // Only trigger on Transferring state
-        if !matches!(state, crate::ship::ShipState::Transferring) {
-            continue;
-        }
-
-        // Get current transfer data from queue
-        let Some(ref current) = queue.current else {
+    for location in &ships {
+        // Only trigger on InTransit state
+        let crate::ship::ShipLocation::InTransit {
+            target,
+            solution,
+            departure_time,
+        } = location
+        else {
             continue;
         };
 
-        let target = current.target;
-        let arrival_time = current.departure_time + current.solution.time_of_flight;
+        let arrival_time = departure_time + solution.time_of_flight;
 
         // Skip if already cached or pending
-        if cache.cached_sources.contains(&target) {
+        if cache.cached_sources.contains(target) {
             continue;
         }
-        if pending.iter().any(|p| p.source == target) {
+        if pending.iter().any(|p| p.source == *target) {
             continue;
         }
 
         // Get destination body
-        let Some((_, dest_body)) = bodies.iter().find(|(e, _)| *e == target) else {
+        let Some((_, dest_body)) = bodies.iter().find(|(e, _)| *e == *target) else {
             warn!("Destination body not found for async cache compute");
             continue;
         };
@@ -577,7 +576,7 @@ pub fn spawn_cache_compute_task(
         // Find all other bodies (transfer targets from destination)
         let targets: Vec<BodySnapshot> = bodies
             .iter()
-            .filter(|(e, _)| *e != target)
+            .filter(|(e, _)| *e != *target)
             .map(|(e, b)| BodySnapshot::from_body(e, b))
             .collect();
 
@@ -587,7 +586,7 @@ pub fn spawn_cache_compute_task(
         }
 
         // Create snapshot of destination body
-        let source_snapshot = BodySnapshot::from_body(target, dest_body);
+        let source_snapshot = BodySnapshot::from_body(*target, dest_body);
         let arrival_day = (arrival_time / 86400.0).floor() as i32;
         let num_targets = targets.len();
 
@@ -602,7 +601,7 @@ pub fn spawn_cache_compute_task(
 
         commands.spawn(PendingCacheCompute {
             task,
-            source: target,
+            source: *target,
         });
     }
 }
