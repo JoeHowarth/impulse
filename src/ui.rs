@@ -190,21 +190,13 @@ pub fn update_time_ui(
 #[derive(Component)]
 pub struct TransferInfoPanel;
 
-/// Marker for the transfer title text (e.g., "Earth → Mars")
-#[derive(Component)]
-pub struct TransferTitleText;
-
-/// Marker for the transfer stats text (delta-v, TOF)
-#[derive(Component)]
-pub struct TransferStatsText;
-
-/// Marker for ship status text
+/// Marker for ship status header text
 #[derive(Component)]
 pub struct ShipStatusText;
 
-/// Marker for queue hint text
+/// Marker for the flight plan rows text
 #[derive(Component)]
-pub struct QueueHintText;
+pub struct FlightPlanText;
 
 /// Spawns the transfer info UI panel in the bottom-right corner.
 pub fn spawn_transfer_panel(commands: &mut Commands) {
@@ -216,7 +208,8 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
                 right: Val::Px(16.0),
                 padding: UiRect::all(Val::Px(12.0)),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(6.0),
+                row_gap: Val::Px(4.0),
+                min_width: Val::Px(280.0),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
@@ -224,9 +217,9 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
             TransferInfoPanel,
         ))
         .with_children(|parent| {
-            // Ship status (location + delta-v)
+            // Ship status header (location + delta-v)
             parent.spawn((
-                Text::new("Ship: Earth | 10,000 m/s"),
+                Text::new("Ship: Earth | 500,000 m/s"),
                 TextFont {
                     font_size: 12.0,
                     ..default()
@@ -235,153 +228,91 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
                 ShipStatusText,
             ));
 
-            // Title (e.g., "Earth → Mars Transfer")
-            parent.spawn((
-                Text::new("No Transfer"),
-                TextFont {
-                    font_size: 14.0,
-                    ..default()
-                },
-                TextColor(Color::srgba(1.0, 0.6, 0.2, 1.0)), // Orange to match arc
-                TransferTitleText,
-            ));
-
-            // Stats display
+            // Flight plan rows (dynamically updated)
             parent.spawn((
                 Text::new(""),
                 TextFont {
                     font_size: 11.0,
                     ..default()
                 },
-                TextColor(Color::srgba(0.8, 0.85, 0.9, 1.0)),
-                TransferStatsText,
-            ));
-
-            // Queue hint (shown when transfers are queued)
-            parent.spawn((
-                Text::new(""),
-                TextFont {
-                    font_size: 10.0,
-                    ..default()
-                },
-                TextColor(Color::srgba(0.7, 0.7, 0.3, 1.0)), // Yellowish
-                QueueHintText,
+                TextColor(Color::srgba(0.9, 0.9, 0.9, 1.0)),
+                FlightPlanText,
             ));
         });
 }
 
 /// Updates the transfer info panel with current transfer data and ship status.
 pub fn update_transfer_panel(
-    transfers: Query<&Transfer>,
     bodies: Query<&Body>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
+    player_query: Query<(&crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
     sim_time: Res<SimulationTime>,
-    mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<TransferTitleText>, Without<TransferStatsText>, Without<QueueHintText>)>,
-    mut title_query: Query<&mut Text, (With<TransferTitleText>, Without<ShipStatusText>, Without<TransferStatsText>, Without<QueueHintText>)>,
-    mut stats_query: Query<&mut Text, (With<TransferStatsText>, Without<TransferTitleText>, Without<ShipStatusText>, Without<QueueHintText>)>,
-    mut hint_query: Query<&mut Text, (With<QueueHintText>, Without<TransferTitleText>, Without<ShipStatusText>, Without<TransferStatsText>)>,
+    cache: Res<TransferCache>,
+    mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<FlightPlanText>)>,
+    mut plan_query: Query<&mut Text, (With<FlightPlanText>, Without<ShipStatusText>)>,
 ) {
-    // Update ship status
-    let Ok((ship_entity, ship, ship_location, plan)) = player_query.single() else {
+    let Ok((ship, location, plan)) = player_query.single() else {
         return;
     };
 
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
-    let location_str = match ship_location {
+    // Build header: current location and delta-v
+    let location_name = match location {
         crate::ship::ShipLocation::AtBody(body) => {
-            bodies.get(*body).map(|b| b.name.as_str()).unwrap_or("???").to_string()
+            bodies.get(*body).map(|b| b.name.clone()).unwrap_or_else(|_| "???".into())
         }
         crate::ship::ShipLocation::InTransit { target, solution, departure_time } => {
             let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("???");
-            let arrival_time = departure_time + solution.time_of_flight;
-            let arrival_day = (arrival_time / 86400.0).floor() as i32;
-            let days_to_arrival = arrival_day - current_day;
-            format!("-> {} ({} days)", target_name, days_to_arrival)
+            let arrival_day = ((*departure_time + solution.time_of_flight) / 86400.0).floor() as i32;
+            let days_left = arrival_day - current_day;
+            format!("→ {} ({}d)", target_name, days_left)
         }
     };
-
-    // Check for pending transfer (Transfer entity where departure hasn't happened yet)
-    let scheduled_info = transfers.iter()
-        .find(|t| t.ship == ship_entity && t.departure_time > sim_time.sim_time)
-        .map(|t| {
-            let dep_day = (t.departure_time / 86400.0).floor() as i32;
-            let days_to_departure = dep_day - current_day;
-            let target_name = bodies.get(t.target).map(|b| b.name.as_str()).unwrap_or("???");
-            format!(" | Dep to {} in {}d", target_name, days_to_departure)
-        })
-        .unwrap_or_default();
 
     if let Ok(mut text) = ship_query.single_mut() {
-        **text = format!(
-            "Ship: {} | {:.0} m/s{}",
-            location_str,
-            ship.delta_v_remaining,
-            scheduled_info
-        );
+        **text = format!("{} | {:.0} m/s", location_name, ship.delta_v_remaining);
     }
 
-    // Update plan hint
-    if let Ok(mut hint) = hint_query.single_mut() {
-        if !plan.legs.is_empty() {
-            let plan_len = plan.legs.len();
-            let committed = plan.committed_count;
-            let plan_targets: Vec<_> = plan.legs.iter()
-                .map(|leg| bodies.get(leg.target).map(|b| b.name.as_str()).unwrap_or("?"))
-                .collect();
-            **hint = format!(
-                "Plan ({}/{}): {} | Enter=commit, N=cancel",
-                committed,
-                plan_len,
-                plan_targets.join(" → ")
-            );
+    // Build flight plan rows
+    if let Ok(mut text) = plan_query.single_mut() {
+        if plan.legs.is_empty() {
+            **text = String::new();
         } else {
-            **hint = String::new();
+            let mut rows = Vec::new();
+            let mut running_dv = ship.delta_v_remaining;
+
+            for (i, leg) in plan.legs.iter().enumerate() {
+                let target_name = bodies.get(leg.target).map(|b| b.name.as_str()).unwrap_or("???");
+                let source = crate::ship::leg_source(location, plan, i);
+
+                // Look up solution to get delta-v
+                let (dv, tof) = if let Some(sol) = crate::ship::leg_solution(&cache, source, leg) {
+                    (sol.total_dv, leg.tof_days)
+                } else {
+                    // Solution not in cache - show what we have
+                    (0.0, leg.tof_days)
+                };
+
+                running_dv -= dv;
+                let arrival_day = leg.departure_day + tof;
+
+                // Mark uncommitted legs
+                let status = if i < plan.committed_count { "" } else { " *" };
+
+                rows.push(format!(
+                    "→ {:<8} {:>4}d {:>6.0} dv {:>7.0} rem{}",
+                    target_name, arrival_day, dv, running_dv, status
+                ));
+            }
+
+            // Add hint line
+            let uncommitted = plan.legs.len() - plan.committed_count;
+            if uncommitted > 0 {
+                rows.push(format!("* = uncommitted ({}) | Enter=commit, N=cancel", uncommitted));
+            }
+
+            **text = rows.join("\n");
         }
-    }
-
-    // Find the player's active transfer (if any)
-    let player_transfer = transfers.iter().find(|t| t.ship == ship_entity);
-
-    // Update transfer info
-    let Some(transfer) = player_transfer else {
-        // No active transfer
-        if let Ok(mut title) = title_query.single_mut() {
-            **title = "No Transfer".to_string();
-        }
-        if let Ok(mut stats) = stats_query.single_mut() {
-            **stats = String::new();
-        }
-        return;
-    };
-
-    // Get body names
-    let source_name = bodies
-        .get(transfer.source)
-        .map(|b| b.name.as_str())
-        .unwrap_or("???");
-    let target_name = bodies
-        .get(transfer.target)
-        .map(|b| b.name.as_str())
-        .unwrap_or("???");
-
-    // Update title
-    if let Ok(mut title) = title_query.single_mut() {
-        **title = format!("{} -> {}", source_name, target_name);
-    }
-
-    // Update stats
-    if let Ok(mut stats) = stats_query.single_mut() {
-        let sol = &transfer.solution;
-        let tof_days = sol.time_of_flight / (24.0 * 3600.0);
-
-        **stats = format!(
-            "Dep dv: {:.0} m/s\nArr dv: {:.0} m/s\nTotal: {:.0} m/s\nTOF: {:.0} days",
-            sol.departure_dv.norm(),
-            sol.arrival_dv.norm(),
-            sol.total_dv,
-            tof_days
-        );
     }
 }
 
