@@ -4,8 +4,10 @@ use astrora_core::core::{Vector3, elements::coe_to_rv};
 use bevy::{
     asset::Assets,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
-    gizmos::{config::{GizmoConfigStore, GizmoLineJoint}, GizmoAsset},
-    input::mouse::MouseButtonInput,
+    gizmos::{
+        GizmoAsset,
+        config::{GizmoConfigStore, GizmoLineJoint},
+    },
     math::Vec3,
     platform::collections::HashMap,
     prelude::*,
@@ -183,23 +185,50 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
 
     // First pass: spawn all bodies and build name -> entity map
     let mut body_entities: HashMap<String, BodyEntity> = HashMap::new();
-    let mut earth_entity: Option<Entity> = None;
     for body in bodies.values() {
         let entity = commands.spawn((body.clone(), ComputedBody::default())).id();
         body_entities.insert(body.name.clone(), entity);
-        if body.name == "Earth" {
-            earth_entity = Some(entity);
-        }
     }
 
-    // Spawn player ship at Earth
-    if let Some(earth) = earth_entity {
+    // Spawn player fleets at different locations
+    // Fleet 1: Main fleet at Earth (selected by default)
+    if let Some(&earth) = body_entities.get("Earth") {
         commands.spawn((
-            ship::Ship {
-                delta_v_remaining: 500_000.0, // m/s
-                name: "Player Ship".to_string(),
+            ship::Fleet {
+                delta_v_remaining: 500_000.0,
+                name: "Alpha".to_string(),
+                ship_count: 10,
             },
             ship::ShipLocation::AtBody(earth),
+            ship::PlayerControlled,
+            ship::Selected,
+            ship::FlightPlan::default(),
+        ));
+    }
+
+    // Fleet 2: At Mars
+    if let Some(&mars) = body_entities.get("Mars") {
+        commands.spawn((
+            ship::Fleet {
+                delta_v_remaining: 400_000.0,
+                name: "Bravo".to_string(),
+                ship_count: 5,
+            },
+            ship::ShipLocation::AtBody(mars),
+            ship::PlayerControlled,
+            ship::FlightPlan::default(),
+        ));
+    }
+
+    // Fleet 3: At Jupiter
+    if let Some(&jupiter) = body_entities.get("Jupiter") {
+        commands.spawn((
+            ship::Fleet {
+                delta_v_remaining: 300_000.0,
+                name: "Charlie".to_string(),
+                ship_count: 3,
+            },
+            ship::ShipLocation::AtBody(jupiter),
             ship::PlayerControlled,
             ship::FlightPlan::default(),
         ));
@@ -221,7 +250,9 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
                             depth_bias: 0.1,
                             ..default()
                         },
-                        OrbitGizmo { parent: parent_entity },
+                        OrbitGizmo {
+                            parent: parent_entity,
+                        },
                     ));
                 }
             }
@@ -275,7 +306,8 @@ fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
     let mut points = Vec::with_capacity(ORBIT_SEGMENTS + 1);
     for i in 0..ORBIT_SEGMENTS {
         let t = i as f64 * step_dt;
-        if let Ok(elems) = propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t) {
+        if let Ok(elems) = propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t)
+        {
             let (r_local, _) = coe_to_rv(&elems, parent_body.std_grav_param);
             points.push(phys_to_visual(r_local));
         }
@@ -370,10 +402,7 @@ fn resolve_position_with_queries(
     }
 
     // Find the body component for this entity
-    let body = bodies
-        .iter()
-        .find(|(e, _)| *e == entity)
-        .map(|(_, b)| b);
+    let body = bodies.iter().find(|(e, _)| *e == entity).map(|(_, b)| b);
 
     let Some(body) = body else {
         return Vec3::ZERO;
@@ -473,88 +502,91 @@ fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
 // Body Click Detection
 // ============================================================================
 
-/// Detects clicks on bodies and opens transfer popup for valid targets.
-/// Only bodies with the same parent as the player's current body are valid targets.
+/// Detects clicks on fleets or bodies.
+/// - Click: select fleet if one is at click location
+/// - Shift+click: open transfer popup for selected fleet
 fn handle_body_click(
+    mut commands: Commands,
     mouse_button: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     body_query: Query<(Entity, &Body, &ComputedBody)>,
-    player_query: Query<(&ship::ShipLocation, &ship::FlightPlan), With<ship::PlayerControlled>>,
+    fleet_query: Query<(Entity, &ship::Fleet, &ship::ShipLocation), With<ship::PlayerControlled>>,
+    selected_query: Query<Entity, With<ship::Selected>>,
     mut popup: ResMut<ui::TransferPopup>,
 ) {
-    // Only process left clicks
     if !mouse_button.just_pressed(MouseButton::Left) {
         return;
     }
 
-    // Get cursor position
     let Ok(window) = windows.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
-
-    // Get camera for world projection
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
 
-    // Get player's effective body (where they are or will be)
-    let Ok((location, plan)) = player_query.single() else { return };
+    let shift_held = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
 
-    // Determine current effective body for filtering
-    // If there are planned legs, the effective body is the last target
-    let current_entity = if let Some(last_leg) = plan.legs.back() {
-        last_leg.target
-    } else {
-        location.effective_body()
-    };
+    if shift_held {
+        // Shift+click: open transfer popup for body
+        let selected_fleet = fleet_query.iter().find(|(e, _, _)| selected_query.get(*e).is_ok());
+        let current_entity = selected_fleet.map(|(_, _, loc)| loc.effective_body());
 
-    // Find the closest body to the click that:
-    // 1. Is visible
-    // 2. Is not the current body
-    let mut best_match: Option<(Entity, f32)> = None; // (entity, screen_distance)
+        let mut best_match: Option<(Entity, f32)> = None;
+        for (entity, _body, computed) in body_query.iter() {
+            if computed.visibility < 0.01 {
+                continue;
+            }
+            if current_entity == Some(entity) {
+                continue;
+            }
 
-    for (entity, _body, computed) in body_query.iter() {
-        // Skip invisible bodies
-        if computed.visibility < 0.01 {
-            continue;
-        }
+            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position) else {
+                continue;
+            };
 
-        // Skip current body
-        if entity == current_entity {
-            continue;
-        }
-
-        // Project body position to screen space
-        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position) else {
-            continue;
-        };
-
-        // Check distance from cursor to body center
-        let screen_dist = cursor_pos.distance(screen_pos);
-
-        // Check if click is within the body's display radius (with some tolerance)
-        let click_radius = computed.display_size * 2.0 + 10.0; // Extra tolerance for small bodies
-        if screen_dist <= click_radius {
-            // Track the closest match
-            match &best_match {
-                None => best_match = Some((entity, screen_dist)),
-                Some((_, best_dist)) if screen_dist < *best_dist => {
-                    best_match = Some((entity, screen_dist))
+            let screen_dist = cursor_pos.distance(screen_pos);
+            let click_radius = computed.display_size * 2.0 + 10.0;
+            if screen_dist <= click_radius {
+                match &best_match {
+                    None => best_match = Some((entity, screen_dist)),
+                    Some((_, best_dist)) if screen_dist < *best_dist => {
+                        best_match = Some((entity, screen_dist))
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+        }
+
+        if let Some((clicked_entity, _)) = best_match {
+            let body_name = body_query
+                .get(clicked_entity)
+                .map(|(_, b, _)| b.name.clone())
+                .unwrap_or_default();
+            info!("Shift+clicked on body: {}", body_name);
+            popup.target_entity = Some(clicked_entity);
+        }
+    } else {
+        // Click: select fleet if there's one at click location
+        for (fleet_entity, fleet, location) in fleet_query.iter() {
+            let fleet_world_pos = match location {
+                ship::ShipLocation::AtBody(body) => {
+                    body_query.get(*body).map(|(_, _, c)| c.position).ok()
+                }
+                ship::ShipLocation::InTransit { .. } => None,
+            };
+
+            let Some(world_pos) = fleet_world_pos else { continue };
+            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, world_pos) else { continue };
+
+            let screen_dist = cursor_pos.distance(screen_pos);
+            if screen_dist <= 15.0 {
+                info!("Selected fleet: {}", fleet.name);
+                for old_selected in selected_query.iter() {
+                    commands.entity(old_selected).remove::<ship::Selected>();
+                }
+                commands.entity(fleet_entity).insert(ship::Selected);
+                return;
             }
         }
     }
-
-    // Handle the click
-    if let Some((clicked_entity, _)) = best_match {
-        let body_name = body_query
-            .get(clicked_entity)
-            .map(|(_, b, _)| b.name.clone())
-            .unwrap_or_default();
-
-        info!("Clicked on body: {} (entity {:?})", body_name, clicked_entity);
-
-        // Store for popup (popup spawning will be added in next step)
-        popup.target_entity = Some(clicked_entity);
-    }
 }
-

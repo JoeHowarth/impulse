@@ -19,6 +19,7 @@ pub struct TransferSolution {
     /// Total delta-v magnitude (m/s) - sum of burn magnitudes
     pub total_dv: f64,
     /// Orbital elements of the transfer trajectory
+    #[allow(dead_code)]
     pub transfer_orbit: OrbitalElements,
     /// Time of flight (seconds)
     pub time_of_flight: f64,
@@ -83,7 +84,7 @@ pub fn propagate_kepler_full(r0: Vector3, v0: Vector3, mu: f64, dt: f64) -> Opti
         let psi = chi2 * alpha;
         let (c2, c3) = stumpff_c(psi);
 
-        let r = chi2 * c2 + r0_dot_v0 / sqrt_mu * chi * (1.0 - psi * c3) + r0_mag * (1.0 - psi * c2);
+        let _r = chi2 * c2 + r0_dot_v0 / sqrt_mu * chi * (1.0 - psi * c3) + r0_mag * (1.0 - psi * c2);
         let f_chi = r0_dot_v0 / sqrt_mu * chi2 * c2 + (1.0 - r0_mag * alpha) * chi2 * chi * c3 + r0_mag * chi - sqrt_mu * dt;
         let f_prime = chi2 * c2 + r0_dot_v0 / sqrt_mu * chi * (1.0 - psi * c3) + r0_mag * (1.0 - psi * c2);
 

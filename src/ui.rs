@@ -3,7 +3,6 @@
 use bevy::prelude::*;
 
 use crate::simulation::SimulationTime;
-use crate::transfer_vis::Transfer;
 use crate::transfer_cache::{TransferCache, find_best_transfer_in_range, is_source_cached, request_cache_for_source, PendingCacheCompute};
 use crate::transfer::TransferSolution;
 use crate::orbital_data::Body;
@@ -242,21 +241,29 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
 }
 
 /// Updates the transfer info panel with current transfer data and ship status.
+/// Shows the selected fleet's info.
 pub fn update_transfer_panel(
     bodies: Query<&Body>,
-    player_query: Query<(&crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
+    selected_query: Query<(&crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
     sim_time: Res<SimulationTime>,
     cache: Res<TransferCache>,
     mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<FlightPlanText>)>,
     mut plan_query: Query<&mut Text, (With<FlightPlanText>, Without<ShipStatusText>)>,
 ) {
-    let Ok((ship, location, plan)) = player_query.single() else {
+    let Ok((fleet, location, plan)) = selected_query.single() else {
+        // No fleet selected - clear panel
+        if let Ok(mut text) = ship_query.single_mut() {
+            **text = "No fleet selected".to_string();
+        }
+        if let Ok(mut text) = plan_query.single_mut() {
+            **text = String::new();
+        }
         return;
     };
 
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
-    // Build header: current location and delta-v
+    // Build header: fleet name, ship count, location, delta-v
     let location_name = match location {
         crate::ship::ShipLocation::AtBody(body) => {
             bodies.get(*body).map(|b| b.name.clone()).unwrap_or_else(|_| "???".into())
@@ -270,7 +277,7 @@ pub fn update_transfer_panel(
     };
 
     if let Ok(mut text) = ship_query.single_mut() {
-        **text = format!("{} | {:.0} m/s", location_name, ship.delta_v_remaining);
+        **text = format!("{} ({} ships) @ {} | {:.0} m/s", fleet.name, fleet.ship_count, location_name, fleet.delta_v_remaining);
     }
 
     // Build flight plan rows
@@ -279,7 +286,7 @@ pub fn update_transfer_panel(
             **text = String::new();
         } else {
             let mut rows = Vec::new();
-            let mut running_dv = ship.delta_v_remaining;
+            let mut running_dv = fleet.delta_v_remaining;
 
             for (i, leg) in plan.legs.iter().enumerate() {
                 let target_name = bodies.get(leg.target).map(|b| b.name.as_str()).unwrap_or("???");
@@ -637,7 +644,7 @@ pub fn handle_popup_spawn(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
+    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Check if we need to spawn a popup
@@ -774,7 +781,7 @@ pub fn refresh_popup_on_cache_ready(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
+    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only check if we're waiting for cache
@@ -858,7 +865,7 @@ pub fn update_popup_options(
     cache: Res<TransferCache>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
+    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only process if popup is open
@@ -985,7 +992,7 @@ pub fn handle_option_hover(
 pub fn handle_option_selection(
     mut commands: Commands,
     mut popup: ResMut<TransferPopup>,
-    mut player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipLocation, &mut crate::ship::FlightPlan), With<crate::ship::PlayerControlled>>,
+    mut player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &mut crate::ship::FlightPlan), With<crate::ship::Selected>>,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
     bodies: Query<&crate::orbital_data::Body>,

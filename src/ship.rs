@@ -31,14 +31,20 @@ use crate::{phys_to_visual, transfer_vis};
 #[derive(Component)]
 pub struct PlayerControlled;
 
-/// A ship that can travel between celestial bodies.
+/// A fleet of ships that travel together between celestial bodies.
 #[derive(Component)]
-pub struct Ship {
-    /// Remaining delta-v budget in m/s
+pub struct Fleet {
+    /// Remaining delta-v budget in m/s (same for all ships in fleet)
     pub delta_v_remaining: f64,
-    /// Ship name (for future multi-ship support)
+    /// Fleet name for display
     pub name: String,
+    /// Number of ships in this fleet
+    pub ship_count: u32,
 }
+
+/// Marker for the currently selected fleet.
+#[derive(Component)]
+pub struct Selected;
 
 /// Ship's current location - either at a body or in transit.
 #[derive(Component)]
@@ -63,6 +69,7 @@ impl ShipLocation {
     }
 
     /// When ship arrives at effective_body (current time if AtBody)
+    #[allow(dead_code)]
     pub fn arrival_time(&self, current_time: f64) -> f64 {
         match self {
             ShipLocation::AtBody(_) => current_time,
@@ -186,7 +193,7 @@ pub fn expire_stale_legs(mut ships: Query<&mut FlightPlan>, sim_time: Res<Simula
 /// Executes departure when a committed leg's departure day arrives.
 /// Looks up solution from cache, deducts delta-v, transitions to InTransit.
 pub fn execute_departure(
-    mut ships: Query<(&mut Ship, &mut ShipLocation, &mut FlightPlan)>,
+    mut ships: Query<(&mut Fleet, &mut ShipLocation, &mut FlightPlan)>,
     cache: Res<TransferCache>,
     bodies: Query<&Body>,
     sim_time: Res<SimulationTime>,
@@ -249,7 +256,7 @@ pub fn execute_departure(
 /// Checks if ship has arrived at destination.
 /// Deducts arrival delta-v, transitions to AtBody.
 pub fn check_arrival(
-    mut ships: Query<(&mut Ship, &mut ShipLocation)>,
+    mut ships: Query<(&mut Fleet, &mut ShipLocation)>,
     bodies: Query<&Body>,
     sim_time: Res<SimulationTime>,
 ) {
@@ -272,10 +279,7 @@ pub fn check_arrival(
         let arrival_dv = solution.arrival_dv.norm();
         ship.delta_v_remaining -= arrival_dv;
 
-        let target_name = bodies
-            .get(*target)
-            .map(|b| b.name.as_str())
-            .unwrap_or("?");
+        let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("?");
         info!(
             "Ship '{}' arrived at {}! dv spent: {:.0} m/s, remaining: {:.0} m/s",
             ship.name, target_name, arrival_dv, ship.delta_v_remaining
@@ -287,9 +291,10 @@ pub fn check_arrival(
 }
 
 /// Commits all uncommitted legs when Enter is pressed.
+/// Only operates on the selected fleet.
 pub fn commit_plan(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut ships: Query<(&Ship, &ShipLocation, &mut FlightPlan), With<PlayerControlled>>,
+    mut ships: Query<(&Fleet, &ShipLocation, &mut FlightPlan), With<Selected>>,
     cache: Res<TransferCache>,
     bodies: Query<&Body>,
 ) {
@@ -347,9 +352,10 @@ pub fn commit_plan(
 }
 
 /// Cancels the last leg when N is pressed.
+/// Only operates on the selected fleet.
 pub fn cancel_last_leg(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut ships: Query<&mut FlightPlan, With<PlayerControlled>>,
+    mut ships: Query<&mut FlightPlan, With<Selected>>,
     bodies: Query<&Body>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyN) {
@@ -371,7 +377,11 @@ pub fn cancel_last_leg(
 
             info!(
                 "Cancelled {} leg to {} ({} remaining)",
-                if was_committed { "committed" } else { "planned" },
+                if was_committed {
+                    "committed"
+                } else {
+                    "planned"
+                },
                 target_name,
                 plan.legs.len()
             );
@@ -472,31 +482,39 @@ pub fn sync_transfer_entities(
 // Rendering
 // ============================================================================
 
-/// Ship triangle color (cyan)
-const SHIP_COLOR: Color = Color::srgb(0.3, 0.9, 0.9);
+/// Selected fleet color (brighter cyan)
+const FLEET_SELECTED_COLOR: Color = Color::srgb(0.5, 1.0, 1.0);
 
-/// Ship size in visual units
-const SHIP_SIZE: f32 = 3.0;
+/// Unselected fleet color (dimmer)
+const FLEET_UNSELECTED_COLOR: Color = Color::srgba(0.3, 0.7, 0.7, 0.6);
+
+/// Fleet size in visual units
+const FLEET_SIZE: f32 = 3.0;
 
 /// Departure marker color (distinct from departure burn arrow)
 const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
 
-/// Renders ships as triangles at their current positions.
+/// Renders fleets as triangles at their current positions.
 /// - AtBody: positioned at body location
 /// - InTransit: positioned along transfer arc
+/// Selected fleet is brighter and larger.
 pub fn render_ship(
-    ships: Query<(&Ship, &ShipLocation)>,
+    ships: Query<(&Fleet, &ShipLocation, Option<&Selected>)>,
     bodies: Query<&ComputedBody>,
     sim_time: Res<SimulationTime>,
     mut painter: ShapePainter,
 ) {
-    for (_ship, location) in &ships {
+    for (fleet, location, is_selected) in &ships {
+        let is_selected = is_selected.is_some();
+        let size_mult = if is_selected { 1.3 } else { 1.0 };
+        let color = if is_selected { FLEET_SELECTED_COLOR } else { FLEET_UNSELECTED_COLOR };
+
         let (position, velocity_dir) = match location {
             ShipLocation::AtBody(body) => {
                 // Position at body's current location
                 let body_pos = bodies.get(*body).map(|c| c.position).unwrap_or(Vec3::ZERO);
                 // Offset slightly so ship is visible next to body
-                let offset_pos = body_pos + Vec3::new(SHIP_SIZE * 1.5, 0.0, 0.0);
+                let offset_pos = body_pos + Vec3::new(FLEET_SIZE * 1.5 * size_mult, 0.0, 0.0);
                 // Velocity direction pointing "forward" in orbit (tangent)
                 (offset_pos, Vec3::new(0.0, 1.0, 0.0))
             }
@@ -508,11 +526,9 @@ pub fn render_ship(
                 // Propagate position along transfer arc
                 let elapsed = sim_time.sim_time - departure_time;
                 if elapsed < 0.0 {
-                    // Before departure - shouldn't happen but handle gracefully
                     continue;
                 }
 
-                // Get current position and velocity on transfer orbit
                 if let Some((r_vec, v_vec)) = propagate_kepler_full(
                     solution.departure_pos,
                     solution.departure_vel,
@@ -520,11 +536,8 @@ pub fn render_ship(
                     elapsed,
                 ) {
                     let pos = phys_to_visual(r_vec);
-
-                    // Use actual velocity direction (project to 2D XY plane)
                     let vel_dir =
                         Vec3::new(v_vec.x as f32, v_vec.y as f32, 0.0).normalize_or_zero();
-
                     (pos, vel_dir)
                 } else {
                     continue;
@@ -535,7 +548,6 @@ pub fn render_ship(
         // Draw triangle pointing in velocity direction
         painter.set_translation(position);
 
-        // Rotate to point in velocity direction (triangle points up by default)
         let rotation = if velocity_dir.length_squared() > 0.001 {
             Quat::from_rotation_arc(Vec3::Y, velocity_dir)
         } else {
@@ -543,12 +555,12 @@ pub fn render_ship(
         };
         painter.set_rotation(rotation);
 
-        painter.set_color(SHIP_COLOR);
+        painter.set_color(color);
 
-        // Draw an isoceles triangle pointing up
-        let half_base = SHIP_SIZE * 0.5;
-        let height = SHIP_SIZE;
-        painter.thickness = 0.5;
+        // Draw an isoceles triangle
+        let half_base = FLEET_SIZE * 0.5 * size_mult;
+        let height = FLEET_SIZE * size_mult;
+        painter.thickness = if is_selected { 0.8 } else { 0.5 };
         painter.line(
             Vec3::new(0.0, height * 0.5, 0.0),
             Vec3::new(-half_base, -height * 0.5, 0.0),
@@ -561,6 +573,13 @@ pub fn render_ship(
             Vec3::new(half_base, -height * 0.5, 0.0),
             Vec3::new(0.0, height * 0.5, 0.0),
         );
+
+        // Draw ship count below the triangle for selected fleet
+        if is_selected {
+            painter.set_rotation(Quat::IDENTITY);
+            let count_pos = position + Vec3::new(0.0, -height * 0.8, 0.0);
+            draw_number(&mut painter, fleet.ship_count as usize, count_pos, 2.0);
+        }
     }
 }
 

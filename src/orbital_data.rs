@@ -62,6 +62,7 @@ pub struct Body {
 
 #[derive(Resource, Clone, Debug)]
 pub struct PlanetaryElements {
+    #[allow(dead_code)]
     pub bodies: HashMap<String, Body>,
 }
 

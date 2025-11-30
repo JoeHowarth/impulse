@@ -163,16 +163,16 @@ fn compute_cache_for_body(
 // ============================================================================
 
 /// Populates the transfer cache with all solutions in the search window.
-/// Computes transfers from player's current body to all other bodies.
+/// Computes transfers from the selected fleet's current body to all other bodies.
 pub fn init_transfer_cache(
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
-    player_query: Query<&crate::ship::ShipLocation, With<crate::ship::PlayerControlled>>,
+    selected_query: Query<&crate::ship::ShipLocation, With<crate::ship::Selected>>,
     mut cache: ResMut<TransferCache>,
 ) {
-    // Get player's current body
-    let Ok(location) = player_query.single() else {
-        warn!("No player ship found, cannot initialize transfer cache");
+    // Get selected fleet's current body
+    let Ok(location) = selected_query.single() else {
+        warn!("No selected fleet found, cannot initialize transfer cache");
         return;
     };
 
@@ -259,15 +259,15 @@ pub fn init_transfer_cache(
 pub fn update_transfer_cache(
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
-    player_query: Query<
+    selected_query: Query<
         (&crate::ship::ShipLocation, &crate::ship::FlightPlan),
-        With<crate::ship::PlayerControlled>,
+        With<crate::ship::Selected>,
     >,
     pending_tasks: Query<&PendingCacheCompute>,
     mut cache: ResMut<TransferCache>,
 ) {
-    // Get player's current state and plan
-    let Ok((location, plan)) = player_query.single() else {
+    // Get selected fleet's current state and plan
+    let Ok((location, plan)) = selected_query.single() else {
         return;
     };
 

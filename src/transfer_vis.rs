@@ -45,6 +45,7 @@ pub struct Transfer {
     /// The ship performing this transfer
     pub ship: Entity,
     /// Departure body entity
+    #[allow(dead_code)]
     pub source: Entity,
     /// Arrival body entity
     pub target: Entity,
