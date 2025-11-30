@@ -7,8 +7,35 @@
 - `PlannedLeg`: target, departure_day, tof_days (source derived via `leg_source()` helper)
 - Transfer: click body → popup → select option → append to FlightPlan (uncommitted)
 - Enter commits all uncommitted legs, N cancels last leg
-- Cache keyed by `(source_entity, target_entity, departure_day, tof_days)`
+- **TransferLut**: Precomputed lookup table replaces dynamic cache (see below)
 - `Transfer` entities synced from committed legs for visualization
+
+### Transfer LUT System (Replaces TransferCache)
+
+The dynamic `TransferCache` was replaced with a precomputed `TransferLut` for instant lookups:
+
+**Key changes:**
+- LUT stores full `TransferSolution` objects (positions, velocities, orbital elements) not just delta-v
+- Keyed by true anomaly buckets: `(source_idx, target_idx, ν_src_bucket, ν_tgt_bucket, tof_idx)`
+- 72 anomaly buckets (5° resolution) × ~10-15 TOF candidates per body pair
+- ~1.4M entries total, ~235MB on disk
+
+**Startup flow:**
+1. Check if `assets/transfer_lut.bin` exists
+2. Validate version, body list, bucket count
+3. If invalid/missing: regenerate using rayon parallelization (~1-2s on 8 cores)
+4. Save to disk for next run
+5. Build entity mappings for runtime queries
+
+**Benefits:**
+- Instant transfer lookups (no async compute, no "Loading..." popups)
+- Exact solutions: ship departs at bucket-center anomaly, eliminating positional error
+- Simpler code: ~700 lines of cache management deleted
+
+**Files:**
+- `transfer_lut.rs`: LUT struct, generation, lookup methods
+- `transfer.rs`: `TransferSolution` with serde derives
+- Deleted: `transfer_cache.rs`, `src/bin/gen_transfer_lut.rs`
 
 ---
 
