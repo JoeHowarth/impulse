@@ -104,6 +104,8 @@ fn main() {
                 simulation::handle_time_controls,
                 ship::execute_scheduled_transfers,
                 ship::check_ship_arrival,
+                ship::execute_queue_on_enter,
+                ship::cancel_queue_on_n,
                 // Async cache: spawn task when entering transfer, poll for completion
                 transfer_cache::spawn_cache_compute_task,
                 transfer_cache::poll_cache_compute_task,

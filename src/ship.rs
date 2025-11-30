@@ -9,9 +9,10 @@ use bevy::gizmos::GizmoAsset;
 use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
 
+use crate::simulation::SimulationTime;
 use crate::transfer::{TransferSolution, propagate_kepler_full};
 use crate::orbital_data::{Body, MU_SUN};
-use crate::phys_to_visual;
+use crate::{phys_to_visual, transfer_vis};
 use crate::ComputedBody;
 
 // ============================================================================
@@ -80,9 +81,9 @@ pub struct TransferQueue {
 /// Queries Transfer entities and starts any whose departure_time has passed
 /// (if the ship is still Orbiting).
 pub fn execute_scheduled_transfers(
-    transfers: Query<&crate::transfer_vis::Transfer>,
+    transfers: Query<&transfer_vis::Transfer>,
     mut ships: Query<(&mut Ship, &mut ShipState)>,
-    sim_time: Res<crate::simulation::SimulationTime>,
+    sim_time: Res<SimulationTime>,
 ) {
     for transfer in &transfers {
         // Only execute if departure time has arrived
@@ -127,7 +128,7 @@ pub fn check_ship_arrival(
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     mut ships: Query<(Entity, &mut Ship, &mut ShipState, &mut TransferQueue)>,
     bodies: Query<&Body>,
-    sim_time: Res<crate::simulation::SimulationTime>,
+    sim_time: Res<SimulationTime>,
 ) {
     for (ship_entity, mut ship, mut state, mut queue) in &mut ships {
         // Clone state data to avoid borrow issues
@@ -180,7 +181,7 @@ pub fn check_ship_arrival(
                         );
 
                         // Spawn transfer visualization
-                        crate::transfer_vis::spawn_transfer_visualization(
+                        transfer_vis::spawn_transfer_visualization(
                             &mut commands,
                             &mut gizmo_assets,
                             ship_entity,
@@ -192,6 +193,91 @@ pub fn check_ship_arrival(
                     }
                 }
             }
+        }
+    }
+}
+
+/// System to handle Enter key to execute the first queued transfer.
+/// When the ship is orbiting and has queued transfers, pressing Enter schedules the first one.
+/// The actual departure (state transition, delta-v deduction) happens in `execute_scheduled_transfers`.
+pub fn execute_queue_on_enter(
+    mut commands: Commands,
+    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut ships: Query<(Entity, &Ship, &ShipState, &mut TransferQueue), With<PlayerControlled>>,
+    bodies: Query<&Body>,
+) {
+    if !keyboard.just_pressed(KeyCode::Enter) {
+        return;
+    }
+
+    for (ship_entity, ship, state, mut queue) in &mut ships {
+        // Only execute if ship is orbiting (not already transferring)
+        let ShipState::Orbiting { .. } = state else {
+            continue;
+        };
+
+        // Check if there's a queued transfer
+        let Some(next_transfer) = queue.queued.pop_front() else {
+            continue;
+        };
+
+        let target_name = bodies
+            .get(next_transfer.target)
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        let source_name = bodies
+            .get(next_transfer.source)
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        // Check if we have enough delta-v
+        let required_dv = next_transfer.solution.total_dv;
+        if ship.delta_v_remaining < required_dv {
+            warn!(
+                "Ship cannot execute queued transfer {} -> {}: need {:.0} m/s, have {:.0} m/s. Clearing queue.",
+                source_name, target_name, required_dv, ship.delta_v_remaining
+            );
+            queue.queued.clear();
+            continue;
+        }
+
+        info!(
+            "Scheduling queued transfer {} -> {} (departure day {}, {} m/s)",
+            source_name, target_name,
+            (next_transfer.departure_time / 86400.0) as i32,
+            next_transfer.solution.total_dv as i32
+        );
+
+        // Spawn transfer visualization - this creates the Transfer entity
+        // which will be executed when departure time arrives (by execute_scheduled_transfers)
+        transfer_vis::spawn_transfer_visualization(
+            &mut commands,
+            &mut gizmo_assets,
+            ship_entity,
+            next_transfer.source,
+            next_transfer.target,
+            &next_transfer.solution,
+            next_transfer.departure_time,
+        );
+    }
+}
+
+/// System to handle N key to cancel/clear the transfer queue.
+pub fn cancel_queue_on_n(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut ships: Query<&mut TransferQueue, With<PlayerControlled>>,
+) {
+    if !keyboard.just_pressed(KeyCode::KeyN) {
+        return;
+    }
+
+    for mut queue in &mut ships {
+        if !queue.queued.is_empty() {
+            let count = queue.queued.len();
+            queue.queued.clear();
+            info!("Cancelled {} queued transfer(s)", count);
         }
     }
 }
@@ -215,7 +301,7 @@ const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
 pub fn render_ship(
     ships: Query<(&Ship, &ShipState)>,
     bodies: Query<&ComputedBody>,
-    sim_time: Res<crate::simulation::SimulationTime>,
+    sim_time: Res<SimulationTime>,
     mut painter: ShapePainter,
 ) {
     for (_ship, state) in &ships {
@@ -280,9 +366,9 @@ pub fn render_ship(
 
 /// Renders X markers at departure points for pending transfers.
 pub fn render_departure_markers(
-    transfers: Query<&crate::transfer_vis::Transfer>,
+    transfers: Query<&transfer_vis::Transfer>,
     ships: Query<&ShipState>,
-    sim_time: Res<crate::simulation::SimulationTime>,
+    sim_time: Res<SimulationTime>,
     mut painter: ShapePainter,
 ) {
     for transfer in &transfers {
