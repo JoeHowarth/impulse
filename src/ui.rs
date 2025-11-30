@@ -3,8 +3,8 @@
 use bevy::prelude::*;
 
 use crate::simulation::SimulationTime;
-use crate::transfer_cache::{TransferCache, find_best_transfer_in_range, is_source_cached, request_cache_for_source, PendingCacheCompute};
 use crate::transfer::TransferSolution;
+use crate::transfer_lut::TransferLut;
 use crate::orbital_data::Body;
 use crate::ComputedBody;
 
@@ -246,7 +246,7 @@ pub fn update_transfer_panel(
     bodies: Query<&Body>,
     selected_query: Query<(&crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
     sim_time: Res<SimulationTime>,
-    cache: Res<TransferCache>,
+    lut: Res<TransferLut>,
     mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<FlightPlanText>)>,
     mut plan_query: Query<&mut Text, (With<FlightPlanText>, Without<ShipStatusText>)>,
 ) {
@@ -293,15 +293,21 @@ pub fn update_transfer_panel(
                 let source = crate::ship::leg_source(location, plan, i);
 
                 // Look up solution to get delta-v
-                let (dv, tof) = if let Some(sol) = crate::ship::leg_solution(&cache, source, leg) {
-                    (sol.total_dv, leg.tof_days)
+                let dv = if let (Ok(source_body), Ok(target_body)) = (bodies.get(source), bodies.get(leg.target)) {
+                    lut.get_transfer(
+                        source,
+                        leg.target,
+                        &source_body.orbital_elements,
+                        &target_body.orbital_elements,
+                        leg.departure_day,
+                        leg.tof_days,
+                    ).map(|s| s.total_dv).unwrap_or(0.0)
                 } else {
-                    // Solution not in cache - show what we have
-                    (0.0, leg.tof_days)
+                    0.0
                 };
 
                 running_dv -= dv;
-                let arrival_day = leg.departure_day + tof;
+                let arrival_day = leg.departure_day + leg.tof_days;
 
                 // Mark uncommitted legs
                 let status = if i < plan.committed_count { "" } else { " *" };
@@ -345,7 +351,8 @@ pub struct ClosePopupButton;
 pub struct TransferOption {
     pub label: String,
     pub departure_day: i32,
-    pub tof_days: i32,  // Exact cache key - must match for leg_solution lookup
+    pub tof_days: i32,
+    /// Full transfer solution from LUT
     pub solution: TransferSolution,
 }
 
@@ -420,7 +427,6 @@ pub fn spawn_transfer_popup(
 
             // Option buttons
             for (i, opt) in options.iter().enumerate() {
-                let tof_days = (opt.solution.time_of_flight / 86400.0) as i32;
                 let dv = opt.solution.total_dv as i32;
                 let dep_in = opt.departure_day; // Relative to current day
                 let affordable = opt.solution.total_dv <= available_dv;
@@ -451,7 +457,7 @@ pub fn spawn_transfer_popup(
                     .with_child((
                         Text::new(format!(
                             "{}: {} m/s, {}d TOF (dep +{}d)",
-                            opt.label, dv, tof_days, dep_in
+                            opt.label, dv, opt.tof_days, dep_in
                         )),
                         TextFont {
                             font_size: 11.0,
@@ -556,29 +562,35 @@ pub fn spawn_computing_popup(
         .id()
 }
 
-/// Builds transfer options from the cache for a specific source and target.
+/// Builds transfer options from the LUT for a specific source and target.
 pub fn build_transfer_options(
-    cache: &TransferCache,
+    lut: &TransferLut,
     source_entity: Entity,
     target_entity: Entity,
+    source_elements: &astrora_core::core::elements::OrbitalElements,
+    target_elements: &astrora_core::core::elements::OrbitalElements,
     current_day: i32,
 ) -> Vec<TransferOption> {
     let mut options = Vec::new();
 
     // 1. Now (tomorrow to avoid immediate expiration)
-    // We use current_day + 1 so the transfer doesn't expire immediately
-    if let Some((dep_day, tof_days, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day + 1, current_day + 3) {
+    if let Some((dep_day, tof_days, sol)) = lut.find_best_transfer(
+        source_entity, target_entity, source_elements, target_elements,
+        current_day + 1, current_day + 3,
+    ) {
         options.push(TransferOption {
             label: "Now".to_string(),
             departure_day: dep_day - current_day,
             tof_days,
-            solution: sol.clone(),
+            solution: sol,
         });
     }
 
     // 2. Best in 30 days
-    if let Some((dep_day, tof_days, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 30) {
-        // Only add if different from "Now" option
+    if let Some((dep_day, tof_days, sol)) = lut.find_best_transfer(
+        source_entity, target_entity, source_elements, target_elements,
+        current_day, current_day + 30,
+    ) {
         let is_different = options.first().map_or(true, |o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0 || (dep_day - current_day) > 2
         });
@@ -587,14 +599,16 @@ pub fn build_transfer_options(
                 label: "Best 30d".to_string(),
                 departure_day: dep_day - current_day,
                 tof_days,
-                solution: sol.clone(),
+                solution: sol,
             });
         }
     }
 
     // 3. Best in 180 days
-    if let Some((dep_day, tof_days, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 180) {
-        // Only add if different from previous options
+    if let Some((dep_day, tof_days, sol)) = lut.find_best_transfer(
+        source_entity, target_entity, source_elements, target_elements,
+        current_day, current_day + 180,
+    ) {
         let is_different = options.iter().all(|o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0
         });
@@ -603,14 +617,16 @@ pub fn build_transfer_options(
                 label: "Best 180d".to_string(),
                 departure_day: dep_day - current_day,
                 tof_days,
-                solution: sol.clone(),
+                solution: sol,
             });
         }
     }
 
     // 4. Best in 500 days (full search window)
-    if let Some((dep_day, tof_days, sol)) = find_best_transfer_in_range(cache, source_entity, target_entity, current_day, current_day + 500) {
-        // Only add if different from previous options
+    if let Some((dep_day, tof_days, sol)) = lut.find_best_transfer(
+        source_entity, target_entity, source_elements, target_elements,
+        current_day, current_day + 500,
+    ) {
         let is_different = options.iter().all(|o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0
         });
@@ -619,7 +635,7 @@ pub fn build_transfer_options(
                 label: "Best 500d".to_string(),
                 departure_day: dep_day - current_day,
                 tof_days,
-                solution: sol.clone(),
+                solution: sol,
             });
         }
     }
@@ -641,7 +657,7 @@ pub fn despawn_transfer_popup(commands: &mut Commands, popup: &mut TransferPopup
 pub fn handle_popup_spawn(
     mut commands: Commands,
     mut popup: ResMut<TransferPopup>,
-    cache: Res<TransferCache>,
+    lut: Res<TransferLut>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
     player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
@@ -663,11 +679,16 @@ pub fn handle_popup_spawn(
     };
 
     // Determine source entity: where we'd depart from for next leg
-    // This is the effective body after all current legs
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
     let next_leg_index = plan.legs.len();
     let source_entity = crate::ship::leg_source(location, plan, next_leg_index);
     let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
+
+    // Get source body orbital elements
+    let Ok((source_body, _)) = bodies.get(source_entity) else {
+        popup.target_entity = None;
+        return;
+    };
 
     // Get target body info
     let Ok((target_body, target_computed)) = bodies.get(target_entity) else {
@@ -691,33 +712,15 @@ pub fn handle_popup_spawn(
     // Get available delta-v from player ship
     let available_dv = ship.delta_v_remaining;
 
-    // Check if source is cached - if not, show "computing" message
-    let source_name = bodies
-        .get(source_entity)
-        .map(|(b, _)| b.name.clone())
-        .unwrap_or_else(|_| "Unknown".to_string());
-
-    if !is_source_cached(&cache, source_entity) {
-        info!("Spawning popup for {} - waiting for {} cache", target_body.name, source_name);
-
-        popup.options = Vec::new();
-        popup.options_computed_day = base_day;
-        popup.waiting_for_cache = Some(source_name.clone());
-
-        // Spawn popup with "computing" message
-        let popup_entity = spawn_computing_popup(
-            &mut commands,
-            &target_body.name,
-            &source_name,
-            screen_pos,
-        );
-
-        popup.popup_entity = Some(popup_entity);
-        return;
-    }
-
-    // Build transfer options
-    let options = build_transfer_options(&cache, source_entity, target_entity, base_day);
+    // Build transfer options (LUT is always ready - no "computing" state)
+    let options = build_transfer_options(
+        &lut,
+        source_entity,
+        target_entity,
+        &source_body.orbital_elements,
+        &target_body.orbital_elements,
+        base_day,
+    );
 
     info!("Spawning popup for {} with {} options", target_body.name, options.len());
 
@@ -773,96 +776,12 @@ pub fn update_popup_position(
     }
 }
 
-/// System to refresh popup when cache becomes available.
-/// If popup is waiting for cache and the source is now cached, despawn and respawn with real options.
-pub fn refresh_popup_on_cache_ready(
-    mut commands: Commands,
-    mut popup: ResMut<TransferPopup>,
-    cache: Res<TransferCache>,
-    sim_time: Res<SimulationTime>,
-    bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-) {
-    // Only check if we're waiting for cache
-    if popup.waiting_for_cache.is_none() {
-        return;
-    }
-    let Some(target_entity) = popup.target_entity else {
-        return;
-    };
-
-    // Get player ship state to find source body
-    let Ok((_ship_entity, ship, location, plan)) = player_query.single() else {
-        return;
-    };
-
-    // Determine source entity and base day using helpers
-    let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-    let next_leg_index = plan.legs.len();
-    let source_entity = crate::ship::leg_source(location, plan, next_leg_index);
-    let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
-
-    // Check if source is now cached
-    if !is_source_cached(&cache, source_entity) {
-        return; // Still waiting
-    }
-
-    info!("Cache for source now ready, refreshing popup");
-
-    // Get target body info
-    let Ok((target_body, target_computed)) = bodies.get(target_entity) else {
-        despawn_transfer_popup(&mut commands, &mut popup);
-        return;
-    };
-
-    // Get screen position
-    let Ok((camera, camera_transform)) = camera_query.single() else {
-        return;
-    };
-    let screen_pos = match camera.world_to_viewport(camera_transform, target_computed.position) {
-        Ok(pos) => pos,
-        Err(_) => {
-            despawn_transfer_popup(&mut commands, &mut popup);
-            return;
-        }
-    };
-
-    // Get available delta-v
-    let available_dv = ship.delta_v_remaining;
-
-    // Build transfer options
-    let options = build_transfer_options(&cache, source_entity, target_entity, base_day);
-
-    info!("Refreshed popup for {} with {} options", target_body.name, options.len());
-
-    // Despawn old popup
-    if let Some(entity) = popup.popup_entity.take() {
-        commands.entity(entity).despawn();
-    }
-
-    // Update popup state
-    popup.options = options;
-    popup.options_computed_day = base_day;
-    popup.waiting_for_cache = None;
-
-    // Spawn new popup with real options
-    let new_popup_entity = spawn_transfer_popup(
-        &mut commands,
-        &target_body.name,
-        &popup.options,
-        screen_pos,
-        available_dv,
-    );
-    popup.popup_entity = Some(new_popup_entity);
-}
-
 /// System to update popup options when simulation day changes.
 /// Rebuilds options and respawns popup UI to show updated values.
 pub fn update_popup_options(
     mut commands: Commands,
     mut popup: ResMut<TransferPopup>,
-    cache: Res<TransferCache>,
+    lut: Res<TransferLut>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
     player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
@@ -892,6 +811,11 @@ pub fn update_popup_options(
         return;
     }
 
+    // Get source body orbital elements
+    let Ok((source_body, _)) = bodies.get(source_entity) else {
+        return;
+    };
+
     // Get target body info
     let Ok((target_body, target_computed)) = bodies.get(target_entity) else {
         return;
@@ -910,7 +834,14 @@ pub fn update_popup_options(
     let available_dv = ship.delta_v_remaining;
 
     // Rebuild options
-    let options = build_transfer_options(&cache, source_entity, target_entity, base_day);
+    let options = build_transfer_options(
+        &lut,
+        source_entity,
+        target_entity,
+        &source_body.orbital_elements,
+        &target_body.orbital_elements,
+        base_day,
+    );
 
     // Preserve hover state if still valid
     let preserved_hover = popup.hovered_option.filter(|&idx| idx < options.len());
@@ -996,9 +927,7 @@ pub fn handle_option_selection(
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
     bodies: Query<&crate::orbital_data::Body>,
-    bodies_with_entity: Query<(Entity, &crate::orbital_data::Body)>,
-    cache_res: Res<TransferCache>,
-    pending_tasks: Query<&PendingCacheCompute>,
+    lut: Res<TransferLut>,
 ) {
     for (interaction, button) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -1023,7 +952,6 @@ pub fn handle_option_selection(
         };
 
         let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-        let cache = cache_res.as_ref();
 
         // Source is where we'd depart from after all current legs
         let next_leg_index = plan.legs.len();
@@ -1038,7 +966,17 @@ pub fn handle_option_selection(
             .enumerate()
             .filter_map(|(i, leg)| {
                 let src = crate::ship::leg_source(location, &plan, i);
-                crate::ship::leg_solution(cache, src, leg).map(|s| s.total_dv)
+                let (Ok(src_body), Ok(tgt_body)) = (bodies.get(src), bodies.get(leg.target)) else {
+                    return None;
+                };
+                lut.get_transfer(
+                    src,
+                    leg.target,
+                    &src_body.orbital_elements,
+                    &tgt_body.orbital_elements,
+                    leg.departure_day,
+                    leg.tof_days,
+                ).map(|s| s.total_dv)
             })
             .sum();
 
@@ -1065,23 +1003,6 @@ pub fn handle_option_selection(
             departure_day,
             tof_days,
         });
-
-        // Proactively compute cache for target body
-        let arrival_day = departure_day + tof_days;
-        if !is_source_cached(cache, target_entity) {
-            info!(
-                "Proactively computing cache for {} (arrival day {})",
-                target_name, arrival_day
-            );
-            request_cache_for_source(
-                &mut commands,
-                &bodies_with_entity,
-                &pending_tasks,
-                cache,
-                target_entity,
-                arrival_day,
-            );
-        }
 
         // Close the popup
         despawn_transfer_popup(&mut commands, &mut popup);

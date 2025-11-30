@@ -12,21 +12,23 @@
 use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use astrora_core::core::elements::{coe_to_rv, OrbitalElements};
-use astrora_core::maneuvers::{Lambert, TransferKind};
 use bevy::prelude::*;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::orbital_data::{Body, MU_SUN};
+use crate::orbital_data::{propagate_elliptic, Body, MU_SUN};
+use crate::transfer::{TransferSolution, compute_transfer};
 
 // ============================================================================
 // Configuration
 // ============================================================================
 
-/// Number of anomaly buckets (10° per bucket)
-pub const ANOMALY_BUCKETS: usize = 36;
+/// Number of anomaly buckets (360 / ANOMALY_BUCKETS = bucket size in degrees)
+pub const ANOMALY_BUCKETS: usize = 72;
 const BUCKET_SIZE_RAD: f64 = 2.0 * PI / ANOMALY_BUCKETS as f64;
 
 /// Path to the LUT file
@@ -47,17 +49,6 @@ const TOF_NEPTUNE: &[i32] = &[3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 1
 // Types
 // ============================================================================
 
-/// A single LUT entry storing transfer delta-v
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TransferEntry {
-    /// Total delta-v in m/s
-    pub total_dv: f64,
-    /// Departure delta-v magnitude in m/s
-    pub departure_dv: f64,
-    /// Arrival delta-v magnitude in m/s
-    pub arrival_dv: f64,
-}
-
 /// The complete transfer LUT
 #[derive(Clone, Debug, Serialize, Deserialize, Resource)]
 pub struct TransferLut {
@@ -69,8 +60,16 @@ pub struct TransferLut {
     pub tof_candidates: HashMap<String, Vec<i32>>,
     /// Body names in order (index = body ID used in entries)
     pub body_names: Vec<String>,
-    /// Map from "source_idx,target_idx,ν_src_bucket,ν_tgt_bucket,tof_idx" to entry
-    pub entries: HashMap<String, TransferEntry>,
+    /// Map from "source_idx,target_idx,ν_src_bucket,ν_tgt_bucket,tof_idx" to full solution
+    pub entries: HashMap<String, TransferSolution>,
+
+    // Runtime mappings (not serialized)
+    /// Entity -> body index in LUT
+    #[serde(skip)]
+    pub entity_to_idx: HashMap<Entity, usize>,
+    /// Body name -> Entity
+    #[serde(skip)]
+    pub name_to_entity: HashMap<String, Entity>,
 }
 
 impl Default for TransferLut {
@@ -81,6 +80,8 @@ impl Default for TransferLut {
             tof_candidates: HashMap::new(),
             body_names: Vec::new(),
             entries: HashMap::new(),
+            entity_to_idx: HashMap::new(),
+            name_to_entity: HashMap::new(),
         }
     }
 }
@@ -94,7 +95,27 @@ impl TransferLut {
             tof_candidates: HashMap::new(),
             body_names,
             entries: HashMap::new(),
+            entity_to_idx: HashMap::new(),
+            name_to_entity: HashMap::new(),
         }
+    }
+
+    /// Build entity mappings after loading. Call this after deserializing.
+    pub fn build_entity_mappings(&mut self, bodies: &Query<(Entity, &Body)>) {
+        self.entity_to_idx.clear();
+        self.name_to_entity.clear();
+
+        for (entity, body) in bodies.iter() {
+            if let Some(idx) = self.body_names.iter().position(|n| n == &body.name) {
+                self.entity_to_idx.insert(entity, idx);
+                self.name_to_entity.insert(body.name.clone(), entity);
+            }
+        }
+
+        info!(
+            "Built entity mappings: {} bodies mapped",
+            self.entity_to_idx.len()
+        );
     }
 
     /// Get the body index for a given name
@@ -129,10 +150,10 @@ impl TransferLut {
         nu_src_bucket: usize,
         nu_tgt_bucket: usize,
         tof_idx: usize,
-        entry: TransferEntry,
+        solution: TransferSolution,
     ) {
         let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
-        self.entries.insert(key, entry);
+        self.entries.insert(key, solution);
     }
 
     /// Set TOF candidates for a body pair
@@ -147,7 +168,7 @@ impl TransferLut {
         self.tof_candidates.get(&key)
     }
 
-    /// Look up a transfer entry
+    /// Look up a transfer solution by name
     pub fn get(
         &self,
         source_name: &str,
@@ -155,11 +176,103 @@ impl TransferLut {
         nu_src_bucket: usize,
         nu_tgt_bucket: usize,
         tof_idx: usize,
-    ) -> Option<&TransferEntry> {
+    ) -> Option<&TransferSolution> {
         let source_idx = self.body_index(source_name)?;
         let target_idx = self.body_index(target_name)?;
         let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
         self.entries.get(&key)
+    }
+
+    /// Look up a transfer solution by entity
+    pub fn get_by_entity(
+        &self,
+        source: Entity,
+        target: Entity,
+        nu_src_bucket: usize,
+        nu_tgt_bucket: usize,
+        tof_idx: usize,
+    ) -> Option<&TransferSolution> {
+        let source_idx = *self.entity_to_idx.get(&source)?;
+        let target_idx = *self.entity_to_idx.get(&target)?;
+        let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
+        self.entries.get(&key)
+    }
+
+    /// Get TOF candidates for a body pair by entity
+    pub fn get_tof_candidates_by_entity(&self, source: Entity, target: Entity) -> Option<&Vec<i32>> {
+        let source_idx = *self.entity_to_idx.get(&source)?;
+        let target_idx = *self.entity_to_idx.get(&target)?;
+        let source_name = &self.body_names[source_idx];
+        let target_name = &self.body_names[target_idx];
+        self.get_tof_candidates(source_name, target_name)
+    }
+
+    /// Find the best transfer in a day range (lowest delta-v)
+    ///
+    /// Returns (departure_day, tof_days, solution) for the best transfer found.
+    pub fn find_best_transfer(
+        &self,
+        source: Entity,
+        target: Entity,
+        source_elements: &OrbitalElements,
+        target_elements: &OrbitalElements,
+        start_day: i32,
+        end_day: i32,
+    ) -> Option<(i32, i32, TransferSolution)> {
+        let source_idx = *self.entity_to_idx.get(&source)?;
+        let target_idx = *self.entity_to_idx.get(&target)?;
+        let tof_candidates = self.get_tof_candidates_by_entity(source, target)?;
+
+        let mut best: Option<(i32, i32, TransferSolution)> = None;
+
+        for day in start_day..=end_day {
+            let nu_src = true_anomaly_at_day(source_elements, day);
+            let nu_src_bucket = anomaly_to_bucket(nu_src);
+
+            for (tof_idx, &tof_days) in tof_candidates.iter().enumerate() {
+                let arrival_day = day + tof_days;
+                let nu_tgt = true_anomaly_at_day(target_elements, arrival_day);
+                let nu_tgt_bucket = anomaly_to_bucket(nu_tgt);
+
+                let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
+                if let Some(solution) = self.entries.get(&key) {
+                    let dominated = best.as_ref().map_or(false, |(_, _, b)| solution.total_dv >= b.total_dv);
+                    if !dominated {
+                        best = Some((day, tof_days, solution.clone()));
+                    }
+                }
+            }
+        }
+
+        best
+    }
+
+    /// Get a specific transfer solution (for committed legs)
+    pub fn get_transfer(
+        &self,
+        source: Entity,
+        target: Entity,
+        source_elements: &OrbitalElements,
+        target_elements: &OrbitalElements,
+        departure_day: i32,
+        tof_days: i32,
+    ) -> Option<TransferSolution> {
+        let source_idx = *self.entity_to_idx.get(&source)?;
+        let target_idx = *self.entity_to_idx.get(&target)?;
+        let tof_candidates = self.get_tof_candidates_by_entity(source, target)?;
+
+        // Find the TOF index
+        let tof_idx = tof_candidates.iter().position(|&t| t == tof_days)?;
+
+        let nu_src = true_anomaly_at_day(source_elements, departure_day);
+        let nu_src_bucket = anomaly_to_bucket(nu_src);
+
+        let arrival_day = departure_day + tof_days;
+        let nu_tgt = true_anomaly_at_day(target_elements, arrival_day);
+        let nu_tgt_bucket = anomaly_to_bucket(nu_tgt);
+
+        let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
+        self.entries.get(&key).cloned()
     }
 
     /// Validate that this LUT matches the given body configuration
@@ -218,6 +331,28 @@ impl TransferLut {
 
         Ok(())
     }
+}
+
+// ============================================================================
+// Anomaly Helpers
+// ============================================================================
+
+/// Compute the true anomaly of a body at a given day
+pub fn true_anomaly_at_day(elements: &OrbitalElements, day: i32) -> f64 {
+    let dt = day as f64 * 86400.0; // Convert days to seconds
+    match propagate_elliptic(*elements, MU_SUN, dt) {
+        Ok(propagated) => propagated.nu,
+        Err(_) => elements.nu, // Fallback to initial anomaly
+    }
+}
+
+/// Convert true anomaly (radians) to bucket index (0 to ANOMALY_BUCKETS-1)
+pub fn anomaly_to_bucket(nu: f64) -> usize {
+    // Normalize to [0, 2π)
+    let nu_normalized = nu.rem_euclid(2.0 * PI);
+    // Convert to bucket index
+    let bucket = (nu_normalized / BUCKET_SIZE_RAD).floor() as usize;
+    bucket.min(ANOMALY_BUCKETS - 1)
 }
 
 // ============================================================================
@@ -292,50 +427,23 @@ fn bucket_center_anomaly(bucket: usize) -> f64 {
     (bucket as f64 + 0.5) * BUCKET_SIZE_RAD
 }
 
-/// Compute transfer delta-v between two states
-fn compute_transfer_dv(
+/// Compute full transfer solution between two states
+fn compute_transfer_solution(
     r1: astrora_core::core::Vector3,
     v1: astrora_core::core::Vector3,
     r2: astrora_core::core::Vector3,
     v2: astrora_core::core::Vector3,
     tof_seconds: f64,
-) -> Option<TransferEntry> {
-    let mut best: Option<TransferEntry> = None;
+) -> Option<TransferSolution> {
+    // compute_transfer already picks the best of ShortWay/LongWay
+    let solution = compute_transfer(r1, v1, r2, v2, tof_seconds, MU_SUN).ok()?;
 
-    for kind in [TransferKind::ShortWay, TransferKind::LongWay] {
-        let Ok(lambert) = Lambert::solve(r1, r2, tof_seconds, MU_SUN, kind, 0) else {
-            continue;
-        };
-
-        let dep_dv = (lambert.v1 - v1).norm();
-        let arr_dv = (v2 - lambert.v2).norm();
-        let total_dv = dep_dv + arr_dv;
-
-        // Filter out unreasonable solutions (> 50 km/s total)
-        if total_dv > 50_000.0 {
-            continue;
-        }
-
-        match &best {
-            None => {
-                best = Some(TransferEntry {
-                    total_dv,
-                    departure_dv: dep_dv,
-                    arrival_dv: arr_dv,
-                });
-            }
-            Some(b) if total_dv < b.total_dv => {
-                best = Some(TransferEntry {
-                    total_dv,
-                    departure_dv: dep_dv,
-                    arrival_dv: arr_dv,
-                });
-            }
-            _ => {}
-        }
+    // Filter out unreasonable solutions (> 50 km/s total)
+    if solution.total_dv > 50_000.0 {
+        return None;
     }
 
-    best
+    Some(solution)
 }
 
 /// Heliocentric body data for LUT generation
@@ -349,16 +457,52 @@ fn is_heliocentric(body: &Body) -> bool {
     body.parent_name.as_deref() == Some("Sun")
 }
 
-/// Generate the transfer LUT from scratch
-pub fn generate_lut(bodies: &Query<&Body>) -> TransferLut {
-    info!("Generating transfer LUT (this may take 10-15 seconds)...");
+// ============================================================================
+// Bevy Systems
+// ============================================================================
+
+/// Startup system that loads or generates the transfer LUT
+pub fn init_transfer_lut(mut commands: Commands, bodies: Query<(Entity, &Body)>) {
+    // Collect expected body names (heliocentric only)
+    let expected_bodies: Vec<String> = bodies
+        .iter()
+        .filter(|(_, b)| is_heliocentric(b))
+        .map(|(_, b)| b.name.clone())
+        .collect();
+
+    // Try to load from disk, generate if needed
+    let mut lut = match TransferLut::load_from_disk() {
+        Some(loaded) if loaded.validate(&expected_bodies) => {
+            info!("Loaded valid LUT from disk ({} entries)", loaded.entries.len());
+            loaded
+        }
+        Some(_) => {
+            info!("LUT validation failed, regenerating...");
+            generate_lut_from_query(&bodies)
+        }
+        None => generate_lut_from_query(&bodies),
+    };
+
+    // Build entity mappings (must be done after load since entities aren't serialized)
+    lut.build_entity_mappings(&bodies);
+
+    if lut.entity_to_idx.is_empty() {
+        warn!("No entity mappings built - LUT may not work correctly");
+    }
+
+    commands.insert_resource(lut);
+}
+
+/// Generate LUT from a query (used by init_transfer_lut)
+fn generate_lut_from_query(bodies: &Query<(Entity, &Body)>) -> TransferLut {
+    info!("Generating transfer LUT (using {} threads)...", rayon::current_num_threads());
     let start = Instant::now();
 
     // Collect heliocentric bodies
     let body_defs: Vec<BodyDef> = bodies
         .iter()
-        .filter(|b| is_heliocentric(b))
-        .map(|b| BodyDef {
+        .filter(|(_, b)| is_heliocentric(b))
+        .map(|(_, b)| BodyDef {
             name: b.name.clone(),
             orbital_elements: b.orbital_elements,
         })
@@ -367,80 +511,89 @@ pub fn generate_lut(bodies: &Query<&Body>) -> TransferLut {
     let body_names: Vec<String> = body_defs.iter().map(|b| b.name.clone()).collect();
     let mut lut = TransferLut::new(body_names);
 
-    let mut computed = 0;
-    let mut failed = 0;
-
+    // Pre-populate TOF candidates (not parallelized - fast enough)
     for (src_idx, source) in body_defs.iter().enumerate() {
         for (tgt_idx, target) in body_defs.iter().enumerate() {
             if src_idx == tgt_idx {
                 continue;
             }
-
             let tof_candidates = get_tof_candidates_for_pair(&source.name, &target.name);
             lut.set_tof_candidates(&source.name, &target.name, tof_candidates.to_vec());
+        }
+    }
 
+    // Build work items: all (src, tgt, nu_src, nu_tgt, tof) combinations
+    let mut work_items: Vec<(usize, usize, usize, usize, usize, f64)> = Vec::new();
+    for (src_idx, source) in body_defs.iter().enumerate() {
+        for (tgt_idx, target) in body_defs.iter().enumerate() {
+            if src_idx == tgt_idx {
+                continue;
+            }
+            let tof_candidates = get_tof_candidates_for_pair(&source.name, &target.name);
             for nu_src_bucket in 0..ANOMALY_BUCKETS {
-                let nu_src = bucket_center_anomaly(nu_src_bucket);
-                let (r1, v1) = state_at_anomaly(&source.orbital_elements, nu_src);
-
                 for nu_tgt_bucket in 0..ANOMALY_BUCKETS {
-                    let nu_tgt = bucket_center_anomaly(nu_tgt_bucket);
-                    let (r2, v2) = state_at_anomaly(&target.orbital_elements, nu_tgt);
-
                     for (tof_idx, &tof_days) in tof_candidates.iter().enumerate() {
-                        let tof_seconds = tof_days as f64 * 86400.0;
-
-                        if let Some(entry) = compute_transfer_dv(r1, v1, r2, v2, tof_seconds) {
-                            lut.insert(src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, entry);
-                            computed += 1;
-                        } else {
-                            failed += 1;
-                        }
+                        work_items.push((
+                            src_idx,
+                            tgt_idx,
+                            nu_src_bucket,
+                            nu_tgt_bucket,
+                            tof_idx,
+                            tof_days as f64 * 86400.0,
+                        ));
                     }
                 }
             }
         }
     }
 
-    let elapsed = start.elapsed();
-    info!(
-        "Generated LUT: {} entries ({} failed) in {:.1}s",
-        computed, failed, elapsed.as_secs_f64()
-    );
+    let total_items = work_items.len();
+    let computed = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
 
-    lut
-}
+    // Compute transfers in parallel
+    let results: Vec<_> = work_items
+        .par_iter()
+        .filter_map(|&(src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, tof_seconds)| {
+            let source = &body_defs[src_idx];
+            let target = &body_defs[tgt_idx];
 
-// ============================================================================
-// Bevy Systems
-// ============================================================================
+            let nu_src = bucket_center_anomaly(nu_src_bucket);
+            let (r1, v1) = state_at_anomaly(&source.orbital_elements, nu_src);
 
-/// Startup system that loads or generates the transfer LUT
-pub fn init_transfer_lut(mut commands: Commands, bodies: Query<&Body>) {
-    // Collect expected body names (heliocentric only)
-    let expected_bodies: Vec<String> = bodies
-        .iter()
-        .filter(|b| is_heliocentric(b))
-        .map(|b| b.name.clone())
+            let nu_tgt = bucket_center_anomaly(nu_tgt_bucket);
+            let (r2, v2) = state_at_anomaly(&target.orbital_elements, nu_tgt);
+
+            match compute_transfer_solution(r1, v1, r2, v2, tof_seconds) {
+                Some(solution) => {
+                    computed.fetch_add(1, Ordering::Relaxed);
+                    Some((src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, solution))
+                }
+                None => {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            }
+        })
         .collect();
 
-    // Try to load from disk
-    if let Some(lut) = TransferLut::load_from_disk() {
-        if lut.validate(&expected_bodies) {
-            info!("Loaded valid LUT from disk ({} entries)", lut.entries.len());
-            commands.insert_resource(lut);
-            return;
-        }
-        info!("LUT validation failed, regenerating...");
+    // Insert results into LUT (single-threaded, but fast)
+    for (src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, solution) in results {
+        lut.insert(src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, solution);
     }
 
-    // Generate new LUT
-    let lut = generate_lut(&bodies);
+    let elapsed = start.elapsed();
+    let computed_count = computed.load(Ordering::Relaxed);
+    let failed_count = failed.load(Ordering::Relaxed);
+    info!(
+        "Generated LUT: {} entries ({} failed) in {:.1}s ({} work items)",
+        computed_count, failed_count, elapsed.as_secs_f64(), total_items
+    );
 
-    // Save to disk for next time
+    // Save to disk
     if let Err(e) = lut.save_to_disk() {
         warn!("Failed to save LUT: {}", e);
     }
 
-    commands.insert_resource(lut);
+    lut
 }

@@ -8,9 +8,10 @@ use astrora_core::{
     maneuvers::{Lambert, TransferKind},
     PoliastroError,
 };
+use serde::{Deserialize, Serialize};
 
 /// Result of computing a Lambert transfer trajectory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferSolution {
     /// Delta-v vector required at departure (m/s)
     pub departure_dv: Vector3,

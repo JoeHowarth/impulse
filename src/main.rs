@@ -20,7 +20,6 @@ mod orbital_data;
 mod ship;
 mod simulation;
 mod transfer;
-mod transfer_cache;
 mod transfer_lut;
 mod transfer_vis;
 mod ui;
@@ -87,7 +86,6 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(LogDiagnosticsPlugin::default())
         .insert_resource(SimulationTime::from_start_day(start_day))
-        .init_resource::<transfer_cache::TransferCache>()
         .init_resource::<ui::TransferPopup>()
         .add_systems(
             Startup,
@@ -96,7 +94,6 @@ fn main() {
                 ApplyDeferred,
                 init_parent_entities,
                 transfer_lut::init_transfer_lut,
-                transfer_cache::init_transfer_cache,
                 configure_gizmos,
             )
                 .chain(),
@@ -116,10 +113,6 @@ fn main() {
                 ship::expire_stale_legs,
                 // Sync Transfer entities to ShipLocation + committed legs
                 ship::sync_transfer_entities,
-                // Async cache: spawn task when entering transfer, poll for completion
-                transfer_cache::spawn_cache_compute_task,
-                transfer_cache::poll_cache_compute_task,
-                transfer_cache::update_transfer_cache,
                 transfer_vis::check_transfer_expiration,
                 update_body_positions,
             )
@@ -131,7 +124,6 @@ fn main() {
             (
                 handle_body_click,
                 ui::handle_popup_spawn,
-                ui::refresh_popup_on_cache_ready,
                 ui::update_popup_options,
                 ui::update_popup_position,
                 ui::handle_close_button,
@@ -141,8 +133,7 @@ fn main() {
                 ui::handle_option_selection,
             )
                 .chain()
-                .after(update_body_positions)
-                .after(transfer_cache::update_transfer_cache),
+                .after(update_body_positions),
         )
         // Rendering systems (run last)
         .add_systems(

@@ -20,7 +20,7 @@ use crate::ComputedBody;
 use crate::orbital_data::{Body, MU_SUN};
 use crate::simulation::SimulationTime;
 use crate::transfer::{TransferSolution, propagate_kepler_full};
-use crate::transfer_cache::TransferCache;
+use crate::transfer_lut::TransferLut;
 use crate::{phys_to_visual, transfer_vis};
 
 // ============================================================================
@@ -140,17 +140,6 @@ pub fn leg_base_day(
     }
 }
 
-/// Looks up the exact solution for a leg from the cache.
-/// Returns None if not cached (bug if leg is committed).
-pub fn leg_solution<'a>(
-    cache: &'a TransferCache,
-    source: Entity,
-    leg: &PlannedLeg,
-) -> Option<&'a TransferSolution> {
-    cache
-        .solutions
-        .get(&(source, leg.target, leg.departure_day, leg.tof_days))
-}
 
 // ============================================================================
 // Systems
@@ -191,10 +180,10 @@ pub fn expire_stale_legs(mut ships: Query<&mut FlightPlan>, sim_time: Res<Simula
 }
 
 /// Executes departure when a committed leg's departure day arrives.
-/// Looks up solution from cache, deducts delta-v, transitions to InTransit.
+/// Looks up solution from LUT, deducts delta-v, transitions to InTransit.
 pub fn execute_departure(
     mut ships: Query<(&mut Fleet, &mut ShipLocation, &mut FlightPlan)>,
-    cache: Res<TransferCache>,
+    lut: Res<TransferLut>,
     bodies: Query<&Body>,
     sim_time: Res<SimulationTime>,
 ) {
@@ -214,15 +203,24 @@ pub fn execute_departure(
             continue;
         }
 
-        // Look up solution from cache
-        let Some(solution) = leg_solution(&cache, current_body, leg) else {
-            let target_name = bodies
-                .get(leg.target)
-                .map(|b| b.name.as_str())
-                .unwrap_or("?");
+        // Get orbital elements for lookup
+        let (Ok(source_body), Ok(target_body)) = (bodies.get(current_body), bodies.get(leg.target)) else {
+            warn!("Cannot get body data for departure");
+            continue;
+        };
+
+        // Look up solution from LUT
+        let Some(solution) = lut.get_transfer(
+            current_body,
+            leg.target,
+            &source_body.orbital_elements,
+            &target_body.orbital_elements,
+            leg.departure_day,
+            leg.tof_days,
+        ) else {
             warn!(
-                "No cached solution for committed leg to {} - cannot depart!",
-                target_name
+                "No LUT solution for committed leg to {} - cannot depart!",
+                target_body.name
             );
             continue;
         };
@@ -231,19 +229,15 @@ pub fn execute_departure(
         let departure_dv = solution.departure_dv.norm();
         ship.delta_v_remaining -= departure_dv;
 
-        let target_name = bodies
-            .get(leg.target)
-            .map(|b| b.name.as_str())
-            .unwrap_or("?");
         info!(
             "Ship '{}' departing to {}! dv spent: {:.0} m/s, remaining: {:.0} m/s",
-            ship.name, target_name, departure_dv, ship.delta_v_remaining
+            ship.name, target_body.name, departure_dv, ship.delta_v_remaining
         );
 
         // Transition to InTransit
         *location = ShipLocation::InTransit {
             target: leg.target,
-            solution: solution.clone(),
+            solution,
             departure_time: leg.departure_day as f64 * 86400.0,
         };
 
@@ -295,7 +289,7 @@ pub fn check_arrival(
 pub fn commit_plan(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut ships: Query<(&Fleet, &ShipLocation, &mut FlightPlan), With<Selected>>,
-    cache: Res<TransferCache>,
+    lut: Res<TransferLut>,
     bodies: Query<&Body>,
 ) {
     if !keyboard.just_pressed(KeyCode::Enter) {
@@ -316,7 +310,17 @@ pub fn commit_plan(
             .skip(plan.committed_count)
             .filter_map(|(i, leg)| {
                 let source = leg_source(location, &plan, i);
-                leg_solution(&cache, source, leg).map(|s| s.total_dv)
+                let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) else {
+                    return None;
+                };
+                lut.get_transfer(
+                    source,
+                    leg.target,
+                    &src_body.orbital_elements,
+                    &tgt_body.orbital_elements,
+                    leg.departure_day,
+                    leg.tof_days,
+                ).map(|s| s.total_dv)
             })
             .sum();
 
@@ -333,16 +337,22 @@ pub fn commit_plan(
             let leg = &plan.legs[i];
             let source = leg_source(location, &plan, i);
             let source_name = bodies.get(source).map(|b| b.name.as_str()).unwrap_or("?");
-            let target_name = bodies
-                .get(leg.target)
-                .map(|b| b.name.as_str())
-                .unwrap_or("?");
+            let target_name = bodies.get(leg.target).map(|b| b.name.as_str()).unwrap_or("?");
 
-            if let Some(solution) = leg_solution(&cache, source, leg) {
-                info!(
-                    "Committing leg {} -> {} (day {}, {:.0} m/s)",
-                    source_name, target_name, leg.departure_day, solution.total_dv
-                );
+            if let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) {
+                if let Some(solution) = lut.get_transfer(
+                    source,
+                    leg.target,
+                    &src_body.orbital_elements,
+                    &tgt_body.orbital_elements,
+                    leg.departure_day,
+                    leg.tof_days,
+                ) {
+                    info!(
+                        "Committing leg {} -> {} (day {}, {:.0} m/s)",
+                        source_name, target_name, leg.departure_day, solution.total_dv
+                    );
+                }
             }
         }
 
@@ -398,13 +408,13 @@ pub fn sync_transfer_entities(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     ships: Query<(Entity, &ShipLocation, &FlightPlan)>,
-    cache: Res<TransferCache>,
+    lut: Res<TransferLut>,
     transfers: Query<(Entity, &transfer_vis::Transfer)>,
     bodies: Query<&Body>,
 ) {
     for (ship_entity, location, plan) in &ships {
         // Build list of (source, target, solution, departure_time) for active visualizations
-        let mut active: Vec<(Entity, Entity, &TransferSolution, f64)> = Vec::new();
+        let mut active: Vec<(Entity, Entity, TransferSolution, f64)> = Vec::new();
 
         // Add active transfer if InTransit
         if let ShipLocation::InTransit {
@@ -416,16 +426,25 @@ pub fn sync_transfer_entities(
             // Source for active transfer is where we departed from
             // We don't store it, but we can get the body the ship was at
             // For now, use PLACEHOLDER - the visualization doesn't need source entity
-            active.push((Entity::PLACEHOLDER, *target, solution, *departure_time));
+            active.push((Entity::PLACEHOLDER, *target, solution.clone(), *departure_time));
         }
 
         // Add committed future legs
         for i in 0..plan.committed_count.min(plan.legs.len()) {
             let leg = &plan.legs[i];
             let source = leg_source(location, plan, i);
-            if let Some(solution) = leg_solution(&cache, source, leg) {
-                let departure_time = leg.departure_day as f64 * 86400.0;
-                active.push((source, leg.target, solution, departure_time));
+            if let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) {
+                if let Some(solution) = lut.get_transfer(
+                    source,
+                    leg.target,
+                    &src_body.orbital_elements,
+                    &tgt_body.orbital_elements,
+                    leg.departure_day,
+                    leg.tof_days,
+                ) {
+                    let departure_time = leg.departure_day as f64 * 86400.0;
+                    active.push((source, leg.target, solution, departure_time));
+                }
             }
         }
 
@@ -661,7 +680,8 @@ pub fn render_plan_markers(
 /// Renders dimmed preview arcs for uncommitted legs (not yet locked in).
 pub fn render_plan_arcs(
     ships: Query<(&ShipLocation, &FlightPlan)>,
-    cache: Res<TransferCache>,
+    lut: Res<TransferLut>,
+    bodies: Query<&Body>,
     mut painter: ShapePainter,
 ) {
     for (location, plan) in &ships {
@@ -670,8 +690,18 @@ pub fn render_plan_arcs(
             let leg = &plan.legs[i];
             let source = leg_source(location, plan, i);
 
-            // Look up solution from cache
-            let Some(solution) = leg_solution(&cache, source, leg) else {
+            // Look up solution from LUT
+            let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) else {
+                continue;
+            };
+            let Some(solution) = lut.get_transfer(
+                source,
+                leg.target,
+                &src_body.orbital_elements,
+                &tgt_body.orbital_elements,
+                leg.departure_day,
+                leg.tof_days,
+            ) else {
                 continue;
             };
 
