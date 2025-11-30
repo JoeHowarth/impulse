@@ -21,6 +21,7 @@ mod ship;
 mod simulation;
 mod transfer;
 mod transfer_cache;
+mod transfer_lut;
 mod transfer_vis;
 mod ui;
 
@@ -94,6 +95,7 @@ fn main() {
                 setup,
                 ApplyDeferred,
                 init_parent_entities,
+                transfer_lut::init_transfer_lut,
                 transfer_cache::init_transfer_cache,
                 configure_gizmos,
             )
