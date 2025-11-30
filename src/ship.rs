@@ -3,6 +3,9 @@
 //! Tracks player ships that can travel between celestial bodies,
 //! managing delta-v budgets and scheduled transfers.
 
+use std::collections::VecDeque;
+
+use bevy::gizmos::GizmoAsset;
 use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
 
@@ -41,6 +44,27 @@ pub enum ShipState {
         arrival_time: f64,
         target: Entity,
     },
+}
+
+/// A queued transfer leg for multi-hop journeys.
+#[derive(Clone)]
+pub struct QueuedTransfer {
+    /// Target body for this leg
+    pub target: Entity,
+    /// Source body (where this leg departs from)
+    pub source: Entity,
+    /// Pre-computed transfer solution
+    pub solution: TransferSolution,
+    /// Absolute departure time (seconds since epoch)
+    pub departure_time: f64,
+}
+
+/// Queue of pending transfer legs for a ship.
+/// Allows planning multi-hop journeys (A → B → C).
+#[derive(Component, Default)]
+pub struct TransferQueue {
+    /// Queued transfers, executed in order
+    pub queued: VecDeque<QueuedTransfer>,
 }
 
 // ============================================================================
@@ -96,13 +120,16 @@ pub fn execute_scheduled_transfers(
 }
 
 /// Checks if transferring ships have arrived at their destination.
-/// Deducts arrival delta-v and transitions ship to Orbiting state.
+/// Deducts arrival delta-v, transitions ship to Orbiting state,
+/// and executes the next queued transfer if any.
 pub fn check_ship_arrival(
-    mut ships: Query<(&mut Ship, &mut ShipState)>,
+    mut commands: Commands,
+    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
+    mut ships: Query<(Entity, &mut Ship, &mut ShipState, &mut TransferQueue)>,
     bodies: Query<&Body>,
     sim_time: Res<crate::simulation::SimulationTime>,
 ) {
-    for (mut ship, mut state) in &mut ships {
+    for (ship_entity, mut ship, mut state, mut queue) in &mut ships {
         // Clone state data to avoid borrow issues
         let transfer_info = if let ShipState::Transferring { solution, arrival_time, target, .. } = &*state {
             Some((solution.clone(), *arrival_time, *target))
@@ -129,6 +156,41 @@ pub fn check_ship_arrival(
 
                 // Transition to orbiting
                 *state = ShipState::Orbiting { body: target };
+
+                // Execute next queued transfer if any
+                if let Some(next_transfer) = queue.queued.pop_front() {
+                    let next_target_name = bodies
+                        .get(next_transfer.target)
+                        .map(|b| b.name.clone())
+                        .unwrap_or_else(|_| "Unknown".to_string());
+
+                    // Check if we have enough delta-v
+                    let required_dv = next_transfer.solution.total_dv;
+                    if ship.delta_v_remaining < required_dv {
+                        warn!(
+                            "Ship '{}' cannot execute queued transfer to {}: need {:.0} m/s, have {:.0} m/s. Clearing queue.",
+                            ship.name, next_target_name, required_dv, ship.delta_v_remaining
+                        );
+                        queue.queued.clear();
+                    } else {
+                        info!(
+                            "Ship '{}' executing queued transfer to {} (departure in {:.1} days)",
+                            ship.name, next_target_name,
+                            (next_transfer.departure_time - sim_time.sim_time) / 86400.0
+                        );
+
+                        // Spawn transfer visualization
+                        crate::transfer_vis::spawn_transfer_visualization(
+                            &mut commands,
+                            &mut gizmo_assets,
+                            ship_entity,
+                            next_transfer.source,
+                            next_transfer.target,
+                            &next_transfer.solution,
+                            next_transfer.departure_time,
+                        );
+                    }
+                }
             }
         }
     }
@@ -254,5 +316,154 @@ pub fn render_departure_markers(
             Vec3::new(-size, size, 0.0),
             Vec3::new(size, -size, 0.0),
         );
+    }
+}
+
+/// Queue waypoint marker color (cyan, dimmed)
+const QUEUE_MARKER_COLOR: Color = Color::srgba(0.3, 0.8, 0.8, 0.7);
+
+/// Queue arc color (dimmed orange)
+const QUEUE_ARC_COLOR: Color = Color::srgba(1.0, 0.6, 0.2, 0.4);
+
+/// Renders numbered waypoint markers at queued destination bodies.
+pub fn render_queue_markers(
+    ships: Query<&TransferQueue>,
+    bodies: Query<&ComputedBody>,
+    mut painter: ShapePainter,
+) {
+    for queue in &ships {
+        for (index, queued) in queue.queued.iter().enumerate() {
+            // Get target body position
+            let Ok(computed) = bodies.get(queued.target) else {
+                continue;
+            };
+
+            let pos = computed.position;
+
+            // Draw a circle with number
+            painter.set_translation(pos);
+            painter.set_rotation(Quat::IDENTITY);
+            painter.set_color(QUEUE_MARKER_COLOR);
+            painter.thickness = 1.0;
+
+            // Circle around the waypoint
+            let radius = 8.0;
+            painter.hollow = true;
+            painter.circle(radius);
+
+            // Draw the number (1-indexed) as simple lines
+            // This is a hacky way to draw numbers, but works for 1-9
+            let num = index + 1;
+            let offset = Vec3::new(0.0, -2.0, 0.0);
+            draw_number(&mut painter, num, pos + offset, 3.0);
+        }
+    }
+}
+
+/// Renders dimmed preview arcs for queued transfers.
+pub fn render_queue_arcs(
+    ships: Query<&TransferQueue>,
+    mut painter: ShapePainter,
+) {
+    for queue in &ships {
+        for queued in queue.queued.iter() {
+            // Draw a simplified arc from source to target
+            painter.set_color(QUEUE_ARC_COLOR);
+            painter.thickness = 1.0;
+
+            // Draw arc using the pre-computed solution
+            let num_segments = 100;
+            let tof = queued.solution.time_of_flight;
+
+            for i in 0..num_segments {
+                let t0 = (i as f64 / num_segments as f64) * tof;
+                let t1 = ((i + 1) as f64 / num_segments as f64) * tof;
+
+                if let (Some(pos0), Some(pos1)) = (
+                    crate::transfer::propagate_kepler(
+                        queued.solution.departure_pos,
+                        queued.solution.departure_vel,
+                        MU_SUN,
+                        t0,
+                    ),
+                    crate::transfer::propagate_kepler(
+                        queued.solution.departure_pos,
+                        queued.solution.departure_vel,
+                        MU_SUN,
+                        t1,
+                    ),
+                ) {
+                    let p0 = phys_to_visual(pos0);
+                    let p1 = phys_to_visual(pos1);
+                    painter.line(p0, p1);
+                }
+            }
+        }
+    }
+}
+
+/// Helper to draw a simple number using lines (1-9 only).
+fn draw_number(painter: &mut ShapePainter, num: usize, center: Vec3, size: f32) {
+    painter.set_translation(center);
+    let h = size;
+    let w = size * 0.6;
+
+    match num {
+        1 => {
+            painter.line(Vec3::new(0.0, h/2.0, 0.0), Vec3::new(0.0, -h/2.0, 0.0));
+        }
+        2 => {
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, 0.0, 0.0));
+            painter.line(Vec3::new(w/2.0, 0.0, 0.0), Vec3::new(-w/2.0, 0.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, 0.0, 0.0), Vec3::new(-w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, -h/2.0, 0.0), Vec3::new(w/2.0, -h/2.0, 0.0));
+        }
+        3 => {
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, -h/2.0, 0.0), Vec3::new(-w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, 0.0, 0.0), Vec3::new(w/2.0, 0.0, 0.0));
+        }
+        4 => {
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(-w/2.0, 0.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, 0.0, 0.0), Vec3::new(w/2.0, 0.0, 0.0));
+            painter.line(Vec3::new(w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, -h/2.0, 0.0));
+        }
+        5 => {
+            painter.line(Vec3::new(w/2.0, h/2.0, 0.0), Vec3::new(-w/2.0, h/2.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(-w/2.0, 0.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, 0.0, 0.0), Vec3::new(w/2.0, 0.0, 0.0));
+            painter.line(Vec3::new(w/2.0, 0.0, 0.0), Vec3::new(w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, -h/2.0, 0.0), Vec3::new(-w/2.0, -h/2.0, 0.0));
+        }
+        6 => {
+            painter.line(Vec3::new(w/2.0, h/2.0, 0.0), Vec3::new(-w/2.0, h/2.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(-w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, -h/2.0, 0.0), Vec3::new(w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, -h/2.0, 0.0), Vec3::new(w/2.0, 0.0, 0.0));
+            painter.line(Vec3::new(w/2.0, 0.0, 0.0), Vec3::new(-w/2.0, 0.0, 0.0));
+        }
+        7 => {
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, -h/2.0, 0.0));
+        }
+        8 => {
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, -h/2.0, 0.0), Vec3::new(-w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, -h/2.0, 0.0), Vec3::new(-w/2.0, h/2.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, 0.0, 0.0), Vec3::new(w/2.0, 0.0, 0.0));
+        }
+        9 => {
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, h/2.0, 0.0));
+            painter.line(Vec3::new(w/2.0, h/2.0, 0.0), Vec3::new(w/2.0, -h/2.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, h/2.0, 0.0), Vec3::new(-w/2.0, 0.0, 0.0));
+            painter.line(Vec3::new(-w/2.0, 0.0, 0.0), Vec3::new(w/2.0, 0.0, 0.0));
+        }
+        _ => {
+            // For numbers > 9, just draw a dot
+            painter.circle(size * 0.3);
+        }
     }
 }

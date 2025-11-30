@@ -138,6 +138,8 @@ fn main() {
                 render_system,
                 ship::render_ship,
                 ship::render_departure_markers,
+                ship::render_queue_markers,
+                ship::render_queue_arcs,
                 transfer_vis::render_burn_arrows,
                 ui::update_labels,
                 ui::update_time_ui,
@@ -189,6 +191,7 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
             },
             ship::ShipState::Orbiting { body: earth },
             ship::PlayerControlled,
+            ship::TransferQueue::default(),
         ));
     }
 

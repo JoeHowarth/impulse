@@ -798,13 +798,16 @@ pub fn handle_option_hover(
 
 /// System to handle transfer option button selection.
 /// When a button is clicked, schedule the transfer (deduct delta-v on departure).
+/// If Shift is held, queue the transfer instead of scheduling immediately.
 pub fn handle_option_selection(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     mut popup: ResMut<TransferPopup>,
-    player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState), With<crate::ship::PlayerControlled>>,
+    mut player_query: Query<(Entity, &crate::ship::Ship, &crate::ship::ShipState, &mut crate::ship::TransferQueue), With<crate::ship::PlayerControlled>>,
     sim_time: Res<SimulationTime>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
+    bodies: Query<&crate::orbital_data::Body>,
     // For despawning old transfer
     old_transfers: Query<Entity, With<Transfer>>,
     old_arcs: Query<Entity, With<crate::transfer_vis::TransferArc>>,
@@ -822,7 +825,7 @@ pub fn handle_option_selection(
         };
 
         // Get player ship and current body
-        let Ok((ship_entity, ship, ship_state)) = player_query.single() else {
+        let Ok((ship_entity, ship, ship_state, mut queue)) = player_query.single_mut() else {
             warn!("No player ship found");
             continue;
         };
@@ -840,8 +843,12 @@ pub fn handle_option_selection(
             continue;
         };
 
-        // Check if ship has enough delta-v
-        if ship.delta_v_remaining < option.solution.total_dv {
+        // Check if shift is held for queueing
+        let shift_held = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+
+        // Check if ship has enough delta-v (for immediate transfer)
+        // For queued transfers, we check at execution time
+        if !shift_held && ship.delta_v_remaining < option.solution.total_dv {
             warn!(
                 "Insufficient delta-v! Need {:.0} m/s, have {:.0} m/s",
                 option.solution.total_dv, ship.delta_v_remaining
@@ -849,40 +856,63 @@ pub fn handle_option_selection(
             continue;
         }
 
-        info!(
-            "Scheduling transfer: {} (dep +{}d, {} m/s, remaining after: {:.0} m/s)",
-            option.label,
-            option.departure_day,
-            option.solution.total_dv as i32,
-            ship.delta_v_remaining - option.solution.total_dv
-        );
-
         // Calculate departure time
         let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
         let departure_day = current_day + option.departure_day;
         let departure_time = departure_day as f64 * 86400.0;
 
-        // Despawn old transfer entities
-        for entity in old_transfers.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in old_arcs.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in old_markers.iter() {
-            commands.entity(entity).despawn();
-        }
+        if shift_held {
+            // Queue the transfer
+            let target_name = bodies
+                .get(target_entity)
+                .map(|b| b.name.clone())
+                .unwrap_or_else(|_| "Unknown".to_string());
 
-        // Spawn the new transfer visualization
-        crate::transfer_vis::spawn_transfer_visualization(
-            &mut commands,
-            &mut gizmo_assets,
-            ship_entity,
-            source_entity,
-            target_entity,
-            &option.solution,
-            departure_time,
-        );
+            info!(
+                "Queueing transfer to {} (dep +{}d, {} m/s)",
+                target_name,
+                option.departure_day,
+                option.solution.total_dv as i32
+            );
+
+            queue.queued.push_back(crate::ship::QueuedTransfer {
+                target: target_entity,
+                source: source_entity,
+                solution: option.solution.clone(),
+                departure_time,
+            });
+        } else {
+            // Immediate transfer
+            info!(
+                "Scheduling transfer: {} (dep +{}d, {} m/s, remaining after: {:.0} m/s)",
+                option.label,
+                option.departure_day,
+                option.solution.total_dv as i32,
+                ship.delta_v_remaining - option.solution.total_dv
+            );
+
+            // Despawn old transfer entities
+            for entity in old_transfers.iter() {
+                commands.entity(entity).despawn();
+            }
+            for entity in old_arcs.iter() {
+                commands.entity(entity).despawn();
+            }
+            for entity in old_markers.iter() {
+                commands.entity(entity).despawn();
+            }
+
+            // Spawn the new transfer visualization
+            crate::transfer_vis::spawn_transfer_visualization(
+                &mut commands,
+                &mut gizmo_assets,
+                ship_entity,
+                source_entity,
+                target_entity,
+                &option.solution,
+                departure_time,
+            );
+        }
 
         // Close the popup
         despawn_transfer_popup(&mut commands, &mut popup);
