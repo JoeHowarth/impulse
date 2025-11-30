@@ -102,10 +102,15 @@ fn main() {
             Update,
             (
                 simulation::handle_time_controls,
-                ship::execute_scheduled_transfers,
-                ship::check_ship_arrival,
+                // Queue modifications
                 ship::execute_queue_on_enter,
                 ship::cancel_queue_on_n,
+                ship::expire_uncommitted_queue,
+                // Sync Transfer entities to queue (data-driven)
+                ship::sync_transfer_entities,
+                // Transfer execution
+                ship::execute_scheduled_transfers,
+                ship::check_ship_arrival,
                 // Async cache: spawn task when entering transfer, poll for completion
                 transfer_cache::spawn_cache_compute_task,
                 transfer_cache::poll_cache_compute_task,
@@ -121,6 +126,7 @@ fn main() {
             (
                 handle_body_click,
                 ui::handle_popup_spawn,
+                ui::refresh_popup_on_cache_ready,
                 ui::update_popup_options,
                 ui::update_popup_position,
                 ui::handle_close_button,
@@ -188,7 +194,7 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
     if let Some(earth) = earth_entity {
         commands.spawn((
             ship::Ship {
-                delta_v_remaining: 50_000.0, // 50 km/s
+                delta_v_remaining: 500_000.0, // m/s
                 name: "Player Ship".to_string(),
             },
             ship::ShipState::Orbiting { body: earth },
@@ -492,7 +498,7 @@ fn handle_body_click(
     let Ok(player_state) = player_query.single() else { return };
     let current_entity = match player_state {
         ship::ShipState::Orbiting { body } => *body,
-        ship::ShipState::Transferring { .. } => return, // Ship in transit
+        ship::ShipState::Transferring => return, // Ship in transit
     };
 
     // Find the closest body to the click that:

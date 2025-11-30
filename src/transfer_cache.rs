@@ -4,6 +4,11 @@
 //! within a rolling time window. Supports multiple source bodies to enable
 //! multi-hop transfer planning. This allows instant UI response when selecting
 //! transfer options.
+//!
+//! Environment variables:
+//! - `CACHE_LOG_INTERVAL`: How often to log cache updates (in days). Default: 0 (every update).
+
+use std::sync::OnceLock;
 
 use astrora_core::core::elements::{OrbitalElements, coe_to_rv};
 use bevy::platform::collections::HashMap;
@@ -14,6 +19,17 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
 use crate::orbital_data::{Body, MU_SUN, propagate_elliptic};
 use crate::simulation::SimulationTime;
 use crate::transfer::{TransferSolution, compute_transfer};
+
+/// Returns the cache log interval from CACHE_LOG_INTERVAL env var (default: 0 = every update)
+fn cache_log_interval() -> i32 {
+    static INTERVAL: OnceLock<i32> = OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        std::env::var("CACHE_LOG_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    })
+}
 
 // ============================================================================
 // Resources
@@ -36,6 +52,8 @@ pub struct TransferCache {
     pub window_days: i32,
     /// Source bodies that have been cached (for incremental updates)
     pub cached_sources: HashSet<Entity>,
+    /// Last day we logged an update (for CACHE_LOG_INTERVAL)
+    pub last_log_day: i32,
 }
 
 // ============================================================================
@@ -160,7 +178,7 @@ pub fn init_transfer_cache(
 
     let current_entity = match player_state {
         crate::ship::ShipState::Orbiting { body } => *body,
-        crate::ship::ShipState::Transferring { .. } => {
+        crate::ship::ShipState::Transferring => {
             warn!("Ship in transit, cannot initialize transfer cache");
             return;
         }
@@ -235,27 +253,87 @@ pub fn init_transfer_cache(
 
 /// Incrementally updates the transfer cache as simulation time advances.
 /// - Adds current body to cache if not already cached
+/// - Prunes unused sources (keeps current body, transfer destination, queued destinations)
 /// - Prunes old solutions (departure day < current day)
 /// - Adds new solutions at the far end of the window for all cached sources
 pub fn update_transfer_cache(
     bodies: Query<(Entity, &Body)>,
     sim_time: Res<SimulationTime>,
-    player_query: Query<&crate::ship::ShipState, With<crate::ship::PlayerControlled>>,
+    player_query: Query<
+        (&crate::ship::ShipState, &crate::ship::TransferQueue),
+        With<crate::ship::PlayerControlled>,
+    >,
     pending_tasks: Query<&PendingCacheCompute>,
     mut cache: ResMut<TransferCache>,
 ) {
-    // Get player's current body
-    let Ok(player_state) = player_query.single() else {
+    // Get player's current state and queue
+    let Ok((player_state, queue)) = player_query.single() else {
         return;
     };
 
+    // Build set of relevant sources to keep:
+    // - Current body (if orbiting)
+    // - Current transfer destination (if transferring)
+    // - All queued transfer destinations
+    let mut relevant_sources: HashSet<Entity> = HashSet::default();
+
     let current_entity = match player_state {
-        crate::ship::ShipState::Orbiting { body } => *body,
-        crate::ship::ShipState::Transferring { .. } => {
-            // Ship in transit - don't update cache
-            return;
+        crate::ship::ShipState::Orbiting { body } => {
+            relevant_sources.insert(*body);
+            *body
+        }
+        crate::ship::ShipState::Transferring => {
+            // Add current transfer destination
+            if let Some(ref current) = queue.current {
+                relevant_sources.insert(current.target);
+            }
+            // Ship in transit - don't update cache (but still prune below)
+            Entity::PLACEHOLDER
         }
     };
+
+    // Add all queued destinations (committed or not)
+    for queued in &queue.queued {
+        relevant_sources.insert(queued.target);
+    }
+
+    // Prune sources that are no longer relevant
+    let removed_sources: Vec<Entity> = cache
+        .cached_sources
+        .iter()
+        .filter(|e| !relevant_sources.contains(*e))
+        .copied()
+        .collect();
+
+    if !removed_sources.is_empty() {
+        // Get names for logging
+        let removed_names: Vec<&str> = removed_sources
+            .iter()
+            .filter_map(|e| bodies.iter().find(|(be, _)| be == e).map(|(_, b)| b.name.as_str()))
+            .collect();
+
+        // Remove from cached_sources
+        for entity in &removed_sources {
+            cache.cached_sources.remove(entity);
+        }
+
+        // Remove solutions for these sources
+        let solutions_before = cache.solutions.len();
+        cache.solutions.retain(|(src, _, _, _), _| !removed_sources.contains(src));
+        let solutions_removed = solutions_before - cache.solutions.len();
+
+        info!(
+            "Pruned {} unused source(s): [{}], removed {} solutions",
+            removed_sources.len(),
+            removed_names.join(", "),
+            solutions_removed
+        );
+    }
+
+    // If transferring, don't do incremental updates
+    if matches!(player_state, crate::ship::ShipState::Transferring) {
+        return;
+    }
 
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
@@ -342,20 +420,31 @@ pub fn update_transfer_cache(
     let days_advanced = (current_day - cache.last_update_day).min(MAX_DAYS_PER_FRAME);
     let mut added = 0;
 
-    // Collect source entities to iterate over (to avoid borrow issues)
-    let cached_sources: Vec<Entity> = cache.cached_sources.iter().copied().collect();
+    // Collect source entities and names to iterate over (to avoid borrow issues)
+    let cached_sources: Vec<(Entity, String)> = cache
+        .cached_sources
+        .iter()
+        .filter_map(|&e| {
+            bodies
+                .iter()
+                .find(|(be, _)| *be == e)
+                .map(|(_, b)| (e, b.name.clone()))
+        })
+        .collect();
 
-    for source_entity in cached_sources {
+    let source_names: Vec<&str> = cached_sources.iter().map(|(_, n)| n.as_str()).collect();
+
+    for (source_entity, _) in &cached_sources {
         let Some(source_body) = bodies
             .iter()
-            .find(|(e, _)| *e == source_entity)
+            .find(|(e, _)| e == source_entity)
             .map(|(_, b)| b)
         else {
             continue;
         };
 
         let targets: Vec<(Entity, &Body)> =
-            bodies.iter().filter(|(e, _)| *e != source_entity).collect();
+            bodies.iter().filter(|(e, _)| e != source_entity).collect();
 
         for offset in 0..days_advanced {
             let new_departure_day = cache.last_update_day + cache.window_days + 1 + offset;
@@ -368,7 +457,7 @@ pub fn update_transfer_cache(
                         tof_days,
                     ) {
                         cache.solutions.insert(
-                            (source_entity, *target_entity, new_departure_day, tof_days),
+                            (*source_entity, *target_entity, new_departure_day, tof_days),
                             solution,
                         );
                         added += 1;
@@ -381,15 +470,27 @@ pub fn update_transfer_cache(
     // Update last_update_day by only the days we actually processed
     let new_last_update_day = cache.last_update_day + days_advanced;
 
-    if pruned > 0 || added > 0 {
+    // Check if we should log based on interval
+    let log_interval = cache_log_interval();
+    let should_log = if log_interval <= 0 {
+        // Log every update if interval is 0 or negative
+        pruned > 0 || added > 0
+    } else {
+        // Log every N days
+        new_last_update_day - cache.last_log_day >= log_interval
+    };
+
+    if should_log && (pruned > 0 || added > 0) {
         info!(
-            "Cache update: day {} -> {}, pruned {}, added {}, total {}",
+            "Cache update: day {} -> {}, pruned {}, added {}, total {}, sources: [{}]",
             cache.last_update_day,
             new_last_update_day,
             pruned,
             added,
-            cache.solutions.len()
+            cache.solutions.len(),
+            source_names.join(", ")
         );
+        cache.last_log_day = new_last_update_day;
     }
 
     cache.last_update_day = new_last_update_day;
@@ -435,7 +536,7 @@ pub fn is_source_cached(cache: &TransferCache, source_entity: Entity) -> bool {
 pub fn spawn_cache_compute_task(
     mut commands: Commands,
     ships: Query<
-        &crate::ship::ShipState,
+        (&crate::ship::ShipState, &crate::ship::TransferQueue),
         (
             With<crate::ship::PlayerControlled>,
             Changed<crate::ship::ShipState>,
@@ -445,27 +546,30 @@ pub fn spawn_cache_compute_task(
     pending: Query<&PendingCacheCompute>,
     cache: Res<TransferCache>,
 ) {
-    for state in &ships {
+    for (state, queue) in &ships {
         // Only trigger on Transferring state
-        let crate::ship::ShipState::Transferring {
-            target,
-            arrival_time,
-            ..
-        } = state
-        else {
+        if !matches!(state, crate::ship::ShipState::Transferring) {
+            continue;
+        }
+
+        // Get current transfer data from queue
+        let Some(ref current) = queue.current else {
             continue;
         };
 
+        let target = current.target;
+        let arrival_time = current.departure_time + current.solution.time_of_flight;
+
         // Skip if already cached or pending
-        if cache.cached_sources.contains(target) {
+        if cache.cached_sources.contains(&target) {
             continue;
         }
-        if pending.iter().any(|p| p.source == *target) {
+        if pending.iter().any(|p| p.source == target) {
             continue;
         }
 
         // Get destination body
-        let Some((_, dest_body)) = bodies.iter().find(|(e, _)| *e == *target) else {
+        let Some((_, dest_body)) = bodies.iter().find(|(e, _)| *e == target) else {
             warn!("Destination body not found for async cache compute");
             continue;
         };
@@ -473,7 +577,7 @@ pub fn spawn_cache_compute_task(
         // Find all other bodies (transfer targets from destination)
         let targets: Vec<BodySnapshot> = bodies
             .iter()
-            .filter(|(e, _)| *e != *target)
+            .filter(|(e, _)| *e != target)
             .map(|(e, b)| BodySnapshot::from_body(e, b))
             .collect();
 
@@ -483,8 +587,8 @@ pub fn spawn_cache_compute_task(
         }
 
         // Create snapshot of destination body
-        let source_snapshot = BodySnapshot::from_body(*target, dest_body);
-        let arrival_day = (*arrival_time / 86400.0).floor() as i32;
+        let source_snapshot = BodySnapshot::from_body(target, dest_body);
+        let arrival_day = (arrival_time / 86400.0).floor() as i32;
         let num_targets = targets.len();
 
         info!(
@@ -498,7 +602,7 @@ pub fn spawn_cache_compute_task(
 
         commands.spawn(PendingCacheCompute {
             task,
-            source: *target,
+            source: target,
         });
     }
 }
