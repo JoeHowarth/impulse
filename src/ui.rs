@@ -863,13 +863,24 @@ pub fn handle_option_selection(
 
         if shift_held {
             // Queue the transfer
+            // Source is either the last queued target, or current body if queue is empty
+            let queue_source = queue.queued.back()
+                .map(|last| last.target)
+                .unwrap_or(source_entity);
+
             let target_name = bodies
                 .get(target_entity)
                 .map(|b| b.name.clone())
                 .unwrap_or_else(|_| "Unknown".to_string());
 
+            let source_name = bodies
+                .get(queue_source)
+                .map(|b| b.name.clone())
+                .unwrap_or_else(|_| "Unknown".to_string());
+
             info!(
-                "Queueing transfer to {} (dep +{}d, {} m/s)",
+                "Queueing transfer {} -> {} (dep +{}d, {} m/s)",
+                source_name,
                 target_name,
                 option.departure_day,
                 option.solution.total_dv as i32
@@ -877,7 +888,7 @@ pub fn handle_option_selection(
 
             queue.queued.push_back(crate::ship::QueuedTransfer {
                 target: target_entity,
-                source: source_entity,
+                source: queue_source,
                 solution: option.solution.clone(),
                 departure_time,
             });
