@@ -134,10 +134,12 @@ Spawn static enemy fleets at certain bodies.
 - Or defer to Step 2.6
 
 ### Verification
-- [ ] Enemy fleets spawn at designated bodies
-- [ ] Enemy fleets have correct faction
-- [ ] Enemy fleets have LogicalShip children
-- [ ] Enemy fleets visible on map (even if same color for now)
+- [x] Enemy fleets spawn at designated bodies
+- [x] Enemy fleets have correct faction
+- [x] Enemy fleets have LogicalShip children
+- [x] Enemy fleets visible on map (even if same color for now)
+
+**Completed.** Player starts at Saturn (10 ships). Enemy garrisons at Ceres (5), Mars (10), Earth (15). Faction-based colors: green for player, imperial red for enemy. Victory condition changed to "destroy all enemy fleets" with red rings around enemy-occupied bodies.
 
 ---
 
