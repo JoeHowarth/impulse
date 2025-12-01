@@ -16,6 +16,7 @@ use bevy::{
 use bevy_pancam::{PanCam, PanCamPlugin};
 use bevy_vector_shapes::prelude::*;
 
+mod camera;
 mod orbital_data;
 mod ship;
 mod simulation;
@@ -87,6 +88,7 @@ fn main() {
         .add_plugins(LogDiagnosticsPlugin::default())
         .insert_resource(SimulationTime::from_start_day(start_day))
         .init_resource::<ui::TransferPopup>()
+        .init_resource::<ui::FleetKeyState>()
         .init_resource::<ship::VictoryState>()
         .add_systems(
             Startup,
@@ -146,6 +148,7 @@ fn main() {
         .add_systems(
             Update,
             (
+                camera::animate_camera,
                 update_orbit_positions,
                 render_system,
                 ship::render_ship,
@@ -167,7 +170,7 @@ fn main() {
 }
 
 fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
-    // Spawn camera
+    // Spawn camera with animation support
     commands.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -178,6 +181,7 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         }),
         Transform::from_xyz(0.0, 0.0, 1000.0).looking_at(Vec3::ZERO, Vec3::Y),
         PanCam::default(),
+        camera::CameraTarget::default(),
     ));
 
     // Load planetary data

@@ -2,15 +2,28 @@
 
 use bevy::prelude::*;
 
+use crate::orbital_data::{Body, MU_SUN};
+use crate::phys_to_visual;
 use crate::simulation::SimulationTime;
-use crate::transfer::TransferSolution;
+use crate::transfer::{propagate_kepler_full, TransferSolution};
 use crate::transfer_lut::TransferLut;
-use crate::orbital_data::Body;
 use crate::ComputedBody;
 
 // ============================================================================
 // Resources
 // ============================================================================
+
+/// Tracks fleet number key state for double-tap detection.
+#[derive(Resource, Default)]
+pub struct FleetKeyState {
+    /// Last number key pressed (if any)
+    pub last_key: Option<KeyCode>,
+    /// Time of last key press (in seconds)
+    pub last_press_time: f64,
+}
+
+/// Double-tap threshold in seconds
+const DOUBLE_TAP_THRESHOLD: f64 = 0.35;
 
 /// Transfer popup state - tracks if a popup is open and for which target.
 #[derive(Resource, Default)]
@@ -360,6 +373,7 @@ pub struct TransferOption {
 /// `available_dv` is used to grey out options that require more delta-v.
 pub fn spawn_transfer_popup(
     commands: &mut Commands,
+    source_name: &str,
     target_name: &str,
     options: &[TransferOption],
     screen_pos: Vec2,
@@ -374,7 +388,7 @@ pub fn spawn_transfer_popup(
                 padding: UiRect::all(Val::Px(12.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(8.0),
-                min_width: Val::Px(180.0),
+                min_width: Val::Px(200.0),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.95)),
@@ -382,7 +396,7 @@ pub fn spawn_transfer_popup(
             TransferPopupUI,
         ))
         .with_children(|parent| {
-            // Header row: "Transfer to [Target]" + [X]
+            // Header row: "Source → Target" + [X]
             parent
                 .spawn(Node {
                     flex_direction: FlexDirection::Row,
@@ -392,7 +406,7 @@ pub fn spawn_transfer_popup(
                 })
                 .with_children(|row| {
                     row.spawn((
-                        Text::new(format!("Transfer to {}", target_name)),
+                        Text::new(format!("{} → {}", source_name, target_name)),
                         TextFont {
                             font_size: 14.0,
                             ..default()
@@ -652,6 +666,7 @@ pub fn handle_popup_spawn(
     // Spawn the popup (pass reference to stored options)
     let popup_entity = spawn_transfer_popup(
         &mut commands,
+        &source_body.name,
         &target_body.name,
         &popup.options,
         screen_pos,
@@ -779,6 +794,7 @@ pub fn update_popup_options(
     // Respawn popup with new options
     let new_popup_entity = spawn_transfer_popup(
         &mut commands,
+        &source_body.name,
         &target_body.name,
         &popup.options,
         screen_pos,
@@ -1091,11 +1107,17 @@ pub fn update_fleet_tabs(
 }
 
 /// System to handle number key presses for fleet selection.
+/// Double-tap a number key to pan the camera to that fleet.
 pub fn handle_fleet_number_keys(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
-    fleets: Query<(Entity, &crate::ship::Fleet), With<crate::ship::PlayerControlled>>,
+    time: Res<Time>,
+    mut key_state: ResMut<FleetKeyState>,
+    fleets: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation), With<crate::ship::PlayerControlled>>,
     selected: Query<Entity, With<crate::ship::Selected>>,
+    bodies: Query<&ComputedBody>,
+    sim_time: Res<SimulationTime>,
+    mut camera_query: Query<&mut crate::camera::CameraTarget>,
 ) {
     // Map digit keys to indices
     let key_to_index = [
@@ -1116,16 +1138,66 @@ pub fn handle_fleet_number_keys(
             let mut fleet_list: Vec<_> = fleets.iter().collect();
             fleet_list.sort_by(|a, b| a.1.name.cmp(&b.1.name));
 
-            if let Some((fleet_entity, fleet)) = fleet_list.get(index) {
-                info!("Selecting fleet {} via key {}", fleet.name, index + 1);
+            if let Some((fleet_entity, fleet, location)) = fleet_list.get(index) {
+                let current_time = time.elapsed_secs_f64();
+                let is_double_tap = key_state.last_key == Some(key)
+                    && (current_time - key_state.last_press_time) < DOUBLE_TAP_THRESHOLD;
 
-                // Remove Selected from all
-                for old in selected.iter() {
-                    commands.entity(old).remove::<crate::ship::Selected>();
+                if is_double_tap {
+                    // Double-tap: zoom camera to fleet position
+                    info!("Double-tap: zooming to fleet {}", fleet.name);
+
+                    // Get fleet position
+                    let fleet_pos = match location {
+                        crate::ship::ShipLocation::AtBody(body_entity) => {
+                            bodies.get(*body_entity).map(|c| c.position).unwrap_or(Vec3::ZERO)
+                        }
+                        crate::ship::ShipLocation::InTransit {
+                            solution,
+                            departure_time,
+                            ..
+                        } => {
+                            let elapsed = sim_time.sim_time - departure_time;
+                            if elapsed >= 0.0 {
+                                if let Some((r_vec, _)) = propagate_kepler_full(
+                                    solution.departure_pos,
+                                    solution.departure_vel,
+                                    MU_SUN,
+                                    elapsed,
+                                ) {
+                                    phys_to_visual(r_vec)
+                                } else {
+                                    Vec3::ZERO
+                                }
+                            } else {
+                                Vec3::ZERO
+                            }
+                        }
+                    };
+
+                    // Set camera target for smooth animation (just recenter, no zoom)
+                    if let Ok(mut camera_target) = camera_query.single_mut() {
+                        camera_target.pan_to(Vec2::new(fleet_pos.x, fleet_pos.y));
+                    }
+
+                    // Clear double-tap state
+                    key_state.last_key = None;
+                } else {
+                    // Single tap: select fleet
+                    info!("Selecting fleet {} via key {}", fleet.name, index + 1);
+
+                    // Remove Selected from all
+                    for old in selected.iter() {
+                        commands.entity(old).remove::<crate::ship::Selected>();
+                    }
+
+                    // Add Selected to target
+                    commands.entity(*fleet_entity).insert(crate::ship::Selected);
+
+                    // Record key press for double-tap detection
+                    key_state.last_key = Some(key);
+                    key_state.last_press_time = current_time;
                 }
-
-                // Add Selected to target
-                commands.entity(*fleet_entity).insert(crate::ship::Selected);
             }
             break;
         }
@@ -1206,4 +1278,3 @@ pub fn update_victory_overlay(
             ));
         });
 }
-
