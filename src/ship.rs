@@ -48,13 +48,31 @@ pub struct Fleet {
     pub delta_v_remaining: f64,
     /// Fleet name for display
     pub name: String,
-    /// Number of ships in this fleet
-    pub ship_count: u32,
+}
+
+/// Counts LogicalShip children of a fleet entity.
+pub fn ship_count(
+    fleet_entity: Entity,
+    children: &Query<&Children>,
+    ships: &Query<&LogicalShip>,
+) -> u32 {
+    children
+        .get(fleet_entity)
+        .map(|c| c.iter().filter(|e| ships.contains(*e)).count() as u32)
+        .unwrap_or(0)
 }
 
 /// Marker for the currently selected fleet.
 #[derive(Component)]
 pub struct Selected;
+
+/// Computed visual position for a fleet.
+/// Updated each frame by update_fleet_positions system.
+#[derive(Component)]
+pub struct ComputedFleetPosition {
+    pub position: Vec3,
+    pub velocity_dir: Vec3,
+}
 
 /// An objective that requires a certain number of ships at a body.
 /// Attach to body entities to create win conditions.
@@ -469,15 +487,17 @@ pub fn split_fleet(
         return;
     };
 
+    // Count ships from children
+    let total_ships = ship_count(fleet_entity, &children_query, &ships);
+
     // Must have more than 1 ship
-    if fleet.ship_count <= 1 {
-        info!("Cannot split fleet with only {} ship(s)", fleet.ship_count);
+    if total_ships <= 1 {
+        info!("Cannot split fleet with only {} ship(s)", total_ships);
         return;
     }
 
     // Split in half (larger half stays with original)
-    let split_count = fleet.ship_count / 2;
-    let remaining = fleet.ship_count - split_count;
+    let split_count = total_ships / 2;
 
     // Collect LogicalShip children to move to new fleet
     let mut ships_to_move = Vec::new();
@@ -492,13 +512,6 @@ pub fn split_fleet(
         }
     }
 
-    // Update original fleet
-    commands.entity(fleet_entity).insert(Fleet {
-        delta_v_remaining: fleet.delta_v_remaining,
-        name: fleet.name.clone(),
-        ship_count: remaining,
-    });
-
     // Spawn new fleet at same body
     let new_name = generate_fleet_name();
     info!(
@@ -508,9 +521,8 @@ pub fn split_fleet(
 
     let new_fleet = commands.spawn((
         Fleet {
-            delta_v_remaining: fleet.delta_v_remaining, // Same delta-v capability
+            delta_v_remaining: fleet.delta_v_remaining,
             name: new_name,
-            ship_count: split_count,
         },
         ShipLocation::AtBody(*body),
         Faction::Player,
@@ -560,12 +572,9 @@ pub fn merge_fleets(
         return;
     }
 
-    // Calculate totals
-    let mut total_ships = selected_fleet.ship_count;
     let mut merged_names = Vec::new();
 
     for (entity, fleet, _, _) in &fleets_to_merge {
-        total_ships += fleet.ship_count;
         merged_names.push(fleet.name.as_str());
 
         // Reparent all LogicalShip children to selected fleet before despawning
@@ -581,45 +590,48 @@ pub fn merge_fleets(
         commands.entity(*entity).despawn();
     }
 
-    // Update selected fleet with combined ships
     // Keep the higher delta-v (they should be the same, but just in case)
     let max_dv = fleets_to_merge
         .iter()
         .map(|(_, f, _, _)| f.delta_v_remaining)
         .fold(selected_fleet.delta_v_remaining, f64::max);
 
-    commands.entity(selected_entity).insert(Fleet {
-        delta_v_remaining: max_dv,
-        name: selected_fleet.name.clone(),
-        ship_count: total_ships,
-    });
+    if max_dv != selected_fleet.delta_v_remaining {
+        commands.entity(selected_entity).insert(Fleet {
+            delta_v_remaining: max_dv,
+            name: selected_fleet.name.clone(),
+        });
+    }
 
     info!(
-        "Merged {} into {} ({} ships total)",
+        "Merged {} into {}",
         merged_names.join(", "),
         selected_fleet.name,
-        total_ships
     );
 }
 
 /// Counts the total ships at a body from all player fleets.
 pub fn count_ships_at_body(
     body: Entity,
-    fleets: &Query<(&Fleet, &ShipLocation, &Faction)>,
+    fleets: &Query<(Entity, &ShipLocation, &Faction)>,
+    children_query: &Query<&Children>,
+    ships: &Query<&LogicalShip>,
 ) -> u32 {
     fleets
         .iter()
         .filter(|(_, loc, faction)| {
             **faction == Faction::Player && matches!(loc, ShipLocation::AtBody(b) if *b == body)
         })
-        .map(|(fleet, _, _)| fleet.ship_count)
+        .map(|(fleet_entity, _, _)| ship_count(fleet_entity, children_query, ships))
         .sum()
 }
 
 /// Checks if all objectives are satisfied and updates victory state.
 pub fn check_objectives(
     objectives: Query<(Entity, &Objective)>,
-    fleets: Query<(&Fleet, &ShipLocation, &Faction)>,
+    fleets: Query<(Entity, &ShipLocation, &Faction)>,
+    children_query: Query<&Children>,
+    ships: Query<&LogicalShip>,
     mut victory: ResMut<VictoryState>,
     sim_time: Res<crate::simulation::SimulationTime>,
 ) {
@@ -630,8 +642,8 @@ pub fn check_objectives(
 
     // Check if all objectives are satisfied
     let all_satisfied = objectives.iter().all(|(body, obj)| {
-        let ships = count_ships_at_body(body, &fleets);
-        ships >= obj.required_ships
+        let ships_at_body = count_ships_at_body(body, &fleets, &children_query, &ships);
+        ships_at_body >= obj.required_ships
     });
 
     if all_satisfied && !objectives.is_empty() {
@@ -831,35 +843,47 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
     positions
 }
 
+/// Updates ComputedFleetPosition components for all fleets.
+/// Run this before rendering to have positions available.
+pub fn update_fleet_positions(
+    mut commands: Commands,
+    fleets: Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>, &Faction)>,
+    bodies: Query<&ComputedBody>,
+    sim_time: Res<SimulationTime>,
+) {
+    let positions = compute_fleet_positions(&fleets, &bodies, &sim_time);
+
+    for (fleet_entity, _, _, _, _) in &fleets {
+        if let Some((position, velocity_dir)) = positions.get(&fleet_entity) {
+            commands.entity(fleet_entity).insert(ComputedFleetPosition {
+                position: *position,
+                velocity_dir: *velocity_dir,
+            });
+        }
+    }
+}
+
 /// Departure marker color (distinct from departure burn arrow)
 const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
 
 /// Renders fleets as triangles at their current positions.
-/// - AtBody: positioned at body location with offset for multiple fleets
-/// - InTransit: positioned along transfer arc
-/// Selected fleet is brighter and larger.
+/// Reads from ComputedFleetPosition (updated by update_fleet_positions).
 pub fn render_ship(
-    ships: Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>, &Faction)>,
-    bodies: Query<&ComputedBody>,
-    sim_time: Res<SimulationTime>,
+    fleets: Query<(Entity, &ComputedFleetPosition, Option<&Selected>)>,
+    children_query: Query<&Children>,
+    logical_ships: Query<&LogicalShip>,
     mut painter: ShapePainter,
 ) {
-    let positions = compute_fleet_positions(&ships, &bodies, &sim_time);
-
-    for (fleet_entity, fleet, _, is_selected, _faction) in &ships {
+    for (fleet_entity, computed, is_selected) in &fleets {
         let is_selected = is_selected.is_some();
         let size_mult = if is_selected { 1.3 } else { 1.0 };
         let color = if is_selected { FLEET_SELECTED_COLOR } else { FLEET_UNSELECTED_COLOR };
 
-        let Some((position, velocity_dir)) = positions.get(&fleet_entity) else {
-            continue;
-        };
-
         // Draw triangle pointing in velocity direction
-        painter.set_translation(*position);
+        painter.set_translation(computed.position);
 
-        let rotation = if velocity_dir.length_squared() > 0.001 {
-            Quat::from_rotation_arc(Vec3::Y, *velocity_dir)
+        let rotation = if computed.velocity_dir.length_squared() > 0.001 {
+            Quat::from_rotation_arc(Vec3::Y, computed.velocity_dir)
         } else {
             Quat::IDENTITY
         };
@@ -887,8 +911,9 @@ pub fn render_ship(
         // Draw ship count below the triangle for selected fleet
         if is_selected {
             painter.set_rotation(Quat::IDENTITY);
-            let count_pos = *position + Vec3::new(0.0, -height * 0.8, 0.0);
-            draw_number(&mut painter, fleet.ship_count as usize, count_pos, 2.0);
+            let count_pos = computed.position + Vec3::new(0.0, -height * 0.8, 0.0);
+            let count = ship_count(fleet_entity, &children_query, &logical_ships);
+            draw_number(&mut painter, count as usize, count_pos, 2.0);
         }
     }
 }
@@ -901,7 +926,9 @@ const OBJECTIVE_COMPLETE_COLOR: Color = Color::srgba(0.3, 1.0, 0.3, 0.9);   // G
 /// Shows current/required ships count and a ring around the body.
 pub fn render_objectives(
     objectives: Query<(Entity, &Objective)>,
-    fleets: Query<(&Fleet, &ShipLocation, &Faction)>,
+    fleets: Query<(Entity, &ShipLocation, &Faction)>,
+    children_query: Query<&Children>,
+    ships: Query<&LogicalShip>,
     bodies: Query<&ComputedBody>,
     mut painter: ShapePainter,
 ) {
@@ -911,7 +938,7 @@ pub fn render_objectives(
         };
 
         // Count ships at this body
-        let ships_here = count_ships_at_body(body_entity, &fleets);
+        let ships_here = count_ships_at_body(body_entity, &fleets, &children_query, &ships);
         let is_complete = ships_here >= objective.required_ships;
 
         let color = if is_complete {

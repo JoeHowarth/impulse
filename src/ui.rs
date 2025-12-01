@@ -257,13 +257,15 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
 /// Shows the selected fleet's info.
 pub fn update_transfer_panel(
     bodies: Query<&Body>,
-    selected_query: Query<(&crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    selected_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    children_query: Query<&Children>,
+    logical_ships: Query<&crate::ship::LogicalShip>,
     sim_time: Res<SimulationTime>,
     lut: Res<TransferLut>,
     mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<FlightPlanText>)>,
     mut plan_query: Query<&mut Text, (With<FlightPlanText>, Without<ShipStatusText>)>,
 ) {
-    let Ok((fleet, location, plan)) = selected_query.single() else {
+    let Ok((fleet_entity, fleet, location, plan)) = selected_query.single() else {
         // No fleet selected - clear panel
         if let Ok(mut text) = ship_query.single_mut() {
             **text = "No fleet selected".to_string();
@@ -275,6 +277,7 @@ pub fn update_transfer_panel(
     };
 
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+    let ship_count = crate::ship::ship_count(fleet_entity, &children_query, &logical_ships);
 
     // Build header: fleet name, ship count, location, delta-v
     let location_name = match location {
@@ -290,7 +293,7 @@ pub fn update_transfer_panel(
     };
 
     if let Ok(mut text) = ship_query.single_mut() {
-        **text = format!("{} ({} ships) @ {} | {:.0} m/s", fleet.name, fleet.ship_count, location_name, fleet.delta_v_remaining);
+        **text = format!("{} ({} ships) @ {} | {:.0} m/s", fleet.name, ship_count, location_name, fleet.delta_v_remaining);
     }
 
     // Build flight plan rows
@@ -985,6 +988,8 @@ pub fn spawn_fleet_tabs(commands: &mut Commands) {
 pub fn update_fleet_tabs(
     mut commands: Commands,
     fleets: Query<(Entity, &crate::ship::Fleet, Option<&crate::ship::Selected>, &crate::ship::Faction)>,
+    children_query: Query<&Children>,
+    logical_ships: Query<&crate::ship::LogicalShip>,
     container_query: Query<Entity, With<FleetTabsContainer>>,
     existing_tabs: Query<(Entity, &FleetTab)>,
 ) {
@@ -1019,7 +1024,7 @@ pub fn update_fleet_tabs(
 
             let fleet_entity_copy = *fleet_entity;
             let fleet_name = fleet.name.clone();
-            let ship_count = fleet.ship_count;
+            let ship_count = crate::ship::ship_count(*fleet_entity, &children_query, &logical_ships);
             let delta_v = fleet.delta_v_remaining;
 
             commands.entity(container).with_children(|parent| {
