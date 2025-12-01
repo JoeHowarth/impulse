@@ -984,7 +984,7 @@ pub fn spawn_fleet_tabs(commands: &mut Commands) {
 /// Updates fleet tabs - rebuilds when fleet count changes.
 pub fn update_fleet_tabs(
     mut commands: Commands,
-    fleets: Query<(Entity, &crate::ship::Fleet, Option<&crate::ship::Selected>), With<crate::ship::PlayerControlled>>,
+    fleets: Query<(Entity, &crate::ship::Fleet, Option<&crate::ship::Selected>, &crate::ship::Faction)>,
     container_query: Query<Entity, With<FleetTabsContainer>>,
     existing_tabs: Query<(Entity, &FleetTab)>,
 ) {
@@ -992,8 +992,10 @@ pub fn update_fleet_tabs(
         return;
     };
 
-    // Collect fleet info sorted for consistent ordering
-    let mut fleet_info: Vec<_> = fleets.iter().collect();
+    // Collect player fleet info sorted for consistent ordering
+    let mut fleet_info: Vec<_> = fleets.iter()
+        .filter(|(_, _, _, faction)| **faction == crate::ship::Faction::Player)
+        .collect();
     fleet_info.sort_by(|a, b| a.1.name.cmp(&b.1.name));
 
     // Check if we need to rebuild
@@ -1007,7 +1009,7 @@ pub fn update_fleet_tabs(
         }
 
         // Spawn new tabs as children of container
-        for (index, (fleet_entity, fleet, is_selected)) in fleet_info.iter().enumerate() {
+        for (index, (fleet_entity, fleet, is_selected, _)) in fleet_info.iter().enumerate() {
             let is_selected = is_selected.is_some();
             let bg_color = if is_selected {
                 Color::srgba(0.2, 0.4, 0.5, 0.9)
@@ -1087,7 +1089,7 @@ pub fn update_fleet_tabs(
     } else {
         // Just update existing tabs' appearance
         for (tab_entity, tab) in existing_tabs.iter() {
-            let Some((_, _fleet, is_selected)) = fleet_info.iter().find(|(e, _, _)| *e == tab.fleet_entity) else {
+            let Some((_, _fleet, is_selected, _)) = fleet_info.iter().find(|(e, _, _, _)| *e == tab.fleet_entity) else {
                 continue;
             };
             let is_selected = is_selected.is_some();
@@ -1113,7 +1115,7 @@ pub fn handle_fleet_number_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut key_state: ResMut<FleetKeyState>,
-    fleets: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation), With<crate::ship::PlayerControlled>>,
+    fleets: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::Faction)>,
     selected: Query<Entity, With<crate::ship::Selected>>,
     bodies: Query<&ComputedBody>,
     sim_time: Res<SimulationTime>,
@@ -1134,11 +1136,13 @@ pub fn handle_fleet_number_keys(
 
     for (key, index) in key_to_index {
         if keyboard.just_pressed(key) {
-            // Get fleets sorted by name for consistent ordering
-            let mut fleet_list: Vec<_> = fleets.iter().collect();
+            // Get player fleets sorted by name for consistent ordering
+            let mut fleet_list: Vec<_> = fleets.iter()
+                .filter(|(_, _, _, faction)| **faction == crate::ship::Faction::Player)
+                .collect();
             fleet_list.sort_by(|a, b| a.1.name.cmp(&b.1.name));
 
-            if let Some((fleet_entity, fleet, location)) = fleet_list.get(index) {
+            if let Some((fleet_entity, fleet, location, _)) = fleet_list.get(index) {
                 let current_time = time.elapsed_secs_f64();
                 let is_double_tap = key_state.last_key == Some(key)
                     && (current_time - key_state.last_press_time) < DOUBLE_TAP_THRESHOLD;

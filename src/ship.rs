@@ -27,9 +27,19 @@ use crate::{phys_to_visual, transfer_vis};
 // Components
 // ============================================================================
 
-/// Marker for the player-controlled ship.
+/// Faction that a fleet belongs to.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Faction {
+    #[default]
+    Player,
+    Enemy,
+}
+
+/// An individual ship entity within a fleet.
+/// Ships are spawned as children of their Fleet entity.
+/// For now this is a simple marker - stats (ammo, damage) will be added later.
 #[derive(Component)]
-pub struct PlayerControlled;
+pub struct LogicalShip;
 
 /// A fleet of ships that travel together between celestial bodies.
 #[derive(Component)]
@@ -442,6 +452,8 @@ pub fn split_fleet(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
     selected: Query<(Entity, &Fleet, &ShipLocation), With<Selected>>,
+    children_query: Query<&Children>,
+    ships: Query<&LogicalShip>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyS) {
         return;
@@ -467,6 +479,19 @@ pub fn split_fleet(
     let split_count = fleet.ship_count / 2;
     let remaining = fleet.ship_count - split_count;
 
+    // Collect LogicalShip children to move to new fleet
+    let mut ships_to_move = Vec::new();
+    if let Ok(children) = children_query.get(fleet_entity) {
+        for child in children.iter() {
+            if ships.contains(child) {
+                ships_to_move.push(child);
+                if ships_to_move.len() >= split_count as usize {
+                    break;
+                }
+            }
+        }
+    }
+
     // Update original fleet
     commands.entity(fleet_entity).insert(Fleet {
         delta_v_remaining: fleet.delta_v_remaining,
@@ -481,16 +506,21 @@ pub fn split_fleet(
         split_count, fleet.name, new_name
     );
 
-    commands.spawn((
+    let new_fleet = commands.spawn((
         Fleet {
             delta_v_remaining: fleet.delta_v_remaining, // Same delta-v capability
             name: new_name,
             ship_count: split_count,
         },
         ShipLocation::AtBody(*body),
-        PlayerControlled,
+        Faction::Player,
         FlightPlan::default(),
-    ));
+    )).id();
+
+    // Reparent ships to new fleet
+    for ship in ships_to_move {
+        commands.entity(new_fleet).add_child(ship);
+    }
 }
 
 /// Merges all fleets at the same body into the selected fleet when M is pressed.
@@ -499,7 +529,9 @@ pub fn merge_fleets(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
     selected: Query<(Entity, &Fleet, &ShipLocation), With<Selected>>,
-    other_fleets: Query<(Entity, &Fleet, &ShipLocation), (With<PlayerControlled>, Without<Selected>)>,
+    other_fleets: Query<(Entity, &Fleet, &ShipLocation, &Faction), Without<Selected>>,
+    children_query: Query<&Children>,
+    ships: Query<&LogicalShip>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyM) {
         return;
@@ -515,10 +547,12 @@ pub fn merge_fleets(
         return;
     };
 
-    // Find other fleets at the same body
+    // Find other player fleets at the same body
     let fleets_to_merge: Vec<_> = other_fleets
         .iter()
-        .filter(|(_, _, loc)| matches!(loc, ShipLocation::AtBody(b) if *b == *body))
+        .filter(|(_, _, loc, faction)| {
+            **faction == Faction::Player && matches!(loc, ShipLocation::AtBody(b) if *b == *body)
+        })
         .collect();
 
     if fleets_to_merge.is_empty() {
@@ -530,9 +564,20 @@ pub fn merge_fleets(
     let mut total_ships = selected_fleet.ship_count;
     let mut merged_names = Vec::new();
 
-    for (entity, fleet, _) in &fleets_to_merge {
+    for (entity, fleet, _, _) in &fleets_to_merge {
         total_ships += fleet.ship_count;
         merged_names.push(fleet.name.as_str());
+
+        // Reparent all LogicalShip children to selected fleet before despawning
+        if let Ok(children) = children_query.get(*entity) {
+            for child in children.iter() {
+                if ships.contains(child) {
+                    commands.entity(selected_entity).add_child(child);
+                }
+            }
+        }
+
+        // Despawn the empty fleet shell (children have been reparented)
         commands.entity(*entity).despawn();
     }
 
@@ -540,7 +585,7 @@ pub fn merge_fleets(
     // Keep the higher delta-v (they should be the same, but just in case)
     let max_dv = fleets_to_merge
         .iter()
-        .map(|(_, f, _)| f.delta_v_remaining)
+        .map(|(_, f, _, _)| f.delta_v_remaining)
         .fold(selected_fleet.delta_v_remaining, f64::max);
 
     commands.entity(selected_entity).insert(Fleet {
@@ -560,19 +605,21 @@ pub fn merge_fleets(
 /// Counts the total ships at a body from all player fleets.
 pub fn count_ships_at_body(
     body: Entity,
-    fleets: &Query<(&Fleet, &ShipLocation), With<PlayerControlled>>,
+    fleets: &Query<(&Fleet, &ShipLocation, &Faction)>,
 ) -> u32 {
     fleets
         .iter()
-        .filter(|(_, loc)| matches!(loc, ShipLocation::AtBody(b) if *b == body))
-        .map(|(fleet, _)| fleet.ship_count)
+        .filter(|(_, loc, faction)| {
+            **faction == Faction::Player && matches!(loc, ShipLocation::AtBody(b) if *b == body)
+        })
+        .map(|(fleet, _, _)| fleet.ship_count)
         .sum()
 }
 
 /// Checks if all objectives are satisfied and updates victory state.
 pub fn check_objectives(
     objectives: Query<(Entity, &Objective)>,
-    fleets: Query<(&Fleet, &ShipLocation), With<PlayerControlled>>,
+    fleets: Query<(&Fleet, &ShipLocation, &Faction)>,
     mut victory: ResMut<VictoryState>,
     sim_time: Res<crate::simulation::SimulationTime>,
 ) {
@@ -709,7 +756,7 @@ const FLEET_OFFSET_DISTANCE: f32 = 6.0;
 /// Computes visual positions for all fleets, offsetting multiple fleets at the same body.
 /// Returns a map from fleet entity to (world_position, velocity_direction).
 pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
-    ships: &Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>), F>,
+    ships: &Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>, &Faction), F>,
     bodies: &Query<&ComputedBody>,
     sim_time: &SimulationTime,
 ) -> bevy::platform::collections::HashMap<Entity, (Vec3, Vec3)> {
@@ -720,14 +767,14 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
 
     // First pass: count fleets at each body
     let mut fleets_at_body: HashMap<Entity, Vec<Entity>> = HashMap::new();
-    for (fleet_entity, _, location, _) in ships.iter() {
+    for (fleet_entity, _, location, _, _) in ships.iter() {
         if let ShipLocation::AtBody(body) = location {
             fleets_at_body.entry(*body).or_default().push(fleet_entity);
         }
     }
 
     // Second pass: compute positions with offsets
-    for (fleet_entity, _, location, is_selected) in ships.iter() {
+    for (fleet_entity, _, location, is_selected, _) in ships.iter() {
         let size_mult = if is_selected.is_some() { 1.3 } else { 1.0 };
 
         let (position, velocity_dir) = match location {
@@ -792,14 +839,14 @@ const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
 /// - InTransit: positioned along transfer arc
 /// Selected fleet is brighter and larger.
 pub fn render_ship(
-    ships: Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>)>,
+    ships: Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>, &Faction)>,
     bodies: Query<&ComputedBody>,
     sim_time: Res<SimulationTime>,
     mut painter: ShapePainter,
 ) {
     let positions = compute_fleet_positions(&ships, &bodies, &sim_time);
 
-    for (fleet_entity, fleet, _, is_selected) in &ships {
+    for (fleet_entity, fleet, _, is_selected, _faction) in &ships {
         let is_selected = is_selected.is_some();
         let size_mult = if is_selected { 1.3 } else { 1.0 };
         let color = if is_selected { FLEET_SELECTED_COLOR } else { FLEET_UNSELECTED_COLOR };
@@ -854,7 +901,7 @@ const OBJECTIVE_COMPLETE_COLOR: Color = Color::srgba(0.3, 1.0, 0.3, 0.9);   // G
 /// Shows current/required ships count and a ring around the body.
 pub fn render_objectives(
     objectives: Query<(Entity, &Objective)>,
-    fleets: Query<(&Fleet, &ShipLocation), With<PlayerControlled>>,
+    fleets: Query<(&Fleet, &ShipLocation, &Faction)>,
     bodies: Query<&ComputedBody>,
     mut painter: ShapePainter,
 ) {

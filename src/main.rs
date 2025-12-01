@@ -200,45 +200,60 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
     // Spawn player fleets at different locations
     // Fleet 1: Main fleet at Earth (selected by default)
     if let Some(&earth) = body_entities.get("Earth") {
+        let ship_count = 10u32;
         commands.spawn((
             ship::Fleet {
                 delta_v_remaining: 500_000.0,
                 name: "Alpha".to_string(),
-                ship_count: 10,
+                ship_count,
             },
             ship::ShipLocation::AtBody(earth),
-            ship::PlayerControlled,
+            ship::Faction::Player,
             ship::Selected,
             ship::FlightPlan::default(),
-        ));
+        )).with_children(|builder| {
+            for _ in 0..ship_count {
+                builder.spawn(ship::LogicalShip);
+            }
+        });
     }
 
     // Fleet 2: At Mars
     if let Some(&mars) = body_entities.get("Mars") {
+        let ship_count = 5u32;
         commands.spawn((
             ship::Fleet {
                 delta_v_remaining: 400_000.0,
                 name: "Bravo".to_string(),
-                ship_count: 5,
+                ship_count,
             },
             ship::ShipLocation::AtBody(mars),
-            ship::PlayerControlled,
+            ship::Faction::Player,
             ship::FlightPlan::default(),
-        ));
+        )).with_children(|builder| {
+            for _ in 0..ship_count {
+                builder.spawn(ship::LogicalShip);
+            }
+        });
     }
 
     // Fleet 3: At Jupiter
     if let Some(&jupiter) = body_entities.get("Jupiter") {
+        let ship_count = 3u32;
         commands.spawn((
             ship::Fleet {
                 delta_v_remaining: 300_000.0,
                 name: "Charlie".to_string(),
-                ship_count: 3,
+                ship_count,
             },
             ship::ShipLocation::AtBody(jupiter),
-            ship::PlayerControlled,
+            ship::Faction::Player,
             ship::FlightPlan::default(),
-        ));
+        )).with_children(|builder| {
+            for _ in 0..ship_count {
+                builder.spawn(ship::LogicalShip);
+            }
+        });
     }
 
     // Spawn objectives on some bodies
@@ -532,7 +547,7 @@ fn handle_body_click(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     body_query: Query<(Entity, &Body, &ComputedBody)>,
-    fleet_query: Query<(Entity, &ship::Fleet, &ship::ShipLocation, Option<&ship::Selected>), With<ship::PlayerControlled>>,
+    fleet_query: Query<(Entity, &ship::Fleet, &ship::ShipLocation, Option<&ship::Selected>, &ship::Faction)>,
     selected_query: Query<Entity, With<ship::Selected>>,
     bodies_for_pos: Query<&ComputedBody>,
     sim_time: Res<simulation::SimulationTime>,
@@ -550,8 +565,10 @@ fn handle_body_click(
 
     if shift_held {
         // Shift+click: open transfer popup for body
-        let selected_fleet = fleet_query.iter().find(|(e, _, _, _)| selected_query.get(*e).is_ok());
-        let current_entity = selected_fleet.map(|(_, _, loc, _)| loc.effective_body());
+        let selected_fleet = fleet_query.iter()
+            .filter(|(_, _, _, _, faction)| **faction == ship::Faction::Player)
+            .find(|(e, _, _, _, _)| selected_query.get(*e).is_ok());
+        let current_entity = selected_fleet.map(|(_, _, loc, _, _)| loc.effective_body());
 
         let mut best_match: Option<(Entity, f32)> = None;
         for (entity, _body, computed) in body_query.iter() {
@@ -593,7 +610,11 @@ fn handle_body_click(
         let fleet_positions = ship::compute_fleet_positions(&fleet_query, &bodies_for_pos, &sim_time);
 
         let mut best_match: Option<(Entity, f32)> = None;
-        for (fleet_entity, _, _, _) in fleet_query.iter() {
+        for (fleet_entity, _, _, _, faction) in fleet_query.iter() {
+            // Only consider player fleets for selection
+            if *faction != ship::Faction::Player {
+                continue;
+            }
             let Some((world_pos, _)) = fleet_positions.get(&fleet_entity) else { continue };
             let Ok(screen_pos) = camera.world_to_viewport(camera_transform, *world_pos) else { continue };
 
@@ -612,7 +633,7 @@ fn handle_body_click(
         if let Some((fleet_entity, _)) = best_match {
             let fleet_name = fleet_query
                 .get(fleet_entity)
-                .map(|(_, f, _, _)| f.name.clone())
+                .map(|(_, f, _, _, _)| f.name.clone())
                 .unwrap_or_default();
             info!("Selected fleet: {}", fleet_name);
             for old_selected in selected_query.iter() {
