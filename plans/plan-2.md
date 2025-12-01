@@ -1,9 +1,14 @@
 # Impulse Development Plan
 
-## Current State
-- 1 ship with delta-v budget
-- Lambert transfers between same-parent bodies
-- Transfer cache, popups, hover previews
+## Current State (Phase 1 Complete)
+- Multiple fleets with ship counts and delta-v budgets
+- Lambert transfers via precomputed LUT (~1.4M solutions)
+- Multi-leg flight plans with commit/cancel
+- Fleet split (S) and merge (M) operations
+- Objectives system (required ships at bodies)
+- Victory detection when all objectives met
+- Number keys (1-9) to select fleets, double-tap to pan camera
+- Transfer popups showing source → destination
 - Time controls, polished visuals
 
 ---
@@ -37,44 +42,99 @@ Extend current transfer system to support:
 
 ---
 
-## Phase 2: Simple Combat
+## Phase 2: Tactical Foundation
 
-### 2.1 Combat Entities
-All projectiles are real entities with visuals:
-- Missiles (offensive, maneuverable)
-- Coilgun slugs (offensive, ballistic)
-- PD rounds (defensive, short range)
-- Interceptor missiles (defensive)
+Bare-bones tactical combat layer. When player and enemy fleets meet at a body, enter a Newtonian combat arena.
 
-One type of each for now. No ordnance variety yet.
+### 2.1 Ship Entities
+- Ships exist as individual entities (children of Fleet)
+- Fleet's `ship_count` becomes actual Ship children
+- Ships not rendered at strategic layer (fleet marker represents them)
 
-### 2.2 Combat Physics
-- Newtonian trajectories + gravity vector
-- Skip orbital mechanics during fights (ship acceleration dominates)
-- Basic trajectory prediction lines
+### 2.2 Factions
+- Faction component: `PlayerControlled` vs `EnemyControlled`
+- Determines hostility and targeting
 
-### 2.3 Combat Systems
-- **Offense**: Player chooses targets for missiles/coilguns
-- **Defense**: Automated PD, no active control (fires based on stats/ranges)
-- **Sensors**: Probabilistic detection ranges (not guaranteed)
-- **Damage**: Binary - any impact is fatal
+### 2.3 Enemy Garrisons
+- Spawn enemy fleets at certain bodies (static, no movement)
+- Enemy fleets have ships like player fleets
 
-### 2.4 Engagement Model
-- Proximity-based engagement initiation
-- Fleets in transit can be intercepted (target a moving fleet, game calculates intercept point)
-- Fleets as valid transfer targets
+### 2.4 Combat Trigger
+- Detect when player fleet arrives at body with enemy fleet
+- Triggers transition to tactical mode
 
-### 2.5 Ammunition & Resupply
-- Finite missiles/slugs
+### 2.5 Tactical Mode Entry
+- Time slows to ~60x realtime (from strategic ~864,000x)
+- Camera zooms to 400,000 km × 400,000 km arena
+- Body visible on right (outer edge 50,000 km into screen)
+- Fleets spawn in center, 100,000 km apart, zero relative velocity
+- `TacticalMode` resource tracks active combat state
+
+### 2.6 Ship Rendering
+- Draw individual ships in tactical view
+- Different visual for player vs enemy
+
+### 2.7 Ship Selection
+- Click to select one ship
+- Shift+click to add to selection
+- Box select (click-drag rectangle)
+
+### 2.8 Movement Orders + Physics
+- Right-click to set destination
+- Ships thrust toward destination (Newtonian motion)
+- Avian 2D physics with f64 precision, 1 unit = 1 meter
+- Linear CCD on all entities (handle high-speed collisions)
+- See `plans/tactical-physics.md` for details
+
+### 2.9 Basic Missiles
+- Press 1 to fire missile at selected target
+- Missiles fire if target within 50,000 km range
+- Missiles track target, collision = kill (binary damage)
+- No ammunition limits yet
+
+### 2.10 Retreat + Win/Lose
+- Ship reaching arena edge = retreated from battle
+- If all ships for a side retreat → battle over
+- Retreating ships must immediately pick new destination or be destroyed
+- Destroy all enemies = tactical victory
+
+**Phase 2 Checkpoint**: Playable tactical combat. Fly to enemy body, enter arena, select ships, maneuver, fire missiles, win by destroying enemies.
+
+---
+
+## Phase 3: Combat Depth
+
+Expand tactical combat with more weapons, systems, and strategic integration.
+
+### 3.1 Additional Weapons
+- Coilgun slugs: ballistic (no tracking), very high speed
+- PD rounds: short range defensive
+- Interceptor missiles: defensive, target incoming missiles
+
+### 3.2 Automated PD Defense
+- PD fires automatically at incoming threats
+- Based on stats/ranges, no player micromanagement
+
+### 3.3 Sensors & Detection
+- Probabilistic detection ranges (not guaranteed to see enemies)
+- Trajectory prediction lines for projectiles
+
+### 3.4 Ammunition & Resupply
+- Finite missiles/slugs per ship
 - Auto-resupply at friendly bodies
-- (Possibly strictly finite at start - no resupply)
+- Forces conservation and logistics thinking
 
-### 2.6 Capture Mechanics
+### 3.5 Intercept Moving Fleets
+- Fleets in transit can be targeted
+- Game calculates intercept point
+- Enables ambushes and defensive positioning
+
+### 3.6 Capture Mechanics
 - Bodies are capturable locations
 - Fleet at body with no enemies → body flips after brief timer
 - Timer prevents instant ping-ponging
 
-### 2.7 Faction Asymmetry
+### 3.7 Faction Asymmetry
 **Outer System (Player):**
 - Faster ships (higher delta-v and/or acceleration)
 - Faster missiles
@@ -85,16 +145,15 @@ One type of each for now. No ordnance variety yet.
 - More missiles per ship
 - More ships total
 - Ships spread across multiple fleets
-- Static garrisons at bodies (like dungeons to beat)
-- Iterate AI behavior later
+- Static garrisons at bodies
 
-### 2.8 Win/Lose Conditions
+### 3.8 Campaign Win/Lose
 - **Win**: Capture all bodies
 - **Lose**: Lose all ships
 - Fixed starting ships, no production
 - Pure operational game: fighting and delta-v management
 
-**Phase 2 Checkpoint**: Small but playable game. Asymmetric factions, real combat with tactical depth, capture objectives.
+**Phase 3 Checkpoint**: Full tactical depth. Asymmetric factions, multiple weapon types, territory control, campaign victory conditions.
 
 ---
 
