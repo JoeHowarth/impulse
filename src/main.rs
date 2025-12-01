@@ -87,6 +87,7 @@ fn main() {
         .add_plugins(LogDiagnosticsPlugin::default())
         .insert_resource(SimulationTime::from_start_day(start_day))
         .init_resource::<ui::TransferPopup>()
+        .init_resource::<ship::VictoryState>()
         .add_systems(
             Startup,
             (
@@ -109,6 +110,8 @@ fn main() {
                 // Fleet management
                 ship::split_fleet,
                 ship::merge_fleets,
+                // Objective tracking
+                ship::check_objectives,
                 // Transfer execution (runs before expire so committed legs depart first)
                 ship::execute_departure,
                 ship::check_arrival,
@@ -146,6 +149,7 @@ fn main() {
                 update_orbit_positions,
                 render_system,
                 ship::render_ship,
+                ship::render_objectives,
                 ship::render_departure_markers,
                 ship::render_plan_markers,
                 ship::render_plan_arcs,
@@ -154,6 +158,7 @@ fn main() {
                 ui::update_time_ui,
                 ui::update_transfer_panel,
                 ui::update_fleet_tabs,
+                ui::update_victory_overlay,
             )
                 .chain()
                 .after(ui::handle_option_selection),
@@ -230,6 +235,16 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
             ship::PlayerControlled,
             ship::FlightPlan::default(),
         ));
+    }
+
+    // Spawn objectives on some bodies
+    // Total ships: 10 + 5 + 3 = 18
+    // Objectives require: 8 + 6 = 14 ships (forces splitting and routing)
+    if let Some(&mars) = body_entities.get("Mars") {
+        commands.entity(mars).insert(ship::Objective { required_ships: 8 });
+    }
+    if let Some(&saturn) = body_entities.get("Saturn") {
+        commands.entity(saturn).insert(ship::Objective { required_ships: 6 });
     }
 
     // Second pass: spawn labels and orbit gizmos (now we can look up parent entities)

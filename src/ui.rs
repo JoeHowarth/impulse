@@ -1132,3 +1132,78 @@ pub fn handle_fleet_number_keys(
     }
 }
 
+// ============================================================================
+// Victory Overlay
+// ============================================================================
+
+/// Marker for the victory overlay
+#[derive(Component)]
+pub struct VictoryOverlay;
+
+/// Spawns or updates the victory overlay when victory is achieved.
+pub fn update_victory_overlay(
+    mut commands: Commands,
+    victory: Res<crate::ship::VictoryState>,
+    existing: Query<Entity, With<VictoryOverlay>>,
+    sim_time: Res<SimulationTime>,
+) {
+    // Only show if victory achieved and overlay doesn't exist
+    if !victory.victory_achieved {
+        return;
+    }
+
+    if !existing.is_empty() {
+        return; // Already showing
+    }
+
+    // Calculate days to victory
+    let victory_days = victory.victory_time.unwrap_or(0.0) / 86400.0;
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(20.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.1, 0.0, 0.85)),
+            VictoryOverlay,
+        ))
+        .with_children(|parent| {
+            // Victory title
+            parent.spawn((
+                Text::new("VICTORY"),
+                TextFont {
+                    font_size: 64.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.3, 1.0, 0.3)),
+            ));
+
+            // Subtitle
+            parent.spawn((
+                Text::new("All objectives completed!"),
+                TextFont {
+                    font_size: 24.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.8, 0.9, 0.8, 0.9)),
+            ));
+
+            // Time taken
+            parent.spawn((
+                Text::new(format!("Completed in {:.1} days", victory_days)),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.6, 0.7, 0.6, 0.8)),
+            ));
+        });
+}
+

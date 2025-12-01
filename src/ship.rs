@@ -46,6 +46,23 @@ pub struct Fleet {
 #[derive(Component)]
 pub struct Selected;
 
+/// An objective that requires a certain number of ships at a body.
+/// Attach to body entities to create win conditions.
+#[derive(Component)]
+pub struct Objective {
+    /// Number of ships required to satisfy this objective
+    pub required_ships: u32,
+}
+
+/// Resource to track victory state
+#[derive(Resource, Default)]
+pub struct VictoryState {
+    /// Whether all objectives are satisfied
+    pub victory_achieved: bool,
+    /// Time when victory was achieved (for display)
+    pub victory_time: Option<f64>,
+}
+
 /// Ship's current location - either at a body or in transit.
 #[derive(Component)]
 pub enum ShipLocation {
@@ -540,6 +557,43 @@ pub fn merge_fleets(
     );
 }
 
+/// Counts the total ships at a body from all player fleets.
+pub fn count_ships_at_body(
+    body: Entity,
+    fleets: &Query<(&Fleet, &ShipLocation), With<PlayerControlled>>,
+) -> u32 {
+    fleets
+        .iter()
+        .filter(|(_, loc)| matches!(loc, ShipLocation::AtBody(b) if *b == body))
+        .map(|(fleet, _)| fleet.ship_count)
+        .sum()
+}
+
+/// Checks if all objectives are satisfied and updates victory state.
+pub fn check_objectives(
+    objectives: Query<(Entity, &Objective)>,
+    fleets: Query<(&Fleet, &ShipLocation), With<PlayerControlled>>,
+    mut victory: ResMut<VictoryState>,
+    sim_time: Res<crate::simulation::SimulationTime>,
+) {
+    // Don't check if already won
+    if victory.victory_achieved {
+        return;
+    }
+
+    // Check if all objectives are satisfied
+    let all_satisfied = objectives.iter().all(|(body, obj)| {
+        let ships = count_ships_at_body(body, &fleets);
+        ships >= obj.required_ships
+    });
+
+    if all_satisfied && !objectives.is_empty() {
+        victory.victory_achieved = true;
+        victory.victory_time = Some(sim_time.sim_time);
+        info!("VICTORY! All objectives completed!");
+    }
+}
+
 /// Syncs Transfer visualization entities to match ShipLocation + committed legs.
 /// - InTransit -> one Transfer for active flight
 /// - Committed legs -> one Transfer each for future arcs
@@ -789,6 +843,60 @@ pub fn render_ship(
             let count_pos = *position + Vec3::new(0.0, -height * 0.8, 0.0);
             draw_number(&mut painter, fleet.ship_count as usize, count_pos, 2.0);
         }
+    }
+}
+
+/// Objective marker colors
+const OBJECTIVE_INCOMPLETE_COLOR: Color = Color::srgba(1.0, 0.5, 0.2, 0.9); // Orange
+const OBJECTIVE_COMPLETE_COLOR: Color = Color::srgba(0.3, 1.0, 0.3, 0.9);   // Green
+
+/// Renders objective markers at bodies with objectives.
+/// Shows current/required ships count and a ring around the body.
+pub fn render_objectives(
+    objectives: Query<(Entity, &Objective)>,
+    fleets: Query<(&Fleet, &ShipLocation), With<PlayerControlled>>,
+    bodies: Query<&ComputedBody>,
+    mut painter: ShapePainter,
+) {
+    for (body_entity, objective) in &objectives {
+        let Ok(computed) = bodies.get(body_entity) else {
+            continue;
+        };
+
+        // Count ships at this body
+        let ships_here = count_ships_at_body(body_entity, &fleets);
+        let is_complete = ships_here >= objective.required_ships;
+
+        let color = if is_complete {
+            OBJECTIVE_COMPLETE_COLOR
+        } else {
+            OBJECTIVE_INCOMPLETE_COLOR
+        };
+
+        // Draw ring around body
+        let pos = computed.position;
+        let ring_radius = computed.display_size + 5.0;
+
+        painter.set_translation(pos);
+        painter.set_rotation(Quat::IDENTITY);
+        painter.set_color(color);
+        painter.thickness = 1.5;
+        painter.hollow = true;
+        painter.circle(ring_radius);
+
+        // Draw progress text below body: "X/Y"
+        let text_pos = pos + Vec3::new(0.0, -(ring_radius + 8.0), 0.0);
+
+        // Draw the numbers: current / required
+        // First number (current ships)
+        draw_number(&mut painter, ships_here as usize, text_pos + Vec3::new(-4.0, 0.0, 0.0), 2.5);
+
+        // Slash
+        painter.set_translation(text_pos);
+        painter.line(Vec3::new(-1.0, -2.0, 0.0), Vec3::new(1.0, 2.0, 0.0));
+
+        // Second number (required ships)
+        draw_number(&mut painter, objective.required_ships as usize, text_pos + Vec3::new(4.0, 0.0, 0.0), 2.5);
     }
 }
 
