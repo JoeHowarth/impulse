@@ -118,11 +118,6 @@ impl TransferLut {
         );
     }
 
-    /// Get the body index for a given name
-    pub fn body_index(&self, name: &str) -> Option<usize> {
-        self.body_names.iter().position(|n| n == name)
-    }
-
     /// Make a key for the entries map
     fn make_entry_key(
         source_idx: usize,
@@ -162,40 +157,10 @@ impl TransferLut {
         self.tof_candidates.insert(key, tofs);
     }
 
-    /// Get TOF candidates for a body pair
+    /// Get TOF candidates for a body pair by name
     pub fn get_tof_candidates(&self, source_name: &str, target_name: &str) -> Option<&Vec<i32>> {
         let key = Self::make_pair_key(source_name, target_name);
         self.tof_candidates.get(&key)
-    }
-
-    /// Look up a transfer solution by name
-    pub fn get(
-        &self,
-        source_name: &str,
-        target_name: &str,
-        nu_src_bucket: usize,
-        nu_tgt_bucket: usize,
-        tof_idx: usize,
-    ) -> Option<&TransferSolution> {
-        let source_idx = self.body_index(source_name)?;
-        let target_idx = self.body_index(target_name)?;
-        let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
-        self.entries.get(&key)
-    }
-
-    /// Look up a transfer solution by entity
-    pub fn get_by_entity(
-        &self,
-        source: Entity,
-        target: Entity,
-        nu_src_bucket: usize,
-        nu_tgt_bucket: usize,
-        tof_idx: usize,
-    ) -> Option<&TransferSolution> {
-        let source_idx = *self.entity_to_idx.get(&source)?;
-        let target_idx = *self.entity_to_idx.get(&target)?;
-        let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
-        self.entries.get(&key)
     }
 
     /// Get TOF candidates for a body pair by entity
