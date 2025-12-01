@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use astrora_core::core::elements::{coe_to_rv, OrbitalElements};
+use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -241,7 +242,7 @@ impl TransferLut {
     }
 
     /// Validate that this LUT matches the given body configuration
-    pub fn validate(&self, expected_bodies: &[String]) -> bool {
+    pub fn validate(&self, expected_bodies: &HashSet<String>) -> bool {
         if self.version != LUT_VERSION {
             info!("LUT version mismatch: {} != {}", self.version, LUT_VERSION);
             return false;
@@ -250,7 +251,12 @@ impl TransferLut {
             info!("LUT bucket count mismatch: {} != {}", self.anomaly_buckets, ANOMALY_BUCKETS);
             return false;
         }
-        if self.body_names != expected_bodies {
+        // Check body list matches (order-independent)
+        if self.body_names.len() != expected_bodies.len() {
+            info!("LUT body count mismatch: {} != {}", self.body_names.len(), expected_bodies.len());
+            return false;
+        }
+        if !self.body_names.iter().all(|name| expected_bodies.contains(name)) {
             info!("LUT body list mismatch");
             return false;
         }
@@ -429,7 +435,7 @@ fn is_heliocentric(body: &Body) -> bool {
 /// Startup system that loads or generates the transfer LUT
 pub fn init_transfer_lut(mut commands: Commands, bodies: Query<(Entity, &Body)>) {
     // Collect expected body names (heliocentric only)
-    let expected_bodies: Vec<String> = bodies
+    let expected_bodies: HashSet<String> = bodies
         .iter()
         .filter(|(_, b)| is_heliocentric(b))
         .map(|(_, b)| b.name.clone())
