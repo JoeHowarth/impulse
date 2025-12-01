@@ -83,6 +83,21 @@ pub struct VictoryState {
     pub victory_time: Option<f64>,
 }
 
+/// Resource to track active tactical combat state
+#[derive(Resource, Default)]
+pub struct CombatState {
+    /// Whether tactical combat is currently active
+    pub active: bool,
+    /// The tactical arena entity (if spawned)
+    pub arena: Option<Entity>,
+    /// The body where combat is occurring
+    pub body: Option<Entity>,
+    /// Player fleets involved in combat
+    pub player_fleets: Vec<Entity>,
+    /// Enemy fleets involved in combat
+    pub enemy_fleets: Vec<Entity>,
+}
+
 /// Fleet's current location - either at a body or in transit.
 #[derive(Component)]
 pub enum FleetLocation {
@@ -318,6 +333,55 @@ pub fn check_arrival(
 
         // Transition to AtBody
         *location = FleetLocation::AtBody(*target);
+    }
+}
+
+/// Detects when player fleets arrive at bodies with enemy fleets and triggers combat.
+pub fn detect_combat(
+    fleets: Query<(Entity, &Fleet, &FleetLocation, &Faction)>,
+    bodies: Query<&Body>,
+    mut combat: ResMut<CombatState>,
+) {
+    // Skip if combat is already active
+    if combat.active {
+        return;
+    }
+
+    // Group fleets by body
+    use bevy::platform::collections::HashMap;
+    let mut player_at_body: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    let mut enemy_at_body: HashMap<Entity, Vec<Entity>> = HashMap::new();
+
+    for (fleet_entity, _, location, faction) in &fleets {
+        if let FleetLocation::AtBody(body) = location {
+            match faction {
+                Faction::Player => player_at_body.entry(*body).or_default().push(fleet_entity),
+                Faction::Enemy => enemy_at_body.entry(*body).or_default().push(fleet_entity),
+            }
+        }
+    }
+
+    // Find first body with both player and enemy fleets
+    for (body, player_fleets) in &player_at_body {
+        if let Some(enemy_fleets) = enemy_at_body.get(body) {
+            let body_name = bodies.get(*body).map(|b| b.name.as_str()).unwrap_or("?");
+            info!(
+                "COMBAT TRIGGERED at {}! {} player fleet(s) vs {} enemy fleet(s)",
+                body_name,
+                player_fleets.len(),
+                enemy_fleets.len()
+            );
+
+            // Populate combat state
+            combat.active = true;
+            combat.body = Some(*body);
+            combat.player_fleets = player_fleets.clone();
+            combat.enemy_fleets = enemy_fleets.clone();
+            // arena will be set by tactical mode entry (Step 2.5)
+            combat.arena = None;
+
+            return; // Only one combat at a time
+        }
     }
 }
 

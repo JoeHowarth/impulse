@@ -90,6 +90,7 @@ fn main() {
         .init_resource::<ui::TransferPopup>()
         .init_resource::<ui::FleetKeyState>()
         .init_resource::<ship::VictoryState>()
+        .init_resource::<ship::CombatState>()
         .add_systems(
             Startup,
             (
@@ -117,6 +118,8 @@ fn main() {
                 // Transfer execution (runs before expire so committed legs depart first)
                 ship::execute_departure,
                 ship::check_arrival,
+                // Combat detection (after arrival)
+                ship::detect_combat,
                 // Expire uncommitted legs whose departure_day passed
                 ship::expire_stale_legs,
                 // Sync Transfer entities to FleetLocation + committed legs
