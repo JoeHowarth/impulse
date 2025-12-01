@@ -271,6 +271,24 @@ pub struct QueuedTransfer {
 
 **Checkpoint**: Complete logistics puzzle with win state
 
+#### Verification
+- [x] Objective component with required_ships
+- [x] Mars (8 ships) and Saturn (6 ships) objectives
+- [x] Orange ring + X/Y ships counter at objective bodies
+- [x] Ring turns green when objective satisfied
+- [x] VictoryState resource tracks win
+- [x] Victory overlay shows when all objectives complete
+
+**Status**: COMPLETE
+
+**Implementation notes:**
+- `Objective { required_ships }` component attached to body entities
+- `VictoryState` resource with `victory_achieved` flag and `victory_time`
+- `count_ships_at_body()` helper counts all player ships at a body
+- `check_objectives` system runs each frame, sets victory when all satisfied
+- `render_objectives` draws colored ring (orange/green) and X/Y ship count
+- Victory overlay covers screen with "VICTORY" and completion time
+
 ---
 
 ## Phase 1 Complete
