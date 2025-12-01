@@ -123,6 +123,7 @@ fn main() {
             Update,
             (
                 handle_body_click,
+                ui::handle_fleet_number_keys,
                 ui::handle_popup_spawn,
                 ui::update_popup_options,
                 ui::update_popup_position,
@@ -149,6 +150,7 @@ fn main() {
                 ui::update_labels,
                 ui::update_time_ui,
                 ui::update_transfer_panel,
+                ui::update_fleet_tabs,
             )
                 .chain()
                 .after(ui::handle_option_selection),
@@ -260,6 +262,9 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
 
     // Spawn transfer info panel
     ui::spawn_transfer_panel(&mut commands);
+
+    // Spawn fleet tabs at bottom center
+    ui::spawn_fleet_tabs(&mut commands);
 }
 
 /// Links parent entities in Body components after all bodies are spawned.
@@ -505,8 +510,10 @@ fn handle_body_click(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     body_query: Query<(Entity, &Body, &ComputedBody)>,
-    fleet_query: Query<(Entity, &ship::Fleet, &ship::ShipLocation), With<ship::PlayerControlled>>,
+    fleet_query: Query<(Entity, &ship::Fleet, &ship::ShipLocation, Option<&ship::Selected>), With<ship::PlayerControlled>>,
     selected_query: Query<Entity, With<ship::Selected>>,
+    bodies_for_pos: Query<&ComputedBody>,
+    sim_time: Res<simulation::SimulationTime>,
     mut popup: ResMut<ui::TransferPopup>,
 ) {
     if !mouse_button.just_pressed(MouseButton::Left) {
@@ -521,8 +528,8 @@ fn handle_body_click(
 
     if shift_held {
         // Shift+click: open transfer popup for body
-        let selected_fleet = fleet_query.iter().find(|(e, _, _)| selected_query.get(*e).is_ok());
-        let current_entity = selected_fleet.map(|(_, _, loc)| loc.effective_body());
+        let selected_fleet = fleet_query.iter().find(|(e, _, _, _)| selected_query.get(*e).is_ok());
+        let current_entity = selected_fleet.map(|(_, _, loc, _)| loc.effective_body());
 
         let mut best_match: Option<(Entity, f32)> = None;
         for (entity, _body, computed) in body_query.iter() {
@@ -560,26 +567,36 @@ fn handle_body_click(
         }
     } else {
         // Click: select fleet if there's one at click location
-        for (fleet_entity, fleet, location) in fleet_query.iter() {
-            let fleet_world_pos = match location {
-                ship::ShipLocation::AtBody(body) => {
-                    body_query.get(*body).map(|(_, _, c)| c.position).ok()
-                }
-                ship::ShipLocation::InTransit { .. } => None,
-            };
+        // Use computed positions with offsets for proper hit detection
+        let fleet_positions = ship::compute_fleet_positions(&fleet_query, &bodies_for_pos, &sim_time);
 
-            let Some(world_pos) = fleet_world_pos else { continue };
-            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, world_pos) else { continue };
+        let mut best_match: Option<(Entity, f32)> = None;
+        for (fleet_entity, _, _, _) in fleet_query.iter() {
+            let Some((world_pos, _)) = fleet_positions.get(&fleet_entity) else { continue };
+            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, *world_pos) else { continue };
 
             let screen_dist = cursor_pos.distance(screen_pos);
-            if screen_dist <= 15.0 {
-                info!("Selected fleet: {}", fleet.name);
-                for old_selected in selected_query.iter() {
-                    commands.entity(old_selected).remove::<ship::Selected>();
+            if screen_dist <= 20.0 {
+                match &best_match {
+                    None => best_match = Some((fleet_entity, screen_dist)),
+                    Some((_, best_dist)) if screen_dist < *best_dist => {
+                        best_match = Some((fleet_entity, screen_dist))
+                    }
+                    _ => {}
                 }
-                commands.entity(fleet_entity).insert(ship::Selected);
-                return;
             }
+        }
+
+        if let Some((fleet_entity, _)) = best_match {
+            let fleet_name = fleet_query
+                .get(fleet_entity)
+                .map(|(_, f, _, _)| f.name.clone())
+                .unwrap_or_default();
+            info!("Selected fleet: {}", fleet_name);
+            for old_selected in selected_query.iter() {
+                commands.entity(old_selected).remove::<ship::Selected>();
+            }
+            commands.entity(fleet_entity).insert(ship::Selected);
         }
     }
 }

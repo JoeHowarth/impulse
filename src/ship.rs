@@ -502,47 +502,69 @@ pub fn sync_transfer_entities(
 // ============================================================================
 
 /// Selected fleet color (brighter cyan)
-const FLEET_SELECTED_COLOR: Color = Color::srgb(0.5, 1.0, 1.0);
+pub const FLEET_SELECTED_COLOR: Color = Color::srgb(0.5, 1.0, 1.0);
 
 /// Unselected fleet color (dimmer)
-const FLEET_UNSELECTED_COLOR: Color = Color::srgba(0.3, 0.7, 0.7, 0.6);
+pub const FLEET_UNSELECTED_COLOR: Color = Color::srgba(0.3, 0.7, 0.7, 0.6);
 
 /// Fleet size in visual units
-const FLEET_SIZE: f32 = 3.0;
+pub const FLEET_SIZE: f32 = 3.0;
 
-/// Departure marker color (distinct from departure burn arrow)
-const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
+/// Offset distance from body center for fleets
+const FLEET_OFFSET_DISTANCE: f32 = 6.0;
 
-/// Renders fleets as triangles at their current positions.
-/// - AtBody: positioned at body location
-/// - InTransit: positioned along transfer arc
-/// Selected fleet is brighter and larger.
-pub fn render_ship(
-    ships: Query<(&Fleet, &ShipLocation, Option<&Selected>)>,
-    bodies: Query<&ComputedBody>,
-    sim_time: Res<SimulationTime>,
-    mut painter: ShapePainter,
-) {
-    for (fleet, location, is_selected) in &ships {
-        let is_selected = is_selected.is_some();
-        let size_mult = if is_selected { 1.3 } else { 1.0 };
-        let color = if is_selected { FLEET_SELECTED_COLOR } else { FLEET_UNSELECTED_COLOR };
+/// Computes visual positions for all fleets, offsetting multiple fleets at the same body.
+/// Returns a map from fleet entity to (world_position, velocity_direction).
+pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
+    ships: &Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>), F>,
+    bodies: &Query<&ComputedBody>,
+    sim_time: &SimulationTime,
+) -> bevy::platform::collections::HashMap<Entity, (Vec3, Vec3)> {
+    use bevy::platform::collections::HashMap;
+    use std::f32::consts::PI;
+
+    let mut positions = HashMap::new();
+
+    // First pass: count fleets at each body
+    let mut fleets_at_body: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    for (fleet_entity, _, location, _) in ships.iter() {
+        if let ShipLocation::AtBody(body) = location {
+            fleets_at_body.entry(*body).or_default().push(fleet_entity);
+        }
+    }
+
+    // Second pass: compute positions with offsets
+    for (fleet_entity, _, location, is_selected) in ships.iter() {
+        let size_mult = if is_selected.is_some() { 1.3 } else { 1.0 };
 
         let (position, velocity_dir) = match location {
             ShipLocation::AtBody(body) => {
-                // Position at body's current location
                 let body_pos = bodies.get(*body).map(|c| c.position).unwrap_or(Vec3::ZERO);
-                // Offset slightly so ship is visible next to body
-                let offset_pos = body_pos + Vec3::new(FLEET_SIZE * 1.5 * size_mult, 0.0, 0.0);
-                // Velocity direction pointing "forward" in orbit (tangent)
-                (offset_pos, Vec3::new(0.0, 1.0, 0.0))
+
+                // Get index of this fleet among all fleets at this body
+                let fleets_here = fleets_at_body.get(body).map(|v| v.as_slice()).unwrap_or(&[]);
+                let fleet_index = fleets_here.iter().position(|e| *e == fleet_entity).unwrap_or(0);
+                let fleet_count = fleets_here.len();
+
+                // Compute offset angle for this fleet
+                let offset = if fleet_count == 1 {
+                    // Single fleet: offset to the right
+                    Vec3::new(FLEET_OFFSET_DISTANCE * size_mult, 0.0, 0.0)
+                } else {
+                    // Multiple fleets: fan out in a semicircle (top half)
+                    let angle = PI * 0.25 + (fleet_index as f32 / (fleet_count - 1).max(1) as f32) * PI * 0.5;
+                    let x = FLEET_OFFSET_DISTANCE * size_mult * angle.cos();
+                    let y = FLEET_OFFSET_DISTANCE * size_mult * angle.sin();
+                    Vec3::new(x, y, 0.0)
+                };
+
+                (body_pos + offset, Vec3::new(0.0, 1.0, 0.0))
             }
             ShipLocation::InTransit {
                 solution,
                 departure_time,
                 ..
             } => {
-                // Propagate position along transfer arc
                 let elapsed = sim_time.sim_time - departure_time;
                 if elapsed < 0.0 {
                     continue;
@@ -555,8 +577,7 @@ pub fn render_ship(
                     elapsed,
                 ) {
                     let pos = phys_to_visual(r_vec);
-                    let vel_dir =
-                        Vec3::new(v_vec.x as f32, v_vec.y as f32, 0.0).normalize_or_zero();
+                    let vel_dir = Vec3::new(v_vec.x as f32, v_vec.y as f32, 0.0).normalize_or_zero();
                     (pos, vel_dir)
                 } else {
                     continue;
@@ -564,11 +585,41 @@ pub fn render_ship(
             }
         };
 
+        positions.insert(fleet_entity, (position, velocity_dir));
+    }
+
+    positions
+}
+
+/// Departure marker color (distinct from departure burn arrow)
+const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
+
+/// Renders fleets as triangles at their current positions.
+/// - AtBody: positioned at body location with offset for multiple fleets
+/// - InTransit: positioned along transfer arc
+/// Selected fleet is brighter and larger.
+pub fn render_ship(
+    ships: Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>)>,
+    bodies: Query<&ComputedBody>,
+    sim_time: Res<SimulationTime>,
+    mut painter: ShapePainter,
+) {
+    let positions = compute_fleet_positions(&ships, &bodies, &sim_time);
+
+    for (fleet_entity, fleet, _, is_selected) in &ships {
+        let is_selected = is_selected.is_some();
+        let size_mult = if is_selected { 1.3 } else { 1.0 };
+        let color = if is_selected { FLEET_SELECTED_COLOR } else { FLEET_UNSELECTED_COLOR };
+
+        let Some((position, velocity_dir)) = positions.get(&fleet_entity) else {
+            continue;
+        };
+
         // Draw triangle pointing in velocity direction
-        painter.set_translation(position);
+        painter.set_translation(*position);
 
         let rotation = if velocity_dir.length_squared() > 0.001 {
-            Quat::from_rotation_arc(Vec3::Y, velocity_dir)
+            Quat::from_rotation_arc(Vec3::Y, *velocity_dir)
         } else {
             Quat::IDENTITY
         };
@@ -596,7 +647,7 @@ pub fn render_ship(
         // Draw ship count below the triangle for selected fleet
         if is_selected {
             painter.set_rotation(Quat::IDENTITY);
-            let count_pos = position + Vec3::new(0.0, -height * 0.8, 0.0);
+            let count_pos = *position + Vec3::new(0.0, -height * 0.8, 0.0);
             draw_number(&mut painter, fleet.ship_count as usize, count_pos, 2.0);
         }
     }

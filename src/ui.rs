@@ -932,3 +932,203 @@ pub fn handle_option_selection(
     }
 }
 
+// ============================================================================
+// Fleet Tabs UI
+// ============================================================================
+
+/// Marker for the fleet tabs container
+#[derive(Component)]
+pub struct FleetTabsContainer;
+
+/// Marker for individual fleet tab with the fleet entity
+#[derive(Component)]
+pub struct FleetTab {
+    pub fleet_entity: Entity,
+}
+
+/// Spawns the fleet tabs UI container at the bottom center of the screen.
+pub fn spawn_fleet_tabs(commands: &mut Commands) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(16.0),
+            left: Val::Percent(50.0),
+            // Will be centered via transform or margin
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(8.0),
+            padding: UiRect::all(Val::Px(8.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+        BorderRadius::all(Val::Px(8.0)),
+        FleetTabsContainer,
+    ));
+}
+
+/// Updates fleet tabs - rebuilds when fleet count changes.
+pub fn update_fleet_tabs(
+    mut commands: Commands,
+    fleets: Query<(Entity, &crate::ship::Fleet, Option<&crate::ship::Selected>), With<crate::ship::PlayerControlled>>,
+    container_query: Query<Entity, With<FleetTabsContainer>>,
+    existing_tabs: Query<(Entity, &FleetTab)>,
+) {
+    let Ok(container) = container_query.single() else {
+        return;
+    };
+
+    // Collect fleet info sorted for consistent ordering
+    let mut fleet_info: Vec<_> = fleets.iter().collect();
+    fleet_info.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+
+    // Check if we need to rebuild
+    let current_tab_count = existing_tabs.iter().count();
+    let need_rebuild = current_tab_count != fleet_info.len();
+
+    if need_rebuild {
+        // Despawn existing tabs
+        for (tab_entity, _) in existing_tabs.iter() {
+            commands.entity(tab_entity).despawn();
+        }
+
+        // Spawn new tabs as children of container
+        for (index, (fleet_entity, fleet, is_selected)) in fleet_info.iter().enumerate() {
+            let is_selected = is_selected.is_some();
+            let bg_color = if is_selected {
+                Color::srgba(0.2, 0.4, 0.5, 0.9)
+            } else {
+                Color::srgba(0.1, 0.15, 0.2, 0.7)
+            };
+
+            let fleet_entity_copy = *fleet_entity;
+            let fleet_name = fleet.name.clone();
+            let ship_count = fleet.ship_count;
+            let delta_v = fleet.delta_v_remaining;
+
+            commands.entity(container).with_children(|parent| {
+                let text_alpha = if is_selected { 1.0 } else { 0.6 };
+
+                parent
+                    .spawn((
+                        Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(6.0),
+                            padding: UiRect {
+                                left: Val::Px(10.0),
+                                right: Val::Px(10.0),
+                                top: Val::Px(6.0),
+                                bottom: Val::Px(6.0),
+                            },
+                            ..default()
+                        },
+                        BackgroundColor(bg_color),
+                        BorderRadius::all(Val::Px(4.0)),
+                        FleetTab { fleet_entity: fleet_entity_copy },
+                    ))
+                    .with_children(|tab| {
+                        // Number key hint
+                        tab.spawn((
+                            Text::new(format!("{}", index + 1)),
+                            TextFont { font_size: 10.0, ..default() },
+                            TextColor(Color::srgba(0.6, 0.7, 0.8, text_alpha * 0.7)),
+                        ));
+
+                        // Color indicator
+                        tab.spawn((
+                            Node { width: Val::Px(8.0), height: Val::Px(8.0), ..default() },
+                            BackgroundColor(crate::ship::FLEET_SELECTED_COLOR.with_alpha(if is_selected { 1.0 } else { 0.5 })),
+                            BorderRadius::all(Val::Px(2.0)),
+                        ));
+
+                        // Fleet name
+                        tab.spawn((
+                            Text::new(&fleet_name),
+                            TextFont { font_size: 12.0, ..default() },
+                            TextColor(Color::srgba(0.9, 0.95, 1.0, text_alpha)),
+                        ));
+
+                        // Ship count
+                        tab.spawn((
+                            Text::new(format!("{}s", ship_count)),
+                            TextFont { font_size: 10.0, ..default() },
+                            TextColor(Color::srgba(0.7, 0.8, 0.9, text_alpha * 0.8)),
+                        ));
+
+                        // Delta-v
+                        let dv_str = if delta_v >= 1000.0 {
+                            format!("{:.0}k", delta_v / 1000.0)
+                        } else {
+                            format!("{:.0}", delta_v)
+                        };
+                        tab.spawn((
+                            Text::new(dv_str),
+                            TextFont { font_size: 10.0, ..default() },
+                            TextColor(Color::srgba(0.5, 0.9, 0.5, text_alpha * 0.8)),
+                        ));
+                    });
+            });
+        }
+    } else {
+        // Just update existing tabs' appearance
+        for (tab_entity, tab) in existing_tabs.iter() {
+            let Some((_, _fleet, is_selected)) = fleet_info.iter().find(|(e, _, _)| *e == tab.fleet_entity) else {
+                continue;
+            };
+            let is_selected = is_selected.is_some();
+
+            // Update background color based on selection
+            let bg_color = if is_selected {
+                Color::srgba(0.2, 0.4, 0.5, 0.9)
+            } else {
+                Color::srgba(0.1, 0.15, 0.2, 0.7)
+            };
+            commands.entity(tab_entity).insert(BackgroundColor(bg_color));
+
+            // Update text content would require additional children queries
+            // For simplicity, we'll rebuild on selection change - check below
+        }
+    }
+}
+
+/// System to handle number key presses for fleet selection.
+pub fn handle_fleet_number_keys(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    fleets: Query<(Entity, &crate::ship::Fleet), With<crate::ship::PlayerControlled>>,
+    selected: Query<Entity, With<crate::ship::Selected>>,
+) {
+    // Map digit keys to indices
+    let key_to_index = [
+        (KeyCode::Digit1, 0),
+        (KeyCode::Digit2, 1),
+        (KeyCode::Digit3, 2),
+        (KeyCode::Digit4, 3),
+        (KeyCode::Digit5, 4),
+        (KeyCode::Digit6, 5),
+        (KeyCode::Digit7, 6),
+        (KeyCode::Digit8, 7),
+        (KeyCode::Digit9, 8),
+    ];
+
+    for (key, index) in key_to_index {
+        if keyboard.just_pressed(key) {
+            // Get fleets sorted by name for consistent ordering
+            let mut fleet_list: Vec<_> = fleets.iter().collect();
+            fleet_list.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+
+            if let Some((fleet_entity, fleet)) = fleet_list.get(index) {
+                info!("Selecting fleet {} via key {}", fleet.name, index + 1);
+
+                // Remove Selected from all
+                for old in selected.iter() {
+                    commands.entity(old).remove::<crate::ship::Selected>();
+                }
+
+                // Add Selected to target
+                commands.entity(*fleet_entity).insert(crate::ship::Selected);
+            }
+            break;
+        }
+    }
+}
+
