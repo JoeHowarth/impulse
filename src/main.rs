@@ -198,15 +198,14 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         body_entities.insert(body.name.clone(), entity);
     }
 
-    // Spawn player fleets at different locations
-    // Fleet 1: Main fleet at Earth (selected by default)
-    if let Some(&earth) = body_entities.get("Earth") {
+    // Player fleet at Saturn (outer system rebellion)
+    if let Some(&saturn) = body_entities.get("Saturn") {
         commands.spawn((
             ship::Fleet {
                 delta_v_remaining: 500_000.0,
                 name: "Alpha".to_string(),
             },
-            ship::FleetLocation::AtBody(earth),
+            ship::FleetLocation::AtBody(saturn),
             ship::Faction::Player,
             ship::Selected,
             ship::FlightPlan::default(),
@@ -217,15 +216,15 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         });
     }
 
-    // Fleet 2: At Mars
-    if let Some(&mars) = body_entities.get("Mars") {
+    // Enemy garrisons (inner system)
+    if let Some(&ceres) = body_entities.get("Ceres") {
         commands.spawn((
             ship::Fleet {
-                delta_v_remaining: 400_000.0,
-                name: "Bravo".to_string(),
+                delta_v_remaining: 500_000.0,
+                name: "Ceres Garrison".to_string(),
             },
-            ship::FleetLocation::AtBody(mars),
-            ship::Faction::Player,
+            ship::FleetLocation::AtBody(ceres),
+            ship::Faction::Enemy,
             ship::FlightPlan::default(),
         )).with_children(|builder| {
             for _ in 0..5 {
@@ -234,31 +233,36 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         });
     }
 
-    // Fleet 3: At Jupiter
-    if let Some(&jupiter) = body_entities.get("Jupiter") {
+    if let Some(&mars) = body_entities.get("Mars") {
         commands.spawn((
             ship::Fleet {
-                delta_v_remaining: 300_000.0,
-                name: "Charlie".to_string(),
+                delta_v_remaining: 500_000.0,
+                name: "Mars Garrison".to_string(),
             },
-            ship::FleetLocation::AtBody(jupiter),
-            ship::Faction::Player,
+            ship::FleetLocation::AtBody(mars),
+            ship::Faction::Enemy,
             ship::FlightPlan::default(),
         )).with_children(|builder| {
-            for _ in 0..3 {
+            for _ in 0..10 {
                 builder.spawn(ship::LogicalShip);
             }
         });
     }
 
-    // Spawn objectives on some bodies
-    // Total ships: 10 + 5 + 3 = 18
-    // Objectives require: 8 + 6 = 14 ships (forces splitting and routing)
-    if let Some(&mars) = body_entities.get("Mars") {
-        commands.entity(mars).insert(ship::Objective { required_ships: 8 });
-    }
-    if let Some(&saturn) = body_entities.get("Saturn") {
-        commands.entity(saturn).insert(ship::Objective { required_ships: 6 });
+    if let Some(&earth) = body_entities.get("Earth") {
+        commands.spawn((
+            ship::Fleet {
+                delta_v_remaining: 500_000.0,
+                name: "Earth Garrison".to_string(),
+            },
+            ship::FleetLocation::AtBody(earth),
+            ship::Faction::Enemy,
+            ship::FlightPlan::default(),
+        )).with_children(|builder| {
+            for _ in 0..15 {
+                builder.spawn(ship::LogicalShip);
+            }
+        });
     }
 
     // Second pass: spawn labels and orbit gizmos (now we can look up parent entities)

@@ -74,14 +74,6 @@ pub struct ComputedFleetPosition {
     pub velocity_dir: Vec3,
 }
 
-/// An objective that requires a certain number of ships at a body.
-/// Attach to body entities to create win conditions.
-#[derive(Component)]
-pub struct Objective {
-    /// Number of ships required to satisfy this objective
-    pub required_ships: u32,
-}
-
 /// Resource to track victory state
 #[derive(Resource, Default)]
 pub struct VictoryState {
@@ -610,26 +602,9 @@ pub fn merge_fleets(
     );
 }
 
-/// Counts the total ships at a body from all player fleets.
-pub fn count_ships_at_body(
-    body: Entity,
-    fleets: &Query<(Entity, &FleetLocation, &Faction)>,
-    children_query: &Query<&Children>,
-    ships: &Query<&LogicalShip>,
-) -> u32 {
-    fleets
-        .iter()
-        .filter(|(_, loc, faction)| {
-            **faction == Faction::Player && matches!(loc, FleetLocation::AtBody(b) if *b == body)
-        })
-        .map(|(fleet_entity, _, _)| ship_count(fleet_entity, children_query, ships))
-        .sum()
-}
-
-/// Checks if all objectives are satisfied and updates victory state.
+/// Checks if all enemy fleets are destroyed and updates victory state.
 pub fn check_objectives(
-    objectives: Query<(Entity, &Objective)>,
-    fleets: Query<(Entity, &FleetLocation, &Faction)>,
+    fleets: Query<(Entity, &Faction)>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
     mut victory: ResMut<VictoryState>,
@@ -640,16 +615,17 @@ pub fn check_objectives(
         return;
     }
 
-    // Check if all objectives are satisfied
-    let all_satisfied = objectives.iter().all(|(body, obj)| {
-        let ships_at_body = count_ships_at_body(body, &fleets, &children_query, &ships);
-        ships_at_body >= obj.required_ships
-    });
+    // Count enemy fleets remaining (fleets with at least one ship)
+    let enemy_fleets_remaining: u32 = fleets
+        .iter()
+        .filter(|(_, faction)| **faction == Faction::Enemy)
+        .filter(|(entity, _)| ship_count(*entity, &children_query, &ships) > 0)
+        .count() as u32;
 
-    if all_satisfied && !objectives.is_empty() {
+    if enemy_fleets_remaining == 0 {
         victory.victory_achieved = true;
         victory.victory_time = Some(sim_time.sim_time);
-        info!("VICTORY! All objectives completed!");
+        info!("VICTORY! All enemies destroyed!");
     }
 }
 
@@ -753,11 +729,13 @@ pub fn sync_transfer_entities(
 // Rendering
 // ============================================================================
 
-/// Selected fleet color (brighter cyan)
-pub const FLEET_SELECTED_COLOR: Color = Color::srgb(0.5, 1.0, 1.0);
+/// Player fleet colors (green)
+pub const FLEET_PLAYER_SELECTED: Color = Color::srgb(0.4, 1.0, 0.4);
+pub const FLEET_PLAYER_UNSELECTED: Color = Color::srgba(0.3, 0.8, 0.3, 0.6);
 
-/// Unselected fleet color (dimmer)
-pub const FLEET_UNSELECTED_COLOR: Color = Color::srgba(0.3, 0.7, 0.7, 0.6);
+/// Enemy fleet colors (imperial red)
+pub const FLEET_ENEMY_SELECTED: Color = Color::srgb(1.0, 0.3, 0.3);
+pub const FLEET_ENEMY_UNSELECTED: Color = Color::srgba(0.8, 0.2, 0.2, 0.6);
 
 /// Fleet size in visual units
 pub const FLEET_SIZE: f32 = 3.0;
@@ -869,15 +847,20 @@ const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
 /// Renders fleets as triangles at their current positions.
 /// Reads from ComputedFleetPosition (updated by update_fleet_positions).
 pub fn render_fleets(
-    fleets: Query<(Entity, &ComputedFleetPosition, Option<&Selected>)>,
+    fleets: Query<(Entity, &ComputedFleetPosition, Option<&Selected>, &Faction)>,
     children_query: Query<&Children>,
     logical_ships: Query<&LogicalShip>,
     mut painter: ShapePainter,
 ) {
-    for (fleet_entity, computed, is_selected) in &fleets {
+    for (fleet_entity, computed, is_selected, faction) in &fleets {
         let is_selected = is_selected.is_some();
         let size_mult = if is_selected { 1.3 } else { 1.0 };
-        let color = if is_selected { FLEET_SELECTED_COLOR } else { FLEET_UNSELECTED_COLOR };
+        let color = match (faction, is_selected) {
+            (Faction::Player, true) => FLEET_PLAYER_SELECTED,
+            (Faction::Player, false) => FLEET_PLAYER_UNSELECTED,
+            (Faction::Enemy, true) => FLEET_ENEMY_SELECTED,
+            (Faction::Enemy, false) => FLEET_ENEMY_UNSELECTED,
+        };
 
         // Draw triangle pointing in velocity direction
         painter.set_translation(computed.position);
@@ -918,59 +901,62 @@ pub fn render_fleets(
     }
 }
 
-/// Objective marker colors
-const OBJECTIVE_INCOMPLETE_COLOR: Color = Color::srgba(1.0, 0.5, 0.2, 0.9); // Orange
-const OBJECTIVE_COMPLETE_COLOR: Color = Color::srgba(0.3, 1.0, 0.3, 0.9);   // Green
+/// Enemy marker color (matches fleet color)
+const ENEMY_MARKER_COLOR: Color = Color::srgba(0.8, 0.2, 0.2, 0.6);
 
-/// Renders objective markers at bodies with objectives.
-/// Shows current/required ships count and a ring around the body.
+/// Renders enemy presence markers at bodies with enemy fleets.
+/// Shows red rings around occupied bodies.
 pub fn render_objectives(
-    objectives: Query<(Entity, &Objective)>,
     fleets: Query<(Entity, &FleetLocation, &Faction)>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
     bodies: Query<&ComputedBody>,
     mut painter: ShapePainter,
 ) {
-    for (body_entity, objective) in &objectives {
-        let Ok(computed) = bodies.get(body_entity) else {
+    // Collect bodies with enemy fleets
+    let mut enemy_bodies: bevy::platform::collections::HashSet<Entity> = bevy::platform::collections::HashSet::new();
+    let mut total_enemy_fleets = 0u32;
+
+    for (fleet_entity, location, faction) in &fleets {
+        if *faction != Faction::Enemy {
+            continue;
+        }
+        // Only count fleets with ships
+        if ship_count(fleet_entity, &children_query, &ships) == 0 {
+            continue;
+        }
+        total_enemy_fleets += 1;
+        if let FleetLocation::AtBody(body) = location {
+            enemy_bodies.insert(*body);
+        }
+    }
+
+    // Draw red rings around enemy-occupied bodies
+    for body_entity in &enemy_bodies {
+        let Ok(computed) = bodies.get(*body_entity) else {
             continue;
         };
 
-        // Count ships at this body
-        let ships_here = count_ships_at_body(body_entity, &fleets, &children_query, &ships);
-        let is_complete = ships_here >= objective.required_ships;
-
-        let color = if is_complete {
-            OBJECTIVE_COMPLETE_COLOR
-        } else {
-            OBJECTIVE_INCOMPLETE_COLOR
-        };
-
-        // Draw ring around body
         let pos = computed.position;
         let ring_radius = computed.display_size + 5.0;
 
         painter.set_translation(pos);
         painter.set_rotation(Quat::IDENTITY);
-        painter.set_color(color);
+        painter.set_color(ENEMY_MARKER_COLOR);
         painter.thickness = 1.5;
         painter.hollow = true;
         painter.circle(ring_radius);
+    }
 
-        // Draw progress text below body: "X/Y"
-        let text_pos = pos + Vec3::new(0.0, -(ring_radius + 8.0), 0.0);
-
-        // Draw the numbers: current / required
-        // First number (current ships)
-        draw_number(&mut painter, ships_here as usize, text_pos + Vec3::new(-4.0, 0.0, 0.0), 2.5);
-
-        // Slash
-        painter.set_translation(text_pos);
-        painter.line(Vec3::new(-1.0, -2.0, 0.0), Vec3::new(1.0, 2.0, 0.0));
-
-        // Second number (required ships)
-        draw_number(&mut painter, objective.required_ships as usize, text_pos + Vec3::new(4.0, 0.0, 0.0), 2.5);
+    // Draw enemy fleet counter in top-left corner (screen space handled by UI)
+    // For now, draw at a fixed world position - we'll need UI text for proper screen-space
+    // This is a placeholder - proper implementation would use egui or bevy_ui
+    if total_enemy_fleets > 0 {
+        // Draw a small indicator showing fleet count at origin offset
+        // This will be replaced by proper UI text later
+        painter.set_translation(Vec3::new(-45.0, 45.0, 0.0));
+        painter.set_color(ENEMY_MARKER_COLOR);
+        draw_number(&mut painter, total_enemy_fleets as usize, Vec3::ZERO, 4.0);
     }
 }
 

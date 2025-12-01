@@ -1059,7 +1059,7 @@ pub fn update_fleet_tabs(
                         // Color indicator
                         tab.spawn((
                             Node { width: Val::Px(8.0), height: Val::Px(8.0), ..default() },
-                            BackgroundColor(crate::ship::FLEET_SELECTED_COLOR.with_alpha(if is_selected { 1.0 } else { 0.5 })),
+                            BackgroundColor(crate::ship::FLEET_PLAYER_SELECTED.with_alpha(if is_selected { 1.0 } else { 0.5 })),
                             BorderRadius::all(Val::Px(2.0)),
                         ));
 
