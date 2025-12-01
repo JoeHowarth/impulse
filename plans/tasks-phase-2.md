@@ -185,9 +185,11 @@ pub struct CombatState {
   - Enemies are static garrisons, so N/A for Phase 2
 
 ### Verification
-- [ ] Combat detected when player fleet arrives at enemy body
-- [ ] CombatState populated correctly
-- [ ] No false triggers (arriving at friendly body)
+- [x] Combat detected when player fleet arrives at enemy body
+- [x] CombatState populated correctly
+- [x] No false triggers (arriving at friendly body)
+
+**Completed.** CombatState resource tracks combat. detect_combat system runs after check_arrival and triggers when player/enemy fleets share a body.
 
 ---
 
