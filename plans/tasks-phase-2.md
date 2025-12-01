@@ -74,11 +74,13 @@ fn ship_count(fleet: Entity, children: &Query<&Children>, ships: &Query<&Logical
 - Anywhere using `fleet.ship_count` → use helper or query children
 
 ### Verification
-- [ ] LogicalShip component exists
-- [ ] Fleets spawn with correct number of LogicalShip children
-- [ ] `ship_count` derived from children works
-- [ ] Existing fleet operations (split, merge) work with new model
-- [ ] Objectives system counts ships correctly
+- [x] LogicalShip component exists
+- [x] Fleets spawn with correct number of LogicalShip children
+- [x] `ship_count` derived from children works
+- [x] Existing fleet operations (split, merge) work with new model
+- [x] Objectives system counts ships correctly
+
+**Completed.** Also removed `ship_count` field entirely - now always derived via `ship_count()` helper. Added `ComputedFleetPosition` component for cleaner rendering (mirrors `ComputedBody` pattern).
 
 ---
 
@@ -106,9 +108,11 @@ pub enum Faction {
 - Or keep both if useful for queries
 
 ### Verification
-- [ ] Faction component exists
-- [ ] Player fleets have Faction::Player
-- [ ] Can query fleets by faction
+- [x] Faction component exists
+- [x] Player fleets have Faction::Player
+- [x] Can query fleets by faction
+
+**Completed.** Removed `PlayerControlled` marker entirely - `Faction` is now the single source of truth. Also renamed `ShipLocation` → `FleetLocation` and `render_ship` → `render_fleets` for consistency.
 
 ---
 
