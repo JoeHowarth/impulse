@@ -1,7 +1,7 @@
-//! Ship entity and flight planning.
+//! Fleet entities and flight planning.
 //!
 //! Data model:
-//! - `ShipLocation`: Where the ship is (AtBody or InTransit)
+//! - `FleetLocation`: Where the fleet is (AtBody or InTransit)
 //! - `FlightPlan`: Ordered list of planned legs with committed_count boundary
 //! - `PlannedLeg`: Minimal data (target + timing), source derived from position
 //!
@@ -91,12 +91,12 @@ pub struct VictoryState {
     pub victory_time: Option<f64>,
 }
 
-/// Ship's current location - either at a body or in transit.
+/// Fleet's current location - either at a body or in transit.
 #[derive(Component)]
-pub enum ShipLocation {
-    /// Ship is at a celestial body
+pub enum FleetLocation {
+    /// Fleet is at a celestial body
     AtBody(Entity),
-    /// Ship is in transit between bodies
+    /// Fleet is in transit between bodies
     InTransit {
         target: Entity,
         solution: TransferSolution,
@@ -104,12 +104,12 @@ pub enum ShipLocation {
     },
 }
 
-impl ShipLocation {
-    /// Where the ship is or will be (current body or transit destination)
+impl FleetLocation {
+    /// Where the fleet is or will be (current body or transit destination)
     pub fn effective_body(&self) -> Entity {
         match self {
-            ShipLocation::AtBody(e) => *e,
-            ShipLocation::InTransit { target, .. } => *target,
+            FleetLocation::AtBody(e) => *e,
+            FleetLocation::InTransit { target, .. } => *target,
         }
     }
 
@@ -117,8 +117,8 @@ impl ShipLocation {
     #[allow(dead_code)]
     pub fn arrival_time(&self, current_time: f64) -> f64 {
         match self {
-            ShipLocation::AtBody(_) => current_time,
-            ShipLocation::InTransit {
+            FleetLocation::AtBody(_) => current_time,
+            FleetLocation::InTransit {
                 departure_time,
                 solution,
                 ..
@@ -154,7 +154,7 @@ pub struct FlightPlan {
 
 /// Returns the source body for a leg at given index.
 /// Leg 0's source is ship's effective body; others chain from previous target.
-pub fn leg_source(location: &ShipLocation, plan: &FlightPlan, leg_index: usize) -> Entity {
+pub fn leg_source(location: &FleetLocation, plan: &FlightPlan, leg_index: usize) -> Entity {
     if leg_index == 0 {
         location.effective_body()
     } else {
@@ -165,15 +165,15 @@ pub fn leg_source(location: &ShipLocation, plan: &FlightPlan, leg_index: usize) 
 /// Returns the base day (arrival at source) for a leg at given index.
 /// Leg 0 uses ship's arrival time; others chain from previous leg's arrival.
 pub fn leg_base_day(
-    location: &ShipLocation,
+    location: &FleetLocation,
     plan: &FlightPlan,
     leg_index: usize,
     current_day: i32,
 ) -> i32 {
     if leg_index == 0 {
         match location {
-            ShipLocation::AtBody(_) => current_day,
-            ShipLocation::InTransit {
+            FleetLocation::AtBody(_) => current_day,
+            FleetLocation::InTransit {
                 departure_time,
                 solution,
                 ..
@@ -227,16 +227,16 @@ pub fn expire_stale_legs(mut ships: Query<&mut FlightPlan>, sim_time: Res<Simula
 /// Executes departure when a committed leg's departure day arrives.
 /// Looks up solution from LUT, deducts delta-v, transitions to InTransit.
 pub fn execute_departure(
-    mut ships: Query<(&mut Fleet, &mut ShipLocation, &mut FlightPlan)>,
+    mut fleets: Query<(&mut Fleet, &mut FleetLocation, &mut FlightPlan)>,
     lut: Res<TransferLut>,
     bodies: Query<&Body>,
     sim_time: Res<SimulationTime>,
 ) {
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
-    for (mut ship, mut location, mut plan) in &mut ships {
+    for (mut fleet, mut location, mut plan) in &mut fleets {
         // Only if at body and have committed leg
-        let ShipLocation::AtBody(current_body) = *location else {
+        let FleetLocation::AtBody(current_body) = *location else {
             continue;
         };
         if plan.committed_count == 0 || plan.legs.is_empty() {
@@ -272,15 +272,15 @@ pub fn execute_departure(
 
         // Deduct departure delta-v
         let departure_dv = solution.departure_dv.norm();
-        ship.delta_v_remaining -= departure_dv;
+        fleet.delta_v_remaining -= departure_dv;
 
         info!(
-            "Ship '{}' departing to {}! dv spent: {:.0} m/s, remaining: {:.0} m/s",
-            ship.name, target_body.name, departure_dv, ship.delta_v_remaining
+            "Fleet '{}' departing to {}! dv spent: {:.0} m/s, remaining: {:.0} m/s",
+            fleet.name, target_body.name, departure_dv, fleet.delta_v_remaining
         );
 
         // Transition to InTransit
-        *location = ShipLocation::InTransit {
+        *location = FleetLocation::InTransit {
             target: leg.target,
             solution,
             departure_time: leg.departure_day as f64 * 86400.0,
@@ -292,15 +292,15 @@ pub fn execute_departure(
     }
 }
 
-/// Checks if ship has arrived at destination.
+/// Checks if fleet has arrived at destination.
 /// Deducts arrival delta-v, transitions to AtBody.
 pub fn check_arrival(
-    mut ships: Query<(&mut Fleet, &mut ShipLocation)>,
+    mut fleets: Query<(&mut Fleet, &mut FleetLocation)>,
     bodies: Query<&Body>,
     sim_time: Res<SimulationTime>,
 ) {
-    for (mut ship, mut location) in &mut ships {
-        let ShipLocation::InTransit {
+    for (mut fleet, mut location) in &mut fleets {
+        let FleetLocation::InTransit {
             target,
             solution,
             departure_time,
@@ -316,16 +316,16 @@ pub fn check_arrival(
 
         // Deduct arrival delta-v
         let arrival_dv = solution.arrival_dv.norm();
-        ship.delta_v_remaining -= arrival_dv;
+        fleet.delta_v_remaining -= arrival_dv;
 
         let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("?");
         info!(
-            "Ship '{}' arrived at {}! dv spent: {:.0} m/s, remaining: {:.0} m/s",
-            ship.name, target_name, arrival_dv, ship.delta_v_remaining
+            "Fleet '{}' arrived at {}! dv spent: {:.0} m/s, remaining: {:.0} m/s",
+            fleet.name, target_name, arrival_dv, fleet.delta_v_remaining
         );
 
         // Transition to AtBody
-        *location = ShipLocation::AtBody(*target);
+        *location = FleetLocation::AtBody(*target);
     }
 }
 
@@ -333,7 +333,7 @@ pub fn check_arrival(
 /// Only operates on the selected fleet.
 pub fn commit_plan(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut ships: Query<(&Fleet, &ShipLocation, &mut FlightPlan), With<Selected>>,
+    mut fleets: Query<(&Fleet, &FleetLocation, &mut FlightPlan), With<Selected>>,
     lut: Res<TransferLut>,
     bodies: Query<&Body>,
 ) {
@@ -341,7 +341,7 @@ pub fn commit_plan(
         return;
     }
 
-    for (ship, location, mut plan) in &mut ships {
+    for (fleet, location, mut plan) in &mut fleets {
         // Check if there are uncommitted legs
         if plan.committed_count >= plan.legs.len() {
             continue;
@@ -369,10 +369,10 @@ pub fn commit_plan(
             })
             .sum();
 
-        if ship.delta_v_remaining < uncommitted_dv {
+        if fleet.delta_v_remaining < uncommitted_dv {
             warn!(
                 "Insufficient delta-v to commit plan: need {:.0} m/s, have {:.0} m/s",
-                uncommitted_dv, ship.delta_v_remaining
+                uncommitted_dv, fleet.delta_v_remaining
             );
             continue;
         }
@@ -410,14 +410,14 @@ pub fn commit_plan(
 /// Only operates on the selected fleet.
 pub fn cancel_last_leg(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut ships: Query<&mut FlightPlan, With<Selected>>,
+    mut fleets: Query<&mut FlightPlan, With<Selected>>,
     bodies: Query<&Body>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyN) {
         return;
     }
 
-    for mut plan in &mut ships {
+    for mut plan in &mut fleets {
         if let Some(cancelled) = plan.legs.pop_back() {
             // Adjust committed_count if we removed a committed leg
             if plan.committed_count > plan.legs.len() {
@@ -469,7 +469,7 @@ fn generate_fleet_name() -> String {
 pub fn split_fleet(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
-    selected: Query<(Entity, &Fleet, &ShipLocation), With<Selected>>,
+    selected: Query<(Entity, &Fleet, &FleetLocation), With<Selected>>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
 ) {
@@ -482,7 +482,7 @@ pub fn split_fleet(
     };
 
     // Must be at a body
-    let ShipLocation::AtBody(body) = location else {
+    let FleetLocation::AtBody(body) = location else {
         info!("Cannot split fleet while in transit");
         return;
     };
@@ -524,7 +524,7 @@ pub fn split_fleet(
             delta_v_remaining: fleet.delta_v_remaining,
             name: new_name,
         },
-        ShipLocation::AtBody(*body),
+        FleetLocation::AtBody(*body),
         Faction::Player,
         FlightPlan::default(),
     )).id();
@@ -540,8 +540,8 @@ pub fn split_fleet(
 pub fn merge_fleets(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
-    selected: Query<(Entity, &Fleet, &ShipLocation), With<Selected>>,
-    other_fleets: Query<(Entity, &Fleet, &ShipLocation, &Faction), Without<Selected>>,
+    selected: Query<(Entity, &Fleet, &FleetLocation), With<Selected>>,
+    other_fleets: Query<(Entity, &Fleet, &FleetLocation, &Faction), Without<Selected>>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
 ) {
@@ -554,7 +554,7 @@ pub fn merge_fleets(
     };
 
     // Must be at a body
-    let ShipLocation::AtBody(body) = selected_location else {
+    let FleetLocation::AtBody(body) = selected_location else {
         info!("Cannot merge fleets while in transit");
         return;
     };
@@ -563,7 +563,7 @@ pub fn merge_fleets(
     let fleets_to_merge: Vec<_> = other_fleets
         .iter()
         .filter(|(_, _, loc, faction)| {
-            **faction == Faction::Player && matches!(loc, ShipLocation::AtBody(b) if *b == *body)
+            **faction == Faction::Player && matches!(loc, FleetLocation::AtBody(b) if *b == *body)
         })
         .collect();
 
@@ -613,14 +613,14 @@ pub fn merge_fleets(
 /// Counts the total ships at a body from all player fleets.
 pub fn count_ships_at_body(
     body: Entity,
-    fleets: &Query<(Entity, &ShipLocation, &Faction)>,
+    fleets: &Query<(Entity, &FleetLocation, &Faction)>,
     children_query: &Query<&Children>,
     ships: &Query<&LogicalShip>,
 ) -> u32 {
     fleets
         .iter()
         .filter(|(_, loc, faction)| {
-            **faction == Faction::Player && matches!(loc, ShipLocation::AtBody(b) if *b == body)
+            **faction == Faction::Player && matches!(loc, FleetLocation::AtBody(b) if *b == body)
         })
         .map(|(fleet_entity, _, _)| ship_count(fleet_entity, children_query, ships))
         .sum()
@@ -629,7 +629,7 @@ pub fn count_ships_at_body(
 /// Checks if all objectives are satisfied and updates victory state.
 pub fn check_objectives(
     objectives: Query<(Entity, &Objective)>,
-    fleets: Query<(Entity, &ShipLocation, &Faction)>,
+    fleets: Query<(Entity, &FleetLocation, &Faction)>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
     mut victory: ResMut<VictoryState>,
@@ -653,23 +653,23 @@ pub fn check_objectives(
     }
 }
 
-/// Syncs Transfer visualization entities to match ShipLocation + committed legs.
+/// Syncs Transfer visualization entities to match FleetLocation + committed legs.
 /// - InTransit -> one Transfer for active flight
 /// - Committed legs -> one Transfer each for future arcs
 pub fn sync_transfer_entities(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
-    ships: Query<(Entity, &ShipLocation, &FlightPlan)>,
+    fleets: Query<(Entity, &FleetLocation, &FlightPlan)>,
     lut: Res<TransferLut>,
     transfers: Query<(Entity, &transfer_vis::Transfer)>,
     bodies: Query<&Body>,
 ) {
-    for (ship_entity, location, plan) in &ships {
+    for (fleet_entity, location, plan) in &fleets {
         // Build list of (source, target, solution, departure_time) for active visualizations
         let mut active: Vec<(Entity, Entity, TransferSolution, f64)> = Vec::new();
 
         // Add active transfer if InTransit
-        if let ShipLocation::InTransit {
+        if let FleetLocation::InTransit {
             target,
             solution,
             departure_time,
@@ -700,14 +700,14 @@ pub fn sync_transfer_entities(
             }
         }
 
-        // Find existing Transfer entities for this ship
-        let ship_transfers: Vec<_> = transfers
+        // Find existing Transfer entities for this fleet
+        let fleet_transfers: Vec<_> = transfers
             .iter()
-            .filter(|(_, t)| t.ship == ship_entity)
+            .filter(|(_, t)| t.fleet == fleet_entity)
             .collect();
 
         // Despawn entities that don't match any active transfer
-        for (transfer_entity, transfer) in &ship_transfers {
+        for (transfer_entity, transfer) in &fleet_transfers {
             let has_match = active.iter().any(|(_, target, _, dep_time)| {
                 *target == transfer.target && (*dep_time - transfer.departure_time).abs() < 1.0
             });
@@ -718,14 +718,14 @@ pub fn sync_transfer_entities(
 
         // Spawn entities for active transfers that don't have one
         for (source, target, solution, departure_time) in &active {
-            let has_entity = ship_transfers.iter().any(|(_, t)| {
+            let has_entity = fleet_transfers.iter().any(|(_, t)| {
                 t.target == *target && (t.departure_time - *departure_time).abs() < 1.0
             });
             if !has_entity {
                 transfer_vis::spawn_transfer_visualization(
                     &mut commands,
                     &mut gizmo_assets,
-                    ship_entity,
+                    fleet_entity,
                     *source,
                     *target,
                     solution,
@@ -768,7 +768,7 @@ const FLEET_OFFSET_DISTANCE: f32 = 6.0;
 /// Computes visual positions for all fleets, offsetting multiple fleets at the same body.
 /// Returns a map from fleet entity to (world_position, velocity_direction).
 pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
-    ships: &Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>, &Faction), F>,
+    ships: &Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction), F>,
     bodies: &Query<&ComputedBody>,
     sim_time: &SimulationTime,
 ) -> bevy::platform::collections::HashMap<Entity, (Vec3, Vec3)> {
@@ -780,7 +780,7 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
     // First pass: count fleets at each body
     let mut fleets_at_body: HashMap<Entity, Vec<Entity>> = HashMap::new();
     for (fleet_entity, _, location, _, _) in ships.iter() {
-        if let ShipLocation::AtBody(body) = location {
+        if let FleetLocation::AtBody(body) = location {
             fleets_at_body.entry(*body).or_default().push(fleet_entity);
         }
     }
@@ -790,7 +790,7 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
         let size_mult = if is_selected.is_some() { 1.3 } else { 1.0 };
 
         let (position, velocity_dir) = match location {
-            ShipLocation::AtBody(body) => {
+            FleetLocation::AtBody(body) => {
                 let body_pos = bodies.get(*body).map(|c| c.position).unwrap_or(Vec3::ZERO);
 
                 // Get index of this fleet among all fleets at this body
@@ -812,7 +812,7 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
 
                 (body_pos + offset, Vec3::new(0.0, 1.0, 0.0))
             }
-            ShipLocation::InTransit {
+            FleetLocation::InTransit {
                 solution,
                 departure_time,
                 ..
@@ -847,7 +847,7 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
 /// Run this before rendering to have positions available.
 pub fn update_fleet_positions(
     mut commands: Commands,
-    fleets: Query<(Entity, &Fleet, &ShipLocation, Option<&Selected>, &Faction)>,
+    fleets: Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction)>,
     bodies: Query<&ComputedBody>,
     sim_time: Res<SimulationTime>,
 ) {
@@ -868,7 +868,7 @@ const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
 
 /// Renders fleets as triangles at their current positions.
 /// Reads from ComputedFleetPosition (updated by update_fleet_positions).
-pub fn render_ship(
+pub fn render_fleets(
     fleets: Query<(Entity, &ComputedFleetPosition, Option<&Selected>)>,
     children_query: Query<&Children>,
     logical_ships: Query<&LogicalShip>,
@@ -926,7 +926,7 @@ const OBJECTIVE_COMPLETE_COLOR: Color = Color::srgba(0.3, 1.0, 0.3, 0.9);   // G
 /// Shows current/required ships count and a ring around the body.
 pub fn render_objectives(
     objectives: Query<(Entity, &Objective)>,
-    fleets: Query<(Entity, &ShipLocation, &Faction)>,
+    fleets: Query<(Entity, &FleetLocation, &Faction)>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
     bodies: Query<&ComputedBody>,
@@ -977,7 +977,7 @@ pub fn render_objectives(
 /// Renders X markers at departure points for pending transfers.
 pub fn render_departure_markers(
     transfers: Query<&transfer_vis::Transfer>,
-    ships: Query<&ShipLocation>,
+    fleets: Query<&FleetLocation>,
     sim_time: Res<SimulationTime>,
     mut painter: ShapePainter,
 ) {
@@ -987,9 +987,9 @@ pub fn render_departure_markers(
             continue;
         }
 
-        // Only show if ship is still at body (not already transferring)
-        if let Ok(location) = ships.get(transfer.ship) {
-            if !matches!(location, ShipLocation::AtBody(_)) {
+        // Only show if fleet is still at body (not already transferring)
+        if let Ok(location) = fleets.get(transfer.fleet) {
+            if !matches!(location, FleetLocation::AtBody(_)) {
                 continue;
             }
         }
@@ -1017,11 +1017,11 @@ const QUEUE_ARC_COLOR: Color = Color::srgba(1.0, 0.6, 0.2, 0.4);
 
 /// Renders numbered waypoint markers at queued destination bodies.
 pub fn render_plan_markers(
-    ships: Query<&FlightPlan>,
+    fleets: Query<&FlightPlan>,
     bodies: Query<&ComputedBody>,
     mut painter: ShapePainter,
 ) {
-    for plan in &ships {
+    for plan in &fleets {
         for (index, leg) in plan.legs.iter().enumerate() {
             // Get target body position
             let Ok(computed) = bodies.get(leg.target) else {
@@ -1051,12 +1051,12 @@ pub fn render_plan_markers(
 
 /// Renders dimmed preview arcs for uncommitted legs (not yet locked in).
 pub fn render_plan_arcs(
-    ships: Query<(&ShipLocation, &FlightPlan)>,
+    fleets: Query<(&FleetLocation, &FlightPlan)>,
     lut: Res<TransferLut>,
     bodies: Query<&Body>,
     mut painter: ShapePainter,
 ) {
-    for (location, plan) in &ships {
+    for (location, plan) in &fleets {
         // Only render uncommitted legs (index >= committed_count)
         for i in plan.committed_count..plan.legs.len() {
             let leg = &plan.legs[i];

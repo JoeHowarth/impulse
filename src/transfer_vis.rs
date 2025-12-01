@@ -42,8 +42,8 @@ const ARRIVAL_COLOR: Color = Color::srgb(0.9, 0.3, 0.3);
 /// This is the single source of truth for scheduled/active transfers.
 #[derive(Component)]
 pub struct Transfer {
-    /// The ship performing this transfer
-    pub ship: Entity,
+    /// The fleet performing this transfer
+    pub fleet: Entity,
     /// Departure body entity
     #[allow(dead_code)]
     pub source: Entity,
@@ -90,7 +90,7 @@ const PREVIEW_TRANSFER_COLOR: Color = Color::srgba(1.0, 0.6, 0.2, 0.35);
 pub fn spawn_transfer_visualization(
     commands: &mut Commands,
     gizmo_assets: &mut ResMut<Assets<GizmoAsset>>,
-    ship_entity: Entity,
+    fleet_entity: Entity,
     source_entity: Entity,
     target_entity: Entity,
     solution: &TransferSolution,
@@ -102,7 +102,7 @@ pub fn spawn_transfer_visualization(
     // Spawn the Transfer entity
     let transfer_entity = commands
         .spawn(Transfer {
-            ship: ship_entity,
+            fleet: fleet_entity,
             source: source_entity,
             target: target_entity,
             solution: solution.clone(),

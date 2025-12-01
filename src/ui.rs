@@ -204,7 +204,7 @@ pub struct TransferInfoPanel;
 
 /// Marker for ship status header text
 #[derive(Component)]
-pub struct ShipStatusText;
+pub struct FleetStatusText;
 
 /// Marker for the flight plan rows text
 #[derive(Component)]
@@ -229,15 +229,15 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
             TransferInfoPanel,
         ))
         .with_children(|parent| {
-            // Ship status header (location + delta-v)
+            // Fleet status header (location + delta-v)
             parent.spawn((
-                Text::new("Ship: Earth | 500,000 m/s"),
+                Text::new("Fleet: Earth | 500,000 m/s"),
                 TextFont {
                     font_size: 12.0,
                     ..default()
                 },
                 TextColor(Color::srgba(0.3, 0.9, 0.9, 1.0)), // Cyan to match ship
-                ShipStatusText,
+                FleetStatusText,
             ));
 
             // Flight plan rows (dynamically updated)
@@ -257,17 +257,17 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
 /// Shows the selected fleet's info.
 pub fn update_transfer_panel(
     bodies: Query<&Body>,
-    selected_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    selected_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
     children_query: Query<&Children>,
     logical_ships: Query<&crate::ship::LogicalShip>,
     sim_time: Res<SimulationTime>,
     lut: Res<TransferLut>,
-    mut ship_query: Query<&mut Text, (With<ShipStatusText>, Without<FlightPlanText>)>,
-    mut plan_query: Query<&mut Text, (With<FlightPlanText>, Without<ShipStatusText>)>,
+    mut fleet_status_query: Query<&mut Text, (With<FleetStatusText>, Without<FlightPlanText>)>,
+    mut plan_query: Query<&mut Text, (With<FlightPlanText>, Without<FleetStatusText>)>,
 ) {
     let Ok((fleet_entity, fleet, location, plan)) = selected_query.single() else {
         // No fleet selected - clear panel
-        if let Ok(mut text) = ship_query.single_mut() {
+        if let Ok(mut text) = fleet_status_query.single_mut() {
             **text = "No fleet selected".to_string();
         }
         if let Ok(mut text) = plan_query.single_mut() {
@@ -281,10 +281,10 @@ pub fn update_transfer_panel(
 
     // Build header: fleet name, ship count, location, delta-v
     let location_name = match location {
-        crate::ship::ShipLocation::AtBody(body) => {
+        crate::ship::FleetLocation::AtBody(body) => {
             bodies.get(*body).map(|b| b.name.clone()).unwrap_or_else(|_| "???".into())
         }
-        crate::ship::ShipLocation::InTransit { target, solution, departure_time } => {
+        crate::ship::FleetLocation::InTransit { target, solution, departure_time } => {
             let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("???");
             let arrival_day = ((*departure_time + solution.time_of_flight) / 86400.0).floor() as i32;
             let days_left = arrival_day - current_day;
@@ -292,7 +292,7 @@ pub fn update_transfer_panel(
         }
     };
 
-    if let Ok(mut text) = ship_query.single_mut() {
+    if let Ok(mut text) = fleet_status_query.single_mut() {
         **text = format!("{} ({} ships) @ {} | {:.0} m/s", fleet.name, ship_count, location_name, fleet.delta_v_remaining);
     }
 
@@ -597,7 +597,7 @@ pub fn handle_popup_spawn(
     lut: Res<TransferLut>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Check if we need to spawn a popup
@@ -722,7 +722,7 @@ pub fn update_popup_options(
     lut: Res<TransferLut>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only process if popup is open
@@ -862,7 +862,7 @@ pub fn handle_option_hover(
 pub fn handle_option_selection(
     mut commands: Commands,
     mut popup: ResMut<TransferPopup>,
-    mut player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &mut crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    mut player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &mut crate::ship::FlightPlan), With<crate::ship::Selected>>,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
     bodies: Query<&crate::orbital_data::Body>,
@@ -1120,7 +1120,7 @@ pub fn handle_fleet_number_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut key_state: ResMut<FleetKeyState>,
-    fleets: Query<(Entity, &crate::ship::Fleet, &crate::ship::ShipLocation, &crate::ship::Faction)>,
+    fleets: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &crate::ship::Faction)>,
     selected: Query<Entity, With<crate::ship::Selected>>,
     bodies: Query<&ComputedBody>,
     sim_time: Res<SimulationTime>,
@@ -1158,10 +1158,10 @@ pub fn handle_fleet_number_keys(
 
                     // Get fleet position
                     let fleet_pos = match location {
-                        crate::ship::ShipLocation::AtBody(body_entity) => {
+                        crate::ship::FleetLocation::AtBody(body_entity) => {
                             bodies.get(*body_entity).map(|c| c.position).unwrap_or(Vec3::ZERO)
                         }
-                        crate::ship::ShipLocation::InTransit {
+                        crate::ship::FleetLocation::InTransit {
                             solution,
                             departure_time,
                             ..

@@ -101,7 +101,7 @@ fn main() {
             )
                 .chain(),
         )
-        // Ship and simulation systems (run first)
+        // Fleet and simulation systems (run first)
         .add_systems(
             Update,
             (
@@ -119,7 +119,7 @@ fn main() {
                 ship::check_arrival,
                 // Expire uncommitted legs whose departure_day passed
                 ship::expire_stale_legs,
-                // Sync Transfer entities to ShipLocation + committed legs
+                // Sync Transfer entities to FleetLocation + committed legs
                 ship::sync_transfer_entities,
                 transfer_vis::check_transfer_expiration,
                 update_body_positions,
@@ -152,7 +152,7 @@ fn main() {
                 update_orbit_positions,
                 render_system,
                 ship::update_fleet_positions,
-                ship::render_ship,
+                ship::render_fleets,
                 ship::render_objectives,
                 ship::render_departure_markers,
                 ship::render_plan_markers,
@@ -206,7 +206,7 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
                 delta_v_remaining: 500_000.0,
                 name: "Alpha".to_string(),
             },
-            ship::ShipLocation::AtBody(earth),
+            ship::FleetLocation::AtBody(earth),
             ship::Faction::Player,
             ship::Selected,
             ship::FlightPlan::default(),
@@ -224,7 +224,7 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
                 delta_v_remaining: 400_000.0,
                 name: "Bravo".to_string(),
             },
-            ship::ShipLocation::AtBody(mars),
+            ship::FleetLocation::AtBody(mars),
             ship::Faction::Player,
             ship::FlightPlan::default(),
         )).with_children(|builder| {
@@ -241,7 +241,7 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
                 delta_v_remaining: 300_000.0,
                 name: "Charlie".to_string(),
             },
-            ship::ShipLocation::AtBody(jupiter),
+            ship::FleetLocation::AtBody(jupiter),
             ship::Faction::Player,
             ship::FlightPlan::default(),
         )).with_children(|builder| {
@@ -542,7 +542,7 @@ fn handle_body_click(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     body_query: Query<(Entity, &Body, &ComputedBody)>,
-    fleet_query: Query<(Entity, &ship::Fleet, &ship::ShipLocation, &ship::Faction)>,
+    fleet_query: Query<(Entity, &ship::Fleet, &ship::FleetLocation, &ship::Faction)>,
     fleet_positions: Query<(Entity, &ship::ComputedFleetPosition, &ship::Faction)>,
     selected_query: Query<Entity, With<ship::Selected>>,
     mut popup: ResMut<ui::TransferPopup>,
