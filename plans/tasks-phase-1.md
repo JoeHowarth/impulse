@@ -201,6 +201,24 @@ pub struct QueuedTransfer {
 
 **Checkpoint**: Manage multiple fleets, plan transfers independently
 
+#### Verification
+- [x] Fleet component with ship_count field
+- [x] 3 fleets spawned (Alpha/Earth, Bravo/Mars, Charlie/Jupiter)
+- [x] Selected marker component
+- [x] Click selects fleet, Shift+click opens transfer popup
+- [x] Fleet tabs at bottom of screen with name, ships, delta-v
+- [x] Number keys 1-9 select fleets
+- [x] Visual offset for multiple fleets at same body
+
+**Status**: COMPLETE
+
+**Implementation notes:**
+- `Fleet` component replaces `Ship` with `name`, `ship_count`, `delta_v_remaining`
+- `Selected` marker component for active fleet
+- `compute_fleet_positions()` helper offsets multiple fleets at same body in semicircle
+- Fleet tabs UI at bottom center shows all fleets with keyboard hints
+- Click detection uses offset positions for accurate selection
+
 ---
 
 ## Step 1.3: Merge/Split
@@ -219,6 +237,21 @@ pub struct QueuedTransfer {
 - Combines ship_count, despawns merged fleet entities
 
 **Checkpoint**: Can consolidate forces
+
+#### Verification
+- [x] S key splits selected fleet in half
+- [x] M key merges all fleets at body into selected
+- [x] New fleets get unique NATO phonetic names
+- [x] Only works at body (not in transit)
+
+**Status**: COMPLETE
+
+**Implementation notes:**
+- Keyboard-driven: S for split, M for merge (simpler than dialogs)
+- Split divides in half (larger half stays with original)
+- New fleet names from NATO phonetic alphabet (Delta, Echo, Foxtrot...)
+- Merge takes highest delta-v, combines ship counts
+- `FLEET_COUNTER` atomic for unique name generation
 
 ---
 
