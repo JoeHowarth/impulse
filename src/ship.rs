@@ -401,6 +401,145 @@ pub fn cancel_last_leg(
     }
 }
 
+/// Counter for generating unique fleet names
+static FLEET_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Generate a unique fleet name based on NATO phonetic alphabet
+fn generate_fleet_name() -> String {
+    const NAMES: &[&str] = &[
+        "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet", "Kilo",
+        "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra",
+        "Tango", "Uniform", "Victor", "Whiskey", "Xray", "Yankee", "Zulu",
+    ];
+    let idx = FLEET_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
+    if idx < NAMES.len() {
+        NAMES[idx].to_string()
+    } else {
+        format!("Fleet-{}", idx + 1)
+    }
+}
+
+/// Splits the selected fleet in half when S is pressed.
+/// Only works if fleet is at a body (not in transit) and has >1 ship.
+pub fn split_fleet(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    selected: Query<(Entity, &Fleet, &ShipLocation), With<Selected>>,
+) {
+    if !keyboard.just_pressed(KeyCode::KeyS) {
+        return;
+    }
+
+    let Ok((fleet_entity, fleet, location)) = selected.single() else {
+        return;
+    };
+
+    // Must be at a body
+    let ShipLocation::AtBody(body) = location else {
+        info!("Cannot split fleet while in transit");
+        return;
+    };
+
+    // Must have more than 1 ship
+    if fleet.ship_count <= 1 {
+        info!("Cannot split fleet with only {} ship(s)", fleet.ship_count);
+        return;
+    }
+
+    // Split in half (larger half stays with original)
+    let split_count = fleet.ship_count / 2;
+    let remaining = fleet.ship_count - split_count;
+
+    // Update original fleet
+    commands.entity(fleet_entity).insert(Fleet {
+        delta_v_remaining: fleet.delta_v_remaining,
+        name: fleet.name.clone(),
+        ship_count: remaining,
+    });
+
+    // Spawn new fleet at same body
+    let new_name = generate_fleet_name();
+    info!(
+        "Split {} ships from {} to new fleet {}",
+        split_count, fleet.name, new_name
+    );
+
+    commands.spawn((
+        Fleet {
+            delta_v_remaining: fleet.delta_v_remaining, // Same delta-v capability
+            name: new_name,
+            ship_count: split_count,
+        },
+        ShipLocation::AtBody(*body),
+        PlayerControlled,
+        FlightPlan::default(),
+    ));
+}
+
+/// Merges all fleets at the same body into the selected fleet when M is pressed.
+/// Only works if there are 2+ fleets at the same body.
+pub fn merge_fleets(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    selected: Query<(Entity, &Fleet, &ShipLocation), With<Selected>>,
+    other_fleets: Query<(Entity, &Fleet, &ShipLocation), (With<PlayerControlled>, Without<Selected>)>,
+) {
+    if !keyboard.just_pressed(KeyCode::KeyM) {
+        return;
+    }
+
+    let Ok((selected_entity, selected_fleet, selected_location)) = selected.single() else {
+        return;
+    };
+
+    // Must be at a body
+    let ShipLocation::AtBody(body) = selected_location else {
+        info!("Cannot merge fleets while in transit");
+        return;
+    };
+
+    // Find other fleets at the same body
+    let fleets_to_merge: Vec<_> = other_fleets
+        .iter()
+        .filter(|(_, _, loc)| matches!(loc, ShipLocation::AtBody(b) if *b == *body))
+        .collect();
+
+    if fleets_to_merge.is_empty() {
+        info!("No other fleets at this body to merge");
+        return;
+    }
+
+    // Calculate totals
+    let mut total_ships = selected_fleet.ship_count;
+    let mut merged_names = Vec::new();
+
+    for (entity, fleet, _) in &fleets_to_merge {
+        total_ships += fleet.ship_count;
+        merged_names.push(fleet.name.as_str());
+        commands.entity(*entity).despawn();
+    }
+
+    // Update selected fleet with combined ships
+    // Keep the higher delta-v (they should be the same, but just in case)
+    let max_dv = fleets_to_merge
+        .iter()
+        .map(|(_, f, _)| f.delta_v_remaining)
+        .fold(selected_fleet.delta_v_remaining, f64::max);
+
+    commands.entity(selected_entity).insert(Fleet {
+        delta_v_remaining: max_dv,
+        name: selected_fleet.name.clone(),
+        ship_count: total_ships,
+    });
+
+    info!(
+        "Merged {} into {} ({} ships total)",
+        merged_names.join(", "),
+        selected_fleet.name,
+        total_ships
+    );
+}
+
 /// Syncs Transfer visualization entities to match ShipLocation + committed legs.
 /// - InTransit -> one Transfer for active flight
 /// - Committed legs -> one Transfer each for future arcs

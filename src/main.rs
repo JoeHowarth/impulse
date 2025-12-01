@@ -106,6 +106,9 @@ fn main() {
                 // Flight plan modifications
                 ship::commit_plan,
                 ship::cancel_last_leg,
+                // Fleet management
+                ship::split_fleet,
+                ship::merge_fleets,
                 // Transfer execution (runs before expire so committed legs depart first)
                 ship::execute_departure,
                 ship::check_arrival,
