@@ -14,10 +14,6 @@ const CAMERA_LERP_SPEED: f32 = 8.0;
 /// Default camera scale fallback (roughly solar system scale)
 const DEFAULT_CAMERA_SCALE: f32 = 1.0e11;
 
-// /// Initial camera scale: shows ~2 AU vertically (inner solar system)
-// /// Scale = half-height in meters. 1.5e11 / 1200 pixels ≈ 1.25e8 m/pixel
-// const INITIAL_CAMERA_SCALE: f32 = 1.5e11 / 1900.0;
-
 /// Camera far plane (must encompass solar system)
 const CAMERA_FAR: f32 = 1.0e15;
 

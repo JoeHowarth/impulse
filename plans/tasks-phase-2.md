@@ -249,12 +249,14 @@ pub struct VisualShip {
 ```
 
 ### Verification
-- [ ] TacticalArena entity spawns at correct position
-- [ ] VisualShips spawn for all involved LogicalShips
-- [ ] VisualShips are children of arena
-- [ ] Initial positions correct (100km apart, center of arena)
-- [ ] Camera zooms and positions correctly
-- [ ] Time slows to tactical speed
+- [x] TacticalArena entity spawns at correct position
+- [x] VisualShips spawn for all involved LogicalShips
+- [x] VisualShips are children of arena
+- [x] Initial positions correct (player bottom, enemy top, 100km apart)
+- [x] Camera zooms and positions correctly
+- [x] Time slows to tactical speed (60x realtime = 1 min/s)
+
+**Completed.** tactical.rs module with TacticalArena and VisualShip components. Arena spawns offset from body so body appears on right side. Camera animates to tactical view and tracks arena movement (compensates for orbital motion). Time scale refactored to direct seconds (removed SIM_BASE_RATE multiplication). Added CameraScale resource to centralize camera scale queries for all rendering systems.
 
 ---
 

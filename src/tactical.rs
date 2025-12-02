@@ -247,23 +247,37 @@ fn compute_ship_x_offset(index: usize, total: usize) -> f64 {
 
 /// Updates the arena position to follow the combat body.
 /// This keeps tactical ships centered on the body as it orbits.
-/// Also updates camera target while animating to keep it tracking the arena.
+/// Also moves the camera by the same delta so it tracks the arena.
 pub fn update_arena_position(
     mut arena_query: Query<(&TacticalArena, &mut Transform)>,
     bodies: Query<&ComputedBody>,
-    mut camera_query: Query<&mut crate::camera::CameraTarget>,
+    mut camera_query: Query<
+        (&mut Transform, &mut crate::camera::CameraTarget),
+        Without<TacticalArena>,
+    >,
 ) {
-    for (arena, mut transform) in &mut arena_query {
+    for (arena, mut arena_transform) in &mut arena_query {
         if let Ok(body) = bodies.get(arena.body) {
             // Apply same offset as spawn to keep body on right side
             let arena_offset = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
             let new_pos = body.position + arena_offset;
-            transform.translation = new_pos;
 
-            // Keep camera target updated while animating
-            if let Ok(mut camera_target) = camera_query.single_mut() {
-                if camera_target.is_animating() {
-                    camera_target.position = Some(Vec2::new(new_pos.x, new_pos.y));
+            // Calculate how much the arena moved this frame
+            let delta = new_pos - arena_transform.translation;
+
+            // Update arena position
+            arena_transform.translation = new_pos;
+
+            // Move camera by the same delta to track the arena
+            if let Ok((mut cam_transform, mut camera_target)) = camera_query.single_mut() {
+                if let Some(ref mut target_pos) = camera_target.position {
+                    // Animating: update the target so animation destination moves with arena
+                    target_pos.x += delta.x;
+                    target_pos.y += delta.y;
+                } else {
+                    // Not animating: move camera directly
+                    cam_transform.translation.x += delta.x;
+                    cam_transform.translation.y += delta.y;
                 }
             }
         }
