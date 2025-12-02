@@ -3,12 +3,13 @@
 //! Strategic mode: Single fleet selection via click
 //! Tactical mode: Multi-ship selection via click, Shift+click, and box select
 
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_vector_shapes::prelude::*;
 
 use crate::ship::{CombatState, Faction, Selected};
-use crate::tactical::VisualShip;
+use crate::tactical::{MoveOrder, TacticalArena, VisualShip};
 
 // ============================================================================
 // Constants
@@ -368,4 +369,79 @@ fn screen_to_world(
     // but for orthographic we can use the ray origin directly
     let ray = camera.viewport_to_world(camera_transform, screen_pos).ok()?;
     Some(Vec2::new(ray.origin.x, ray.origin.y))
+}
+
+/// Convert screen coordinates to arena-local coordinates.
+fn screen_to_arena_local(
+    screen_pos: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    arena_transform: &GlobalTransform,
+) -> Option<DVec3> {
+    let ray = camera.viewport_to_world(camera_transform, screen_pos).ok()?;
+    let arena_pos = arena_transform.translation();
+    Some(DVec3::new(
+        (ray.origin.x - arena_pos.x) as f64,
+        (ray.origin.y - arena_pos.y) as f64,
+        0.0,
+    ))
+}
+
+/// Handles right-click to set movement orders for selected ships.
+pub fn handle_tactical_move_order(
+    mut commands: Commands,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    combat: Res<CombatState>,
+    arena_query: Query<&GlobalTransform, With<TacticalArena>>,
+    selected_ships: Query<Entity, (With<VisualShip>, With<Selected>)>,
+) {
+    // Only in tactical mode
+    if !combat.active {
+        return;
+    }
+
+    // Right-click just pressed
+    if !mouse_button.just_pressed(MouseButton::Right) {
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+    let Ok(arena_transform) = arena_query.single() else {
+        return;
+    };
+
+    // Convert screen → world → arena-local
+    let Some(arena_local) = screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform) else {
+        return;
+    };
+
+    // Count selected ships
+    let count = selected_ships.iter().count();
+    if count == 0 {
+        return;
+    }
+
+    info!(
+        "Move order: {} ship(s) to arena-local ({:.0} km, {:.0} km)",
+        count,
+        arena_local.x / 1000.0,
+        arena_local.y / 1000.0
+    );
+
+    // Issue move order to all selected ships
+    for entity in &selected_ships {
+        commands.entity(entity).insert(MoveOrder {
+            destination: arena_local,
+        });
+    }
 }

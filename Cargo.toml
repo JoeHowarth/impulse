@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 astrora_core = { path = "astrora", features = ["serde"] }
 bevy = { path = "bevy" }
+avian3d = { version = "0.4", default-features = false, features = ["3d", "f64", "parry-f64"] }
 bevy_pancam = "0.19.0"
 # use git branch wb/updatebevy0.17
 # from https://github.com/ForesightMiningSoftwareCorporation/bevy_polyline

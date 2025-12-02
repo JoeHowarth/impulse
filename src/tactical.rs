@@ -3,10 +3,12 @@
 //! When combat triggers, we spawn a TacticalArena at the body's position
 //! and VisualShip entities for each LogicalShip in the involved fleets.
 
+use avian3d::prelude::*;
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
 
-use crate::camera::CameraTarget;
+use crate::camera::{CameraScale, CameraTarget};
 use crate::ship::{CombatState, Faction, LogicalShip, Selected, ship_count};
 use crate::simulation::SimulationTime;
 use crate::ComputedBody;
@@ -36,6 +38,12 @@ const TACTICAL_CAMERA_SCALE: f32 = 4.0e5;
 
 /// Arena center offset from body (150,000 km to put body on right side)
 const ARENA_CENTER_OFFSET: f64 = 150_000_000.0;
+
+/// Arrival distance threshold in meters (1 km)
+const ARRIVAL_DISTANCE: f64 = 1_000.0;
+
+/// Arrival velocity threshold in m/s
+const ARRIVAL_VELOCITY: f64 = 10.0;
 
 // ============================================================================
 // Components
@@ -67,6 +75,31 @@ pub struct VisualShip {
     pub fleet: Entity,
     /// Faction for rendering
     pub faction: Faction,
+}
+
+/// Movement order for a VisualShip - stores arena-local destination.
+#[derive(Component)]
+pub struct MoveOrder {
+    /// Arena-local destination (in meters, relative to TacticalArena center)
+    pub destination: DVec3,
+}
+
+/// Stats for ship movement and combat capabilities.
+#[derive(Component)]
+pub struct ShipStats {
+    /// Maximum thrust acceleration in m/s²
+    pub max_acceleration: f64,
+    /// Maximum linear speed in m/s
+    pub max_speed: f64,
+}
+
+impl Default for ShipStats {
+    fn default() -> Self {
+        Self {
+            max_acceleration: 10.0,   // 1g
+            max_speed: 50_000.0,      // 50 km/s
+        }
+    }
 }
 
 // ============================================================================
@@ -224,6 +257,13 @@ fn spawn_fleet_ships(
                             0.1,
                         )),
                         Visibility::default(),
+                        // Physics components
+                        RigidBody::Dynamic,
+                        Collider::sphere(500.0), // 500m radius collider
+                        LinearVelocity::default(),
+                        SweptCcd::default(), // Prevent tunneling at high speeds
+                        // Movement stats
+                        ShipStats::default(),
                     ));
                 });
 
@@ -334,5 +374,128 @@ pub fn render_visual_ships(
             painter.circle(size * 0.8);
             painter.hollow = false; // Reset for next ship
         }
+    }
+}
+
+/// Updates ship velocities based on move orders using Newtonian physics.
+/// Ships accelerate toward destination, then decelerate to stop.
+pub fn update_ship_movement(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut ships: Query<
+        (
+            Entity,
+            &MoveOrder,
+            &ShipStats,
+            &mut LinearVelocity,
+            &Transform,
+        ),
+        With<VisualShip>,
+    >,
+) {
+    // Use frame delta time - Avian will integrate the velocity
+    let dt = time.delta_secs_f64();
+    if dt <= 0.0 {
+        return;
+    }
+
+    for (entity, order, stats, mut velocity, transform) in &mut ships {
+        // Current position in arena-local coords (from Transform)
+        let current_pos = DVec3::new(
+            transform.translation.x as f64,
+            transform.translation.y as f64,
+            0.0,
+        );
+
+        // Vector to destination
+        let to_target = order.destination - current_pos;
+        let distance = to_target.length();
+
+        // Current velocity state
+        let current_speed = velocity.0.length();
+
+        // Stopping distance: d = v² / (2a)
+        let stopping_distance = if stats.max_acceleration > 0.0 {
+            current_speed * current_speed / (2.0 * stats.max_acceleration)
+        } else {
+            0.0
+        };
+
+        if distance <= ARRIVAL_DISTANCE && current_speed <= ARRIVAL_VELOCITY {
+            // ARRIVED: clear order and stop
+            commands.entity(entity).remove::<MoveOrder>();
+            velocity.0 = DVec3::ZERO;
+        } else if distance > stopping_distance + ARRIVAL_DISTANCE {
+            // ACCELERATE: thrust toward target
+            let direction = to_target.normalize_or_zero();
+            let delta_v = direction * stats.max_acceleration * dt;
+            velocity.0 += delta_v;
+
+            // Clamp to max speed
+            let new_speed = velocity.0.length();
+            if new_speed > stats.max_speed {
+                velocity.0 = velocity.0.normalize() * stats.max_speed;
+            }
+        } else {
+            // DECELERATE: thrust opposite to velocity
+            if current_speed > ARRIVAL_VELOCITY {
+                let brake_dir = -velocity.0.normalize_or_zero();
+                let delta_v = brake_dir * stats.max_acceleration * dt;
+                let new_vel = velocity.0 + delta_v;
+
+                // Check if we've overshot (velocity reversed direction)
+                if new_vel.dot(velocity.0) < 0.0 {
+                    // Overshot - just stop
+                    velocity.0 = DVec3::ZERO;
+                } else {
+                    velocity.0 = new_vel;
+                }
+            } else {
+                // Already slow enough, just stop
+                velocity.0 = DVec3::ZERO;
+            }
+        }
+    }
+}
+
+/// Renders destination markers for selected ships with move orders.
+pub fn render_move_markers(
+    combat: Res<CombatState>,
+    ships: Query<&MoveOrder, (With<VisualShip>, With<Selected>)>,
+    arena_query: Query<&GlobalTransform, With<TacticalArena>>,
+    cam_scale: Res<CameraScale>,
+    mut painter: ShapePainter,
+) {
+    if !combat.active {
+        return;
+    }
+
+    let Ok(arena_transform) = arena_query.single() else {
+        return;
+    };
+    let arena_pos = arena_transform.translation();
+
+    for order in &ships {
+        // Convert arena-local to world
+        let world_pos = Vec3::new(
+            arena_pos.x + order.destination.x as f32,
+            arena_pos.y + order.destination.y as f32,
+            0.1,
+        );
+
+        // Draw X marker
+        painter.set_translation(world_pos);
+        painter.set_color(Color::srgba(0.5, 1.0, 0.5, 0.6));
+        painter.thickness = cam_scale.0 * 2.0;
+
+        let size = cam_scale.0 * 15.0; // 15 pixels
+        painter.line(
+            Vec3::new(-size, -size, 0.0),
+            Vec3::new(size, size, 0.0),
+        );
+        painter.line(
+            Vec3::new(-size, size, 0.0),
+            Vec3::new(size, -size, 0.0),
+        );
     }
 }

@@ -18,6 +18,7 @@ use bevy_vector_shapes::prelude::*;
 
 mod camera;
 mod orbital_data;
+mod physics;
 mod picking;
 mod ship;
 mod simulation;
@@ -84,6 +85,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugins(PanCamPlugin)
         .add_plugins(ShapePlugin::default())
+        .add_plugins(physics::TacticalPhysicsPlugin)
         // Performance diagnostics - logs to console every second
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(LogDiagnosticsPlugin::default())
@@ -145,6 +147,7 @@ fn main() {
                 // Tactical picking (box selection must run before click to set drag state)
                 picking::update_box_selection,
                 picking::handle_tactical_click,
+                picking::handle_tactical_move_order,
                 ui::handle_fleet_number_keys,
                 ui::handle_popup_spawn,
                 ui::update_popup_options,
@@ -167,7 +170,9 @@ fn main() {
                 render_system,
                 ship::update_fleet_positions,
                 ship::render_fleets,
+                tactical::update_ship_movement,
                 tactical::render_visual_ships,
+                tactical::render_move_markers,
                 picking::render_box_selection,
                 ship::render_objectives,
                 ship::render_departure_markers,
