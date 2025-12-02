@@ -18,6 +18,7 @@ use bevy_vector_shapes::prelude::*;
 
 mod camera;
 mod orbital_data;
+mod picking;
 mod ship;
 mod simulation;
 mod tactical;
@@ -91,6 +92,7 @@ fn main() {
         .init_resource::<ui::FleetKeyState>()
         .init_resource::<ship::VictoryState>()
         .init_resource::<ship::CombatState>()
+        .init_resource::<picking::BoxSelection>()
         .add_systems(
             Startup,
             (
@@ -140,6 +142,9 @@ fn main() {
             Update,
             (
                 handle_body_click,
+                // Tactical picking (box selection must run before click to set drag state)
+                picking::update_box_selection,
+                picking::handle_tactical_click,
                 ui::handle_fleet_number_keys,
                 ui::handle_popup_spawn,
                 ui::update_popup_options,
@@ -163,6 +168,7 @@ fn main() {
                 ship::update_fleet_positions,
                 ship::render_fleets,
                 tactical::render_visual_ships,
+                picking::render_box_selection,
                 ship::render_objectives,
                 ship::render_departure_markers,
                 ship::render_plan_markers,
@@ -544,7 +550,7 @@ fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
 //     phys_radius.max(screen_size)
 // }
 
-/// Detects clicks on fleets or bodies.
+/// Detects clicks on fleets or bodies (strategic mode only).
 /// - Click: select fleet if one is at click location
 /// - Shift+click: open transfer popup for selected fleet
 fn handle_body_click(
@@ -558,7 +564,13 @@ fn handle_body_click(
     fleet_positions: Query<(Entity, &ship::ComputedFleetPosition, &ship::Faction)>,
     selected_query: Query<Entity, With<ship::Selected>>,
     mut popup: ResMut<ui::TransferPopup>,
+    combat: Res<ship::CombatState>,
 ) {
+    // Skip in tactical mode - picking::handle_tactical_click handles that
+    if combat.active {
+        return;
+    }
+
     if !mouse_button.just_pressed(MouseButton::Left) {
         return;
     }

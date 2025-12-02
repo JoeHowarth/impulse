@@ -1,0 +1,371 @@
+//! Unified picking/selection system for both strategic and tactical modes.
+//!
+//! Strategic mode: Single fleet selection via click
+//! Tactical mode: Multi-ship selection via click, Shift+click, and box select
+
+use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+use bevy_vector_shapes::prelude::*;
+
+use crate::ship::{CombatState, Faction, Selected};
+use crate::tactical::VisualShip;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Click radius in screen pixels for picking
+const CLICK_RADIUS: f32 = 20.0;
+
+/// Minimum drag distance to trigger box selection (pixels)
+const BOX_SELECT_THRESHOLD: f32 = 5.0;
+
+// ============================================================================
+// Resources
+// ============================================================================
+
+/// Tracks box selection drag state (tactical mode only).
+#[derive(Resource, Default)]
+pub struct BoxSelection {
+    /// Screen position where drag started
+    pub start: Option<Vec2>,
+    /// Current drag position
+    pub current: Option<Vec2>,
+    /// Set to true when a box select just occurred (so click handler skips)
+    pub did_box_select: bool,
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Finds the closest entity within click radius.
+/// Returns (Entity, distance) for the closest match, or None if nothing is close enough.
+pub fn find_closest_pickable(
+    cursor_pos: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    candidates: impl Iterator<Item = (Entity, Vec3)>,
+    click_radius: f32,
+) -> Option<(Entity, f32)> {
+    let mut best_match: Option<(Entity, f32)> = None;
+
+    for (entity, world_pos) in candidates {
+        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, world_pos) else {
+            continue;
+        };
+
+        let screen_dist = cursor_pos.distance(screen_pos);
+        if screen_dist <= click_radius {
+            match &best_match {
+                None => best_match = Some((entity, screen_dist)),
+                Some((_, best_dist)) if screen_dist < *best_dist => {
+                    best_match = Some((entity, screen_dist))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    best_match
+}
+
+// ============================================================================
+// Tactical Mode Systems
+// ============================================================================
+
+/// Handles click and shift+click selection in tactical mode.
+pub fn handle_tactical_click(
+    mut commands: Commands,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    combat: Res<CombatState>,
+    visual_ships: Query<(Entity, &GlobalTransform, &VisualShip)>,
+    selected: Query<Entity, With<Selected>>,
+    box_sel: Res<BoxSelection>,
+) {
+    // Only run in tactical mode
+    if !combat.active {
+        return;
+    }
+
+    // Don't process click if it was a box selection drag
+    if box_sel.did_box_select {
+        info!("Tactical click: skipping, was box select");
+        return;
+    }
+
+    if !mouse_button.just_released(MouseButton::Left) {
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        info!("Tactical click: no window");
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        info!("Tactical click: no cursor position");
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        info!("Tactical click: no camera");
+        return;
+    };
+
+    let shift =
+        keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+
+    // Count player ships for debug
+    let player_ships: Vec<_> = visual_ships
+        .iter()
+        .filter(|(_, _, vs)| vs.faction == Faction::Player)
+        .collect();
+
+    info!(
+        "Tactical click at {:?}, {} player ships in scene",
+        cursor_pos,
+        player_ships.len()
+    );
+
+    // Debug: show screen positions of ships
+    for (entity, gt, _) in &player_ships {
+        let world_pos = gt.translation();
+        if let Ok(screen_pos) = camera.world_to_viewport(camera_transform, world_pos) {
+            let dist = cursor_pos.distance(screen_pos);
+            info!(
+                "  Ship {:?}: world={:?}, screen={:?}, dist={:.1}px",
+                entity, world_pos, screen_pos, dist
+            );
+        } else {
+            info!("  Ship {:?}: world={:?}, NOT ON SCREEN", entity, world_pos);
+        }
+    }
+
+    // Find clicked ship (player faction only)
+    let candidates = player_ships
+        .iter()
+        .map(|(e, gt, _)| (*e, gt.translation()));
+
+    if let Some((entity, dist)) = find_closest_pickable(
+        cursor_pos,
+        camera,
+        camera_transform,
+        candidates,
+        CLICK_RADIUS,
+    ) {
+        info!("Selected ship {:?} at distance {:.1}px", entity, dist);
+        if shift {
+            // Toggle selection
+            if selected.get(entity).is_ok() {
+                commands.entity(entity).remove::<Selected>();
+            } else {
+                commands.entity(entity).insert(Selected);
+            }
+        } else {
+            // Single select (clear others)
+            for old in selected.iter() {
+                commands.entity(old).remove::<Selected>();
+            }
+            commands.entity(entity).insert(Selected);
+        }
+    } else {
+        info!("No ship within {}px of click", CLICK_RADIUS);
+        if !shift {
+            // Clicked empty space - deselect all
+            for old in selected.iter() {
+                commands.entity(old).remove::<Selected>();
+            }
+        }
+    }
+}
+
+/// Tracks box selection drag and selects ships on release.
+/// Returns true if a box selection occurred (so click handler can skip).
+pub fn update_box_selection(
+    mut commands: Commands,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    combat: Res<CombatState>,
+    mut box_sel: ResMut<BoxSelection>,
+    visual_ships: Query<(Entity, &GlobalTransform, &VisualShip)>,
+    selected: Query<Entity, With<Selected>>,
+) {
+    // Only run in tactical mode
+    if !combat.active {
+        box_sel.start = None;
+        box_sel.current = None;
+        box_sel.did_box_select = false;
+        return;
+    }
+
+    // Reset the flag at start of each frame
+    box_sel.did_box_select = false;
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+
+    // Start drag
+    if mouse_button.just_pressed(MouseButton::Left) {
+        box_sel.start = Some(cursor_pos);
+        box_sel.current = Some(cursor_pos);
+        info!("Box select: drag started at {:?}", cursor_pos);
+    }
+
+    // Update drag position
+    if mouse_button.pressed(MouseButton::Left) {
+        box_sel.current = Some(cursor_pos);
+    }
+
+    // End drag - check if it was a box select
+    if mouse_button.just_released(MouseButton::Left) {
+        if let (Some(start), Some(end)) = (box_sel.start, box_sel.current) {
+            let drag_dist = start.distance(end);
+            info!("Box select: drag ended, distance={:.1}px (threshold={})", drag_dist, BOX_SELECT_THRESHOLD);
+
+            // Only trigger box select if dragged far enough
+            if drag_dist > BOX_SELECT_THRESHOLD {
+                box_sel.did_box_select = true;
+
+                let Ok((camera, camera_transform)) = camera_query.single() else {
+                    box_sel.start = None;
+                    box_sel.current = None;
+                    return;
+                };
+
+                let shift = keyboard.pressed(KeyCode::ShiftLeft)
+                    || keyboard.pressed(KeyCode::ShiftRight);
+
+                // Clear selection if not shift-dragging
+                if !shift {
+                    for old in selected.iter() {
+                        commands.entity(old).remove::<Selected>();
+                    }
+                }
+
+                // Calculate selection rectangle
+                let min_x = start.x.min(end.x);
+                let max_x = start.x.max(end.x);
+                let min_y = start.y.min(end.y);
+                let max_y = start.y.max(end.y);
+
+                info!("Box select: rect x=[{:.0}, {:.0}] y=[{:.0}, {:.0}]", min_x, max_x, min_y, max_y);
+
+                // Select all player ships inside the rectangle
+                let mut selected_count = 0;
+                for (entity, global_transform, visual_ship) in &visual_ships {
+                    if visual_ship.faction != Faction::Player {
+                        continue;
+                    }
+
+                    let Ok(screen_pos) =
+                        camera.world_to_viewport(camera_transform, global_transform.translation())
+                    else {
+                        continue;
+                    };
+
+                    let inside = screen_pos.x >= min_x
+                        && screen_pos.x <= max_x
+                        && screen_pos.y >= min_y
+                        && screen_pos.y <= max_y;
+
+                    info!("  Ship at screen {:?}: inside={}", screen_pos, inside);
+
+                    if inside {
+                        commands.entity(entity).insert(Selected);
+                        selected_count += 1;
+                    }
+                }
+
+                info!("Box select: selected {} ships", selected_count);
+            }
+        }
+
+        box_sel.start = None;
+        box_sel.current = None;
+    }
+}
+
+/// Renders the box selection rectangle during drag.
+pub fn render_box_selection(
+    box_sel: Res<BoxSelection>,
+    combat: Res<CombatState>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    mut painter: bevy_vector_shapes::prelude::ShapePainter,
+) {
+    if !combat.active {
+        return;
+    }
+
+    let (Some(start), Some(current)) = (box_sel.start, box_sel.current) else {
+        return;
+    };
+
+    // Only draw if dragged enough
+    if start.distance(current) <= BOX_SELECT_THRESHOLD {
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Ok((camera, camera_transform, projection)) = camera_query.single() else {
+        return;
+    };
+
+    // Convert screen corners to world space
+    let window_size = Vec2::new(window.width(), window.height());
+
+    // Get camera scale for line thickness
+    let cam_scale = match projection {
+        Projection::Orthographic(ortho) => ortho.scale,
+        _ => 1.0,
+    };
+
+    // Convert screen coords to world coords
+    let start_world = screen_to_world(start, window_size, camera, camera_transform);
+    let end_world = screen_to_world(current, window_size, camera, camera_transform);
+
+    let Some(start_world) = start_world else {
+        return;
+    };
+    let Some(end_world) = end_world else {
+        return;
+    };
+
+    // Draw rectangle
+    painter.set_color(Color::srgba(0.5, 0.8, 1.0, 0.5));
+    painter.thickness = cam_scale * 1.0;
+
+    let corners = [
+        Vec3::new(start_world.x, start_world.y, 0.1),
+        Vec3::new(end_world.x, start_world.y, 0.1),
+        Vec3::new(end_world.x, end_world.y, 0.1),
+        Vec3::new(start_world.x, end_world.y, 0.1),
+    ];
+
+    for i in 0..4 {
+        painter.line(corners[i], corners[(i + 1) % 4]);
+    }
+}
+
+/// Convert screen coordinates to world coordinates.
+fn screen_to_world(
+    screen_pos: Vec2,
+    _window_size: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+) -> Option<Vec2> {
+    // viewport_to_world returns a Ray3d for perspective cameras,
+    // but for orthographic we can use the ray origin directly
+    let ray = camera.viewport_to_world(camera_transform, screen_pos).ok()?;
+    Some(Vec2::new(ray.origin.x, ray.origin.y))
+}

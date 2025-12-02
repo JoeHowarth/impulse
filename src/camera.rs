@@ -1,7 +1,7 @@
 //! Camera setup, control, and animation systems.
 
 use astrora_core::core::constants::AU;
-use bevy::{prelude::*, window::PrimaryWindow};
+use bevy::{prelude::*, input::mouse::MouseButton, window::PrimaryWindow};
 use bevy_pancam::PanCam;
 
 // ============================================================================
@@ -101,6 +101,9 @@ pub fn animate_camera(
             // Clear target if close enough (0.1% of target magnitude, min 1.0)
             let threshold = (target_pos.length() * 0.001).max(1.0);
             if current.distance(target_pos) < threshold {
+                // Snap to exact target position to eliminate any remaining error
+                transform.translation.x = target_pos.x;
+                transform.translation.y = target_pos.y;
                 target.position = None;
             }
         }
@@ -140,7 +143,11 @@ pub fn spawn_camera(mut commands: Commands, query: Query<&Window, With<PrimaryWi
             ..OrthographicProjection::default_3d()
         }),
         Transform::from_xyz(0.0, 0.0, CAMERA_Z).looking_at(Vec3::ZERO, Vec3::Y),
-        PanCam::default(),
+        PanCam {
+            // Only use right/middle mouse for panning - left is for selection
+            grab_buttons: vec![MouseButton::Right, MouseButton::Middle],
+            ..default()
+        },
         CameraTarget::default(),
     ));
 

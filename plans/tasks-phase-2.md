@@ -281,9 +281,11 @@ Draw individual ships in tactical view.
 - Maybe 1-2 km visual radius for visibility
 
 ### Verification
-- [ ] VisualShips render in tactical view
-- [ ] Player vs enemy visually distinct
-- [ ] Ships visible at tactical zoom level
+- [x] VisualShips render in tactical view
+- [x] Player vs enemy visually distinct
+- [x] Ships visible at tactical zoom level
+
+**Completed.** Ships render as triangles using ShapePainter (1000km size for visibility). Green for player, red for enemy.
 
 ---
 
@@ -315,11 +317,13 @@ pub struct Selected;  // Reuse existing? Or new TacticalSelected?
 - This selection system only active when CombatState.active
 
 ### Verification
-- [ ] Click selects single ship
-- [ ] Shift+click adds to selection
-- [ ] Box select works
-- [ ] Selected ships visually highlighted
-- [ ] Selection only works in tactical mode
+- [x] Click selects single ship
+- [x] Shift+click adds to selection
+- [x] Box select works
+- [x] Selected ships visually highlighted
+- [x] Selection only works in tactical mode
+
+**Completed.** New `picking.rs` module with unified selection system. Reuses `Selected` component from ship.rs. Click, shift+click, and box selection all work. White ring indicator on selected ships. Also fixed camera tracking: apply arena delta to both camera position AND target during animation, snap to exact target when animation ends. Changed PanCam to right-mouse-only for panning.
 
 ---
 

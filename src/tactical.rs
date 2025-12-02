@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
 
 use crate::camera::CameraTarget;
-use crate::ship::{CombatState, Faction, LogicalShip, ship_count};
+use crate::ship::{CombatState, Faction, LogicalShip, Selected, ship_count};
 use crate::simulation::SimulationTime;
 use crate::ComputedBody;
 
@@ -269,15 +269,16 @@ pub fn update_arena_position(
             arena_transform.translation = new_pos;
 
             // Move camera by the same delta to track the arena
+            // Always apply delta to camera position so it moves with arena
             if let Ok((mut cam_transform, mut camera_target)) = camera_query.single_mut() {
+                // Always move camera position with arena
+                cam_transform.translation.x += delta.x;
+                cam_transform.translation.y += delta.y;
+
+                // If animating, also move the target so we animate toward the right place
                 if let Some(ref mut target_pos) = camera_target.position {
-                    // Animating: update the target so animation destination moves with arena
                     target_pos.x += delta.x;
                     target_pos.y += delta.y;
-                } else {
-                    // Not animating: move camera directly
-                    cam_transform.translation.x += delta.x;
-                    cam_transform.translation.y += delta.y;
                 }
             }
         }
@@ -287,14 +288,14 @@ pub fn update_arena_position(
 /// Renders VisualShips as triangles during tactical combat.
 pub fn render_visual_ships(
     combat: Res<CombatState>,
-    visual_ships: Query<(&VisualShip, &GlobalTransform)>,
+    visual_ships: Query<(&VisualShip, &GlobalTransform, Option<&Selected>)>,
     mut painter: ShapePainter,
 ) {
     if !combat.active {
         return;
     }
 
-    for (ship, global_transform) in &visual_ships {
+    for (ship, global_transform, is_selected) in &visual_ships {
         let pos = global_transform.translation();
 
         let color = match ship.faction {
@@ -324,5 +325,14 @@ pub fn render_visual_ships(
             Vec3::new(half_base, -height * 0.5, 0.0),
             Vec3::new(0.0, height * 0.5, 0.0),
         );
+
+        // Selection indicator: white ring around selected ships
+        if is_selected.is_some() {
+            painter.set_color(Color::srgba(1.0, 1.0, 1.0, 0.8));
+            painter.hollow = true;
+            painter.thickness = size * 0.1;
+            painter.circle(size * 0.8);
+            painter.hollow = false; // Reset for next ship
+        }
     }
 }
