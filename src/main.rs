@@ -20,6 +20,7 @@ mod camera;
 mod orbital_data;
 mod ship;
 mod simulation;
+mod tactical;
 mod transfer;
 mod transfer_lut;
 mod transfer_vis;
@@ -28,15 +29,14 @@ mod ui;
 use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
 use simulation::SimulationTime;
 
+use crate::camera::spawn_camera;
+
 // ============================================================================
 // Constants
 // ============================================================================
 
 /// Number of line segments per orbit (higher = smoother, more memory)
 const ORBIT_SEGMENTS: usize = 10000;
-
-/// Visual scaling factor: 1 AU = this many world units
-const VISUAL_SCALE: f64 = 100.0;
 
 /// Astronomical unit in meters (lazy-loaded from orbital_data)
 const AU: LazyCell<f64> = LazyCell::new(|| orbital_data::AU);
@@ -94,6 +94,7 @@ fn main() {
         .add_systems(
             Startup,
             (
+                spawn_camera,
                 setup,
                 ApplyDeferred,
                 init_parent_entities,
@@ -106,6 +107,7 @@ fn main() {
         .add_systems(
             Update,
             (
+                camera::update_camera_scale,
                 simulation::handle_time_controls,
                 // Flight plan modifications
                 ship::commit_plan,
@@ -120,6 +122,10 @@ fn main() {
                 ship::check_arrival,
                 // Combat detection (after arrival)
                 ship::detect_combat,
+                // Tactical mode entry (after combat detection)
+                tactical::enter_tactical_mode,
+                // Keep tactical arena synced with body position
+                tactical::update_arena_position,
                 // Expire uncommitted legs whose departure_day passed
                 ship::expire_stale_legs,
                 // Sync Transfer entities to FleetLocation + committed legs
@@ -156,6 +162,7 @@ fn main() {
                 render_system,
                 ship::update_fleet_positions,
                 ship::render_fleets,
+                tactical::render_visual_ships,
                 ship::render_objectives,
                 ship::render_departure_markers,
                 ship::render_plan_markers,
@@ -174,20 +181,6 @@ fn main() {
 }
 
 fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
-    // Spawn camera with animation support
-    commands.spawn((
-        Camera3d::default(),
-        Projection::from(OrthographicProjection {
-            far: 100_000.0,
-            near: 0.1,
-            scale: 1.0,
-            ..OrthographicProjection::default_3d()
-        }),
-        Transform::from_xyz(0.0, 0.0, 1000.0).looking_at(Vec3::ZERO, Vec3::Y),
-        PanCam::default(),
-        camera::CameraTarget::default(),
-    ));
-
     // Load planetary data
     let bodies = PlanetaryElements::get_planetary_elements();
     commands.insert_resource(PlanetaryElements {
@@ -201,71 +194,79 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         body_entities.insert(body.name.clone(), entity);
     }
 
-    // Player fleet at Saturn (outer system rebellion)
-    if let Some(&saturn) = body_entities.get("Saturn") {
-        commands.spawn((
-            ship::Fleet {
-                delta_v_remaining: 500_000.0,
-                name: "Alpha".to_string(),
-            },
-            ship::FleetLocation::AtBody(saturn),
-            ship::Faction::Player,
-            ship::Selected,
-            ship::FlightPlan::default(),
-        )).with_children(|builder| {
-            for _ in 0..10 {
-                builder.spawn(ship::LogicalShip);
-            }
-        });
+    // Player fleet at Vesta
+    if let Some(&vesta) = body_entities.get("Vesta") {
+        commands
+            .spawn((
+                ship::Fleet {
+                    delta_v_remaining: 500_000.0,
+                    name: "Alpha".to_string(),
+                },
+                ship::FleetLocation::AtBody(vesta),
+                ship::Faction::Player,
+                ship::Selected,
+                ship::FlightPlan::default(),
+            ))
+            .with_children(|builder| {
+                for _ in 0..10 {
+                    builder.spawn(ship::LogicalShip);
+                }
+            });
     }
 
     // Enemy garrisons (inner system)
     if let Some(&ceres) = body_entities.get("Ceres") {
-        commands.spawn((
-            ship::Fleet {
-                delta_v_remaining: 500_000.0,
-                name: "Ceres Garrison".to_string(),
-            },
-            ship::FleetLocation::AtBody(ceres),
-            ship::Faction::Enemy,
-            ship::FlightPlan::default(),
-        )).with_children(|builder| {
-            for _ in 0..5 {
-                builder.spawn(ship::LogicalShip);
-            }
-        });
+        commands
+            .spawn((
+                ship::Fleet {
+                    delta_v_remaining: 500_000.0,
+                    name: "Ceres Garrison".to_string(),
+                },
+                ship::FleetLocation::AtBody(ceres),
+                ship::Faction::Enemy,
+                ship::FlightPlan::default(),
+            ))
+            .with_children(|builder| {
+                for _ in 0..5 {
+                    builder.spawn(ship::LogicalShip);
+                }
+            });
     }
 
     if let Some(&mars) = body_entities.get("Mars") {
-        commands.spawn((
-            ship::Fleet {
-                delta_v_remaining: 500_000.0,
-                name: "Mars Garrison".to_string(),
-            },
-            ship::FleetLocation::AtBody(mars),
-            ship::Faction::Enemy,
-            ship::FlightPlan::default(),
-        )).with_children(|builder| {
-            for _ in 0..10 {
-                builder.spawn(ship::LogicalShip);
-            }
-        });
+        commands
+            .spawn((
+                ship::Fleet {
+                    delta_v_remaining: 500_000.0,
+                    name: "Mars Garrison".to_string(),
+                },
+                ship::FleetLocation::AtBody(mars),
+                ship::Faction::Enemy,
+                ship::FlightPlan::default(),
+            ))
+            .with_children(|builder| {
+                for _ in 0..10 {
+                    builder.spawn(ship::LogicalShip);
+                }
+            });
     }
 
     if let Some(&earth) = body_entities.get("Earth") {
-        commands.spawn((
-            ship::Fleet {
-                delta_v_remaining: 500_000.0,
-                name: "Earth Garrison".to_string(),
-            },
-            ship::FleetLocation::AtBody(earth),
-            ship::Faction::Enemy,
-            ship::FlightPlan::default(),
-        )).with_children(|builder| {
-            for _ in 0..15 {
-                builder.spawn(ship::LogicalShip);
-            }
-        });
+        commands
+            .spawn((
+                ship::Fleet {
+                    delta_v_remaining: 500_000.0,
+                    name: "Earth Garrison".to_string(),
+                },
+                ship::FleetLocation::AtBody(earth),
+                ship::Faction::Enemy,
+                ship::FlightPlan::default(),
+            ))
+            .with_children(|builder| {
+                for _ in 0..15 {
+                    builder.spawn(ship::LogicalShip);
+                }
+            });
     }
 
     // Second pass: spawn labels and orbit gizmos (now we can look up parent entities)
@@ -416,14 +417,9 @@ fn update_orbit_positions(
 // Coordinate Conversion & Position Resolution
 // ============================================================================
 
-/// Converts physics coordinates (meters) to visual coordinates.
+/// Converts physics coordinates (meters) to visual coordinates (1:1 meters).
 pub fn phys_to_visual(v: Vector3) -> Vec3 {
-    let scale = VISUAL_SCALE / *AU;
-    Vec3::new(
-        (v.x * scale) as f32,
-        (v.y * scale) as f32,
-        (v.z * scale) as f32,
-    )
+    Vec3::new(v.x as f32, v.y as f32, v.z as f32)
 }
 
 /// Recursively resolves a body's absolute position in visual coordinates using entity keys.
@@ -527,17 +523,26 @@ fn render_system(body_query: Query<(&Body, &ComputedBody)>, mut painter: ShapePa
 }
 
 /// Computes the display radius for a body based on camera scale.
-/// Uses logarithmic scaling so all bodies remain visible, with a minimum of true physical size.
+/// Bodies are shown at fixed screen fraction when zoomed out, physical size when zoomed in.
 fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
     let log_radius = (body.radius as f32).log10();
     let log_scaled_size = ((log_radius - 4.0).max(1.0) * 1.5).min(8.0) * cam_scale;
-    let phys_radius = (body.radius * VISUAL_SCALE / *AU) as f32;
+    let phys_radius = body.radius as f32;
     log_scaled_size.max(phys_radius)
 }
 
 // ============================================================================
 // Body Click Detection
 // ============================================================================
+
+// /// Computes the display radius for a body based on camera scale.
+// /// Bodies are shown at fixed screen fraction when zoomed out, physical size when zoomed in.
+// fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
+//     let phys_radius = body.radius as f32;
+//     // Screen-space size: ~20 pixels (scale = world units per pixel)
+//     let screen_size = cam_scale * 20.0;
+//     phys_radius.max(screen_size)
+// }
 
 /// Detects clicks on fleets or bodies.
 /// - Click: select fleet if one is at click location
@@ -559,14 +564,19 @@ fn handle_body_click(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok((camera, camera_transform)) = camera_query.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
 
     let shift_held = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
 
     if shift_held {
         // Shift+click: open transfer popup for body
-        let selected_fleet = fleet_query.iter()
+        let selected_fleet = fleet_query
+            .iter()
             .filter(|(_, _, _, faction)| **faction == ship::Faction::Player)
             .find(|(e, _, _, _)| selected_query.get(*e).is_ok());
         let current_entity = selected_fleet.map(|(_, _, loc, _)| loc.effective_body());
@@ -580,7 +590,8 @@ fn handle_body_click(
                 continue;
             }
 
-            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position) else {
+            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position)
+            else {
                 continue;
             };
 
@@ -613,7 +624,10 @@ fn handle_body_click(
             if *faction != ship::Faction::Player {
                 continue;
             }
-            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position) else { continue };
+            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position)
+            else {
+                continue;
+            };
 
             let screen_dist = cursor_pos.distance(screen_pos);
             if screen_dist <= 20.0 {

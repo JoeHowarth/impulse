@@ -17,6 +17,7 @@ use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
 
 use crate::ComputedBody;
+use crate::camera::CameraScale;
 use crate::orbital_data::{Body, MU_SUN};
 use crate::simulation::SimulationTime;
 use crate::transfer::{TransferSolution, propagate_kepler_full};
@@ -801,11 +802,11 @@ pub const FLEET_PLAYER_UNSELECTED: Color = Color::srgba(0.3, 0.8, 0.3, 0.6);
 pub const FLEET_ENEMY_SELECTED: Color = Color::srgb(1.0, 0.3, 0.3);
 pub const FLEET_ENEMY_UNSELECTED: Color = Color::srgba(0.8, 0.2, 0.2, 0.6);
 
-/// Fleet size in visual units
-pub const FLEET_SIZE: f32 = 3.0;
+/// Fleet size in pixels (scale = world units per pixel)
+const FLEET_SIZE_PIXELS: f32 = 10.0;
 
-/// Offset distance from body center for fleets
-const FLEET_OFFSET_DISTANCE: f32 = 6.0;
+/// Offset distance in pixels
+const FLEET_OFFSET_PIXELS: f32 = 10.0;
 
 /// Computes visual positions for all fleets, offsetting multiple fleets at the same body.
 /// Returns a map from fleet entity to (world_position, velocity_direction).
@@ -813,11 +814,13 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
     ships: &Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction), F>,
     bodies: &Query<&ComputedBody>,
     sim_time: &SimulationTime,
+    cam_scale: f32,
 ) -> bevy::platform::collections::HashMap<Entity, (Vec3, Vec3)> {
     use bevy::platform::collections::HashMap;
     use std::f32::consts::PI;
 
     let mut positions = HashMap::new();
+    let offset_distance = cam_scale * FLEET_OFFSET_PIXELS;
 
     // First pass: count fleets at each body
     let mut fleets_at_body: HashMap<Entity, Vec<Entity>> = HashMap::new();
@@ -843,12 +846,12 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
                 // Compute offset angle for this fleet
                 let offset = if fleet_count == 1 {
                     // Single fleet: offset to the right
-                    Vec3::new(FLEET_OFFSET_DISTANCE * size_mult, 0.0, 0.0)
+                    Vec3::new(offset_distance * size_mult, 0.0, 0.0)
                 } else {
                     // Multiple fleets: fan out in a semicircle (top half)
                     let angle = PI * 0.25 + (fleet_index as f32 / (fleet_count - 1).max(1) as f32) * PI * 0.5;
-                    let x = FLEET_OFFSET_DISTANCE * size_mult * angle.cos();
-                    let y = FLEET_OFFSET_DISTANCE * size_mult * angle.sin();
+                    let x = offset_distance * size_mult * angle.cos();
+                    let y = offset_distance * size_mult * angle.sin();
                     Vec3::new(x, y, 0.0)
                 };
 
@@ -892,8 +895,9 @@ pub fn update_fleet_positions(
     fleets: Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction)>,
     bodies: Query<&ComputedBody>,
     sim_time: Res<SimulationTime>,
+    cam_scale: Res<CameraScale>,
 ) {
-    let positions = compute_fleet_positions(&fleets, &bodies, &sim_time);
+    let positions = compute_fleet_positions(&fleets, &bodies, &sim_time, cam_scale.0);
 
     for (fleet_entity, _, _, _, _) in &fleets {
         if let Some((position, velocity_dir)) = positions.get(&fleet_entity) {
@@ -910,12 +914,22 @@ const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
 
 /// Renders fleets as triangles at their current positions.
 /// Reads from ComputedFleetPosition (updated by update_fleet_positions).
+/// Skipped during tactical combat (tactical.rs handles ship rendering).
 pub fn render_fleets(
+    combat: Res<CombatState>,
     fleets: Query<(Entity, &ComputedFleetPosition, Option<&Selected>, &Faction)>,
     children_query: Query<&Children>,
     logical_ships: Query<&LogicalShip>,
+    cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
+    // Skip strategic fleet rendering during tactical mode
+    if combat.active {
+        return;
+    }
+
+    let fleet_size = cam_scale.0 * FLEET_SIZE_PIXELS;
+
     for (fleet_entity, computed, is_selected, faction) in &fleets {
         let is_selected = is_selected.is_some();
         let size_mult = if is_selected { 1.3 } else { 1.0 };
@@ -938,10 +952,10 @@ pub fn render_fleets(
 
         painter.set_color(color);
 
-        // Draw an isoceles triangle
-        let half_base = FLEET_SIZE * 0.5 * size_mult;
-        let height = FLEET_SIZE * size_mult;
-        painter.thickness = if is_selected { 0.8 } else { 0.5 };
+        // Draw an isoceles triangle (size scales with camera)
+        let half_base = fleet_size * 0.5 * size_mult;
+        let height = fleet_size * size_mult;
+        painter.thickness = fleet_size * 0.1; // Line thickness scales too
         painter.line(
             Vec3::new(0.0, height * 0.5, 0.0),
             Vec3::new(-half_base, -height * 0.5, 0.0),
@@ -960,7 +974,7 @@ pub fn render_fleets(
             painter.set_rotation(Quat::IDENTITY);
             let count_pos = computed.position + Vec3::new(0.0, -height * 0.8, 0.0);
             let count = ship_count(fleet_entity, &children_query, &logical_ships);
-            draw_number(&mut painter, count as usize, count_pos, 2.0);
+            draw_number(&mut painter, count as usize, count_pos, fleet_size * 0.5);
         }
     }
 }
@@ -970,13 +984,23 @@ const ENEMY_MARKER_COLOR: Color = Color::srgba(0.8, 0.2, 0.2, 0.6);
 
 /// Renders enemy presence markers at bodies with enemy fleets.
 /// Shows red rings around occupied bodies.
+/// Skipped during tactical combat.
 pub fn render_objectives(
+    combat: Res<CombatState>,
     fleets: Query<(Entity, &FleetLocation, &Faction)>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
     bodies: Query<&ComputedBody>,
+    cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
+    // Skip during tactical mode
+    if combat.active {
+        return;
+    }
+
+    let cam_scale = cam_scale.0;
+
     // Collect bodies with enemy fleets
     let mut enemy_bodies: bevy::platform::collections::HashSet<Entity> = bevy::platform::collections::HashSet::new();
     let mut total_enemy_fleets = 0u32;
@@ -1002,12 +1026,13 @@ pub fn render_objectives(
         };
 
         let pos = computed.position;
-        let ring_radius = computed.display_size + 5.0;
+        // Ring slightly larger than body display size (5 pixels)
+        let ring_radius = computed.display_size + cam_scale * 5.0;
 
         painter.set_translation(pos);
         painter.set_rotation(Quat::IDENTITY);
         painter.set_color(ENEMY_MARKER_COLOR);
-        painter.thickness = 1.5;
+        painter.thickness = cam_scale * 1.5;
         painter.hollow = true;
         painter.circle(ring_radius);
     }
@@ -1018,9 +1043,10 @@ pub fn render_objectives(
     if total_enemy_fleets > 0 {
         // Draw a small indicator showing fleet count at origin offset
         // This will be replaced by proper UI text later
-        painter.set_translation(Vec3::new(-45.0, 45.0, 0.0));
+        let num_offset = cam_scale * 45.0;
+        painter.set_translation(Vec3::new(-num_offset, num_offset, 0.0));
         painter.set_color(ENEMY_MARKER_COLOR);
-        draw_number(&mut painter, total_enemy_fleets as usize, Vec3::ZERO, 4.0);
+        draw_number(&mut painter, total_enemy_fleets as usize, Vec3::ZERO, cam_scale * 4.0);
     }
 }
 
@@ -1029,8 +1055,11 @@ pub fn render_departure_markers(
     transfers: Query<&transfer_vis::Transfer>,
     fleets: Query<&FleetLocation>,
     sim_time: Res<SimulationTime>,
+    cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
+    let cam_scale = cam_scale.0;
+
     for transfer in &transfers {
         // Only show marker if transfer hasn't started yet
         if transfer.departure_time <= sim_time.sim_time {
@@ -1050,10 +1079,10 @@ pub fn render_departure_markers(
         painter.set_translation(departure_pos);
         painter.set_rotation(Quat::IDENTITY);
         painter.set_color(DEPARTURE_MARKER_COLOR);
-        painter.thickness = 0.8;
+        painter.thickness = cam_scale * 0.8;
 
-        // Draw X
-        let size = 2.5;
+        // Draw X (size in pixels)
+        let size = cam_scale * 5.0;
         painter.line(Vec3::new(-size, -size, 0.0), Vec3::new(size, size, 0.0));
         painter.line(Vec3::new(-size, size, 0.0), Vec3::new(size, -size, 0.0));
     }
@@ -1069,8 +1098,11 @@ const QUEUE_ARC_COLOR: Color = Color::srgba(1.0, 0.6, 0.2, 0.4);
 pub fn render_plan_markers(
     fleets: Query<&FlightPlan>,
     bodies: Query<&ComputedBody>,
+    cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
+    let cam_scale = cam_scale.0;
+
     for plan in &fleets {
         for (index, leg) in plan.legs.iter().enumerate() {
             // Get target body position
@@ -1084,17 +1116,17 @@ pub fn render_plan_markers(
             painter.set_translation(pos);
             painter.set_rotation(Quat::IDENTITY);
             painter.set_color(QUEUE_MARKER_COLOR);
-            painter.thickness = 1.0;
+            painter.thickness = cam_scale * 1.0;
 
-            // Circle around the waypoint
-            let radius = 8.0;
+            // Circle around the waypoint (8 pixels)
+            let radius = cam_scale * 8.0;
             painter.hollow = true;
             painter.circle(radius);
 
             // Draw the number (1-indexed) as simple lines
             let num = index + 1;
-            let offset = Vec3::new(0.0, -2.0, 0.0);
-            draw_number(&mut painter, num, pos + offset, 3.0);
+            let offset = Vec3::new(0.0, cam_scale * -2.0, 0.0);
+            draw_number(&mut painter, num, pos + offset, cam_scale * 3.0);
         }
     }
 }
@@ -1104,8 +1136,11 @@ pub fn render_plan_arcs(
     fleets: Query<(&FleetLocation, &FlightPlan)>,
     lut: Res<TransferLut>,
     bodies: Query<&Body>,
+    cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
+    let cam_scale = cam_scale.0;
+
     for (location, plan) in &fleets {
         // Only render uncommitted legs (index >= committed_count)
         for i in plan.committed_count..plan.legs.len() {
@@ -1127,9 +1162,9 @@ pub fn render_plan_arcs(
                 continue;
             };
 
-            // Draw a simplified arc
+            // Draw a simplified arc (thickness scales with camera)
             painter.set_color(QUEUE_ARC_COLOR);
-            painter.thickness = 1.0;
+            painter.thickness = cam_scale * 2.0;
 
             let num_segments = 100;
             let tof = solution.time_of_flight;

@@ -12,6 +12,7 @@ use bevy_vector_shapes::prelude::*;
 use astrora_core::core::Vector3;
 
 use crate::{
+    camera::CameraScale,
     orbital_data::MU_SUN,
     transfer::{TransferSolution, propagate_kepler},
     simulation::SimulationTime,
@@ -206,8 +207,11 @@ fn create_transfer_arc(solution: &TransferSolution, mu: f64) -> GizmoAsset {
 pub fn render_burn_arrows(
     transfers: Query<&Transfer>,
     markers: Query<&BurnMarker>,
+    cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
+    let cam_scale = cam_scale.0;
+
     for marker in markers.iter() {
         let Ok(transfer) = transfers.get(marker.transfer) else {
             continue;
@@ -229,9 +233,10 @@ pub fn render_burn_arrows(
             ARRIVAL_COLOR
         };
 
-        // Scale arrow length by delta-v magnitude
+        // Scale arrow length by delta-v magnitude (in pixels, then scaled)
         let dv_mag = marker.delta_v.norm();
-        let arrow_len = (dv_mag / 1000.0).clamp(2.0, 15.0) as f32;
+        let arrow_len_pixels = (dv_mag / 1000.0).clamp(5.0, 30.0) as f32;
+        let arrow_len = cam_scale * arrow_len_pixels;
 
         // Direction of delta-v in visual space
         let dv_dir = Vec3::new(
@@ -244,7 +249,7 @@ pub fn render_burn_arrows(
         // Draw the arrow
         painter.set_translation(position);
         painter.set_color(color);
-        painter.thickness = 0.3;
+        painter.thickness = cam_scale * 0.5;
         painter.line(Vec3::ZERO, dv_dir * arrow_len);
 
         // Draw arrowhead (small lines at angle)
@@ -260,7 +265,7 @@ pub fn render_burn_arrows(
         painter.line(arrow_end, arrow_end + head_back - perp * head_size * 0.5);
 
         // Draw a circle marker at the position (departure=green, arrival=red)
-        painter.circle(1.5);
+        painter.circle(cam_scale * 3.0);
     }
 }
 

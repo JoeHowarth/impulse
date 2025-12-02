@@ -176,20 +176,7 @@ pub fn update_time_ui(
     // Update speed text
     if let Ok(mut text) = speed_query.single_mut() {
         let status = if sim_time.paused { "PAUSED" } else { "RUNNING" };
-        let scale = sim_time.time_scale;
-
-        // Format scale nicely
-        let scale_str = if scale >= 1.0 {
-            format!("{:.0}x", scale)
-        } else {
-            // Format without trailing zeros (0.125 not 0.125000)
-            let num = format!("{:.3}", scale)
-                .trim_end_matches('0')
-                .trim_end_matches('.')
-                .to_string();
-            format!("{}x", num)
-        };
-
+        let scale_str = crate::simulation::format_time_scale(sim_time.time_scale);
         **text = format!("{} {}", scale_str, status);
     }
 }
