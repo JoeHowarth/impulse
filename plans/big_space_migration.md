@@ -4,35 +4,121 @@
 
 Integrate big_space 0.11 to solve f32 precision limitations when rendering at solar system scale while zooming to tactical scale (100m ships, 0.1m projectiles).
 
-**Core insight**: The precision problem is *only* in the rendering pipeline. Orbital mechanics (f64) and Avian3D physics (f64) are fine. We need big_space to compute camera-relative GlobalTransforms so nearby objects have precise f32 coordinates regardless of their absolute heliocentric position.
+**Core insight**: The precision problem affects both rendering AND physics sync. While Avian3D uses f64 Position internally, its sync systems read/write through f32 GlobalTransform/Transform, losing precision. We need:
+1. big_space to compute camera-relative GlobalTransforms for rendering
+2. Custom Avian sync systems that preserve f64 precision via CellCoord
 
 ## Architecture
 
 ```
-f64 orbital mechanics ──┐
-                        ├──► Grid::translation_to_grid() ──► (GridCell, Transform) ──► GlobalTransform (camera-relative)
-Avian3D f64 physics ────┘
+f64 orbital mechanics ──► Grid::translation_to_grid() ──► (CellCoord, Transform)
+                                                                  │
+                                                                  ▼
+                                                          GlobalTransform (f32, camera-relative for rendering)
+
+Avian3D f64 Position ◄──► (CellCoord, Transform)  [custom sync, NOT through GlobalTransform]
 ```
 
-### Grid Structure
+## Avian3D Integration (Critical)
+
+### The Problem
+
+Avian's built-in sync systems are broken for big_space:
+
+1. **`transform_to_position`** (runs before physics):
+   - Reads from `GlobalTransform` (f32, camera-relative in big_space!)
+   - Writes to `Position` (f64)
+   - **Problem**: GlobalTransform is relative to FloatingOrigin, not world space
+
+2. **`position_to_transform`** (runs after physics):
+   - Reads from `Position` (f64)
+   - Writes to `Transform.translation` via `.f32()` (lossy!)
+   - **Problem**: Precision loss at planetary distances
+
+### The Solution
+
+Disable both Avian sync systems and replace with big_space-aware versions:
+
+```rust
+// In plugin setup:
+app.insert_resource(PhysicsTransformConfig {
+    transform_to_position: false,  // We'll handle this
+    position_to_transform: false,  // We'll handle this
+    ..default()
+});
+```
+
+**Replacement system 1: `cell_transform_to_position`** (before physics)
+```rust
+/// Syncs CellCoord + Transform → Avian Position (preserving f64 precision)
+fn cell_transform_to_position(
+    grids: Query<&Grid>,
+    mut bodies: Query<(&ChildOf, &CellCoord, &Transform, &mut Position), Changed<Transform>>,
+) {
+    for (parent, cell, transform, mut position) in &mut bodies {
+        let Ok(grid) = grids.get(parent.parent()) else { continue };
+        // Compute world-space f64 position from cell + local transform
+        let world_pos: DVec3 = grid.grid_position_double(cell, transform);
+        position.0 = world_pos;
+    }
+}
+```
+
+**Replacement system 2: `position_to_cell_transform`** (after physics)
+```rust
+/// Syncs Avian Position → CellCoord + Transform (preserving f64 precision)
+fn position_to_cell_transform(
+    grids: Query<&Grid>,
+    mut bodies: Query<(&ChildOf, &mut CellCoord, &mut Transform, &Position), Changed<Position>>,
+) {
+    for (parent, mut cell, mut transform, position) in &mut bodies {
+        let Ok(grid) = grids.get(parent.parent()) else { continue };
+        // Convert world-space f64 position to cell + small local transform
+        let (new_cell, local) = grid.translation_to_grid(position.0);
+        *cell = new_cell;
+        transform.translation = local;
+    }
+}
+```
+
+### Why World-Space Position (Not Arena-Local)
+
+We considered keeping Position in arena-local coordinates, but:
+- Avian expects Position in world space for collision detection, spatial queries
+- Multiple simultaneous battles would have ships at overlapping local coordinates
+- World-space Position with f64 naturally separates battles by millions of km
+
+With world-space Position:
+- Each ship's Position is heliocentric (huge values, but f64 handles it)
+- Avian physics works correctly (all ships in same coordinate space)
+- CellCoord + Transform gives precise rendering via big_space
+
+### Grid Structure (Simplified)
+
+With world-space Position, ships don't need a subgrid - they can live in the main heliocentric grid:
 
 ```
 BigSpace (root)
-└── Grid<i64> (heliocentric, cell_size ~1e9m)
-    ├── Sun (GridCell + Transform)
-    ├── Earth (GridCell + Transform)
-    ├── Mars (GridCell + Transform)
-    ├── Fleet entities (GridCell + Transform)
-    ├── ... all bodies flat
-    │
-    └── TacticalArena (GridCell + Transform + Grid<i64>)  ← subgrid
-        ├── VisualShip (GridCell + Transform)  ← NOT just local Transform
-        ├── VisualShip (GridCell + Transform)
-        └── Projectile (GridCell + Transform)
+└── Grid (heliocentric, cell_edge_length ~10,000m for tactical precision)
+    ├── Camera + FloatingOrigin (CellCoord + Transform)
+    ├── Sun (CellCoord + Transform)
+    ├── Earth (CellCoord + Transform)
+    ├── Mars (CellCoord + Transform)
+    ├── Fleet entities (CellCoord + Transform)
+    ├── VisualShip (CellCoord + Transform + Position) ← physics entity
+    ├── VisualShip (CellCoord + Transform + Position)
+    └── Projectile (CellCoord + Transform + Position)
 ```
 
-- **Flat grid for bodies**: All celestial bodies in one heliocentric grid (no nesting)
-- **Subgrid for TacticalArena**: Ships/projectiles get GridCell + Transform (not just local Transform) because GlobalTransform propagation loses precision NOW - we need GridCell precision for the subgrid too
+**Key insight**: big_space computes GlobalTransform relative to FloatingOrigin's cell. If camera is near the tactical arena, ships near the camera automatically have precise GlobalTransforms. No subgrid needed.
+
+**TacticalArena** becomes a simple marker component (not a Grid):
+- Used for organizational grouping (spawn/cleanup)
+- Tracks which body the battle is at
+- Camera follows arena position by updating its own CellCoord
+
+**Cell edge length**: ~10,000m gives sub-meter precision within each cell, sufficient for 100m ships and 0.1m projectiles.
+
 - **Future**: When multi-SOI support is added, bodies could become subgrids
 
 ### High-Precision Caching
@@ -58,7 +144,7 @@ This replaces `ComputedBody.position: Vec3` with f64-precision data that other s
 
 ### Phase 1: Plugin Setup & Camera
 
-**Files**: `src/main.rs`, `src/camera.rs`
+**Files**: `src/main.rs`, `src/camera.rs`, `src/physics.rs`
 
 1. Disable Bevy's TransformPlugin, add BigSpaceDefaultPlugins:
    ```rust
@@ -66,9 +152,22 @@ This replaces `ComputedBody.position: Vec3` with f64-precision data that other s
    BigSpaceDefaultPlugins,
    ```
 
-2. Create BigSpace root in setup, spawn camera with FloatingOrigin:
+2. Disable Avian's built-in transform sync (we'll replace it later):
    ```rust
-   commands.spawn_big_space_default(|root| {
+   app.insert_resource(PhysicsTransformConfig {
+       transform_to_position: false,
+       position_to_transform: false,
+       ..default()
+   });
+   ```
+
+3. Configure Grid with appropriate cell size for tactical precision:
+   ```rust
+   let grid = Grid::new(
+       10_000.0,  // cell_edge_length: 10km cells
+       100.0,     // switching_threshold: recenter when 100m past cell edge
+   );
+   commands.spawn_big_space(grid, |root| {
        root.spawn_spatial((
            Camera3d::default(),
            FloatingOrigin,
@@ -79,7 +178,7 @@ This replaces `ComputedBody.position: Vec3` with f64-precision data that other s
    });
    ```
 
-3. Update `animate_camera` to work with GridCell-aware transforms (camera moves between cells as it pans across solar system)
+4. Update `animate_camera` to work with CellCoord-aware transforms (camera moves between cells as it pans across solar system)
 
 **Validation**: Camera should render at origin, can pan around (even if nothing else works yet)
 
@@ -181,55 +280,82 @@ This replaces `ComputedBody.position: Vec3` with f64-precision data that other s
 
 ---
 
-### Phase 5: Tactical Mode with Subgrid
+### Phase 5: Tactical Mode & Avian Sync Systems
 
-**Files**: `src/tactical.rs`, `src/picking.rs`
+**Files**: `src/tactical.rs`, `src/physics.rs`, `src/picking.rs`
 
-1. TacticalArena becomes a Grid:
+**Key change**: No subgrid needed. Ships live in the main heliocentric grid with world-space Position. Custom sync systems bridge Avian ↔ big_space.
+
+1. **Add custom Avian sync systems** (see "Avian3D Integration" section above):
    ```rust
-   let (arena_cell, arena_local) = root_grid.translation_to_grid(body_helio_pos + offset);
+   // In physics.rs or tactical.rs
+   app.add_systems(
+       FixedPostUpdate,
+       cell_transform_to_position
+           .in_set(PhysicsTransformSystems::TransformToPosition),
+   );
+   app.add_systems(
+       FixedPostUpdate,
+       position_to_cell_transform
+           .in_set(PhysicsTransformSystems::PositionToTransform),
+   );
+   ```
+
+2. **TacticalArena is now just a marker** (not a Grid):
+   ```rust
    commands.spawn((
-       TacticalArena { ... },
-       Grid::<i64>::default(),  // subgrid for tactical entities
-       arena_cell,
-       Transform::from_translation(arena_local),
+       TacticalArena { body: body_entity, ... },
+       // No Grid component - ships are in main grid
    ));
    ```
 
-2. VisualShips spawn with GridCell + Transform in arena's grid:
+3. **VisualShips spawn in the main grid** with CellCoord + Position:
    ```rust
-   // Ships need GridCell because GlobalTransform propagation loses precision
-   let ship_pos_arena_local = DVec3::new(x_offset, y_offset, 0.0);
-   let (ship_cell, ship_local) = arena_grid.translation_to_grid(ship_pos_arena_local);
+   let ship_helio_pos: DVec3 = body_helio_pos + DVec3::new(x_offset, y_offset, 0.0);
+   let (ship_cell, ship_local) = grid.translation_to_grid(ship_helio_pos);
 
-   commands.entity(arena).with_children(|builder| {
-       builder.spawn((
-           VisualShip { ... },
-           ship_cell,
-           Transform::from_translation(ship_local),
-       ));
-   });
+   // Spawn as child of BigSpace root, not arena
+   root.spawn_spatial((
+       VisualShip { ... },
+       ship_cell,
+       Transform::from_translation(ship_local),
+       Position(ship_helio_pos),  // Avian physics component
+       RigidBody::Dynamic,
+       // ... other physics components
+   ));
    ```
 
-3. `update_arena_position`:
-   - Recompute arena's GridCell + Transform from body position each frame
-   - Camera tracking: update camera's GridCell to match arena's cell
-   - No delta-based translation - set absolute position from orbital mechanics
+4. **Camera tracks arena** by updating its CellCoord:
+   ```rust
+   fn update_camera_for_tactical(
+       arena: Query<&TacticalArena>,
+       bodies: Query<&ComputedPosition, With<Body>>,
+       mut camera: Query<(&mut CellCoord, &mut Transform), With<FloatingOrigin>>,
+       grid: Query<&Grid, With<BigSpace>>,
+   ) {
+       // Move camera's CellCoord to match arena body position
+       let body_pos = bodies.get(arena.body).unwrap().helio_pos;
+       let (cell, local) = grid.translation_to_grid(body_pos + arena_offset);
+       camera.cell = cell;
+       camera.transform.translation = local;
+   }
+   ```
 
-4. Ship movement (when Avian physics moves ships):
-   - Read Position from Avian (DVec3)
-   - Convert to GridCell + Transform via arena_grid.translation_to_grid()
-   - GlobalTransform will be precise because it's relative to FloatingOrigin
+5. **Ship movement**: Avian updates Position (f64), our sync system writes CellCoord + Transform
 
-5. Tactical picking:
-   - `screen_to_arena_local` converts screen ray to arena-local DVec3
-   - Compare against ship positions using high-precision ComputedPosition
+6. **Tactical picking**: Use GlobalTransform (now precise because camera is nearby)
 
-6. Projectiles (future):
-   - Spawn with GridCell + Transform in arena grid
-   - 0.1m precision works because local Transform values are small
+7. **Remove the 100,000x scaling hack** - real values work now:
+   - Ship size: 100m
+   - Ship spacing: 1km
+   - Acceleration: 10 m/s² (1g)
+   - Max speed: 50 km/s
 
-**Validation**: Can enter tactical, ships render at correct positions, can select ships, picking works, ships can move without jitter
+**Validation**:
+- Ships render at correct positions without jitter
+- Ship movement works with real (non-scaled) values
+- Can select ships, picking works
+- Test at Mercury, Venus, AND Neptune distances
 
 ---
 
@@ -267,11 +393,12 @@ This replaces `ComputedBody.position: Vec3` with f64-precision data that other s
 | File | Changes |
 |------|---------|
 | `src/main.rs` | Plugin setup, BigSpace spawn, body position system, render_system |
-| `src/camera.rs` | FloatingOrigin, animate_camera with GridCell awareness |
-| `src/ship.rs` | Fleet GridCell, position computation, all render functions |
-| `src/tactical.rs` | Arena as subgrid, VisualShip local transforms, arena tracking |
-| `src/picking.rs` | Likely minimal changes (GlobalTransform still works) |
-| `src/ui.rs` | Likely minimal changes (world_to_viewport still works) |
+| `src/camera.rs` | FloatingOrigin, animate_camera with CellCoord awareness |
+| `src/physics.rs` | **NEW**: Custom Avian sync systems (cell_transform_to_position, position_to_cell_transform), PhysicsTransformConfig |
+| `src/ship.rs` | Fleet CellCoord, position computation, all render functions |
+| `src/tactical.rs` | Simplified arena (no subgrid), spawn ships in main grid, camera tracking, **remove 100,000x scaling hack** |
+| `src/picking.rs` | Minimal changes (GlobalTransform still works) |
+| `src/ui.rs` | Minimal changes (world_to_viewport still works) |
 | `src/transfer_vis.rs` | Arc rendering, burn arrows |
 
 ---
@@ -297,6 +424,24 @@ This replaces `ComputedBody.position: Vec3` with f64-precision data that other s
 - Zooming doesn't change position, only scale
 - Should work fine
 
+### Avian sync system ordering
+- Our custom sync systems must run in the correct Avian system sets
+- `cell_transform_to_position` in `PhysicsTransformSystems::TransformToPosition`
+- `position_to_cell_transform` in `PhysicsTransformSystems::PositionToTransform`
+- If ordering is wrong, physics may see stale positions or transforms may lag
+
+### Avian + big_space recentering interaction
+- big_space's `recenter_large_transforms` runs in PostUpdate on Changed<Transform>
+- Our `position_to_cell_transform` also writes to Transform (and CellCoord)
+- These should not conflict since we set both CellCoord and Transform atomically
+- But verify that we don't trigger infinite change detection loops
+
+### Multiple simultaneous battles
+- With world-space Position, battles at different planets are naturally separated
+- Ships at Mercury vs Neptune are millions of km apart in Position space
+- No collision layer hacks needed
+- Camera FloatingOrigin should only affect rendering, not physics
+
 ---
 
 ## Implementation Approach
@@ -307,7 +452,7 @@ This replaces `ComputedBody.position: Vec3` with f64-precision data that other s
 - Phase 2 (Bodies): Bodies render at correct positions
 - Phase 3 (Rendering): All visual systems work
 - Phase 4 (Click/UI): Interaction works
-- Phase 5 (Tactical): Tactical mode works with subgrid
+- Phase 5 (Tactical + Avian): Custom Avian sync, tactical mode works, **remove scaling hack**
 - Phase 6 (Fleets): Full game functionality restored
 
 ## Testing Strategy
