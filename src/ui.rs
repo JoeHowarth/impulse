@@ -58,6 +58,10 @@ pub struct SimDateText;
 #[derive(Component)]
 pub struct SimSpeedText;
 
+/// Marker for the zoom scale text
+#[derive(Component)]
+pub struct ZoomScaleText;
+
 /// Spawns the time control UI panel in the bottom-left corner.
 pub fn spawn_time_panel(commands: &mut Commands) {
     commands
@@ -95,6 +99,17 @@ pub fn spawn_time_panel(commands: &mut Commands) {
                 },
                 TextColor(Color::srgba(0.6, 0.7, 0.8, 1.0)),
                 SimSpeedText,
+            ));
+
+            // Zoom scale display
+            parent.spawn((
+                Text::new("100px = 1 AU"),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.5, 0.6, 0.7, 1.0)),
+                ZoomScaleText,
             ));
 
             // Controls hint
@@ -157,8 +172,10 @@ pub fn update_labels(
 /// Updates the time control UI with current simulation state.
 pub fn update_time_ui(
     sim_time: Res<SimulationTime>,
-    mut date_query: Query<&mut Text, (With<SimDateText>, Without<SimSpeedText>)>,
-    mut speed_query: Query<&mut Text, (With<SimSpeedText>, Without<SimDateText>)>,
+    cam_scale: Res<crate::camera::CameraScale>,
+    mut date_query: Query<&mut Text, (With<SimDateText>, Without<SimSpeedText>, Without<ZoomScaleText>)>,
+    mut speed_query: Query<&mut Text, (With<SimSpeedText>, Without<SimDateText>, Without<ZoomScaleText>)>,
+    mut zoom_query: Query<&mut Text, (With<ZoomScaleText>, Without<SimDateText>, Without<SimSpeedText>)>,
 ) {
     // Convert simulation seconds to days since J2000
     let days = sim_time.sim_time / (60.0 * 60.0 * 24.0);
@@ -178,6 +195,32 @@ pub fn update_time_ui(
         let status = if sim_time.paused { "PAUSED" } else { "RUNNING" };
         let scale_str = crate::simulation::format_time_scale(sim_time.time_scale);
         **text = format!("{} {}", scale_str, status);
+    }
+
+    // Update zoom scale text
+    // cam_scale.0 = world units (meters) per pixel
+    // So 100 pixels = cam_scale.0 * 100 meters
+    if let Ok(mut text) = zoom_query.single_mut() {
+        let meters_per_100px = cam_scale.0 * 100.0;
+        **text = format!("100px = {}", format_distance(meters_per_100px as f64));
+    }
+}
+
+/// Formats a distance in meters to a human-readable string.
+fn format_distance(meters: f64) -> String {
+    const AU: f64 = 1.495978707e11; // meters per AU
+    const KM: f64 = 1000.0;
+
+    if meters >= AU * 0.1 {
+        format!("{:.2} AU", meters / AU)
+    } else if meters >= KM * 1_000_000.0 {
+        format!("{:.1}M km", meters / (KM * 1_000_000.0))
+    } else if meters >= KM * 1000.0 {
+        format!("{:.0}k km", meters / (KM * 1000.0))
+    } else if meters >= KM {
+        format!("{:.1} km", meters / KM)
+    } else {
+        format!("{:.0} m", meters)
     }
 }
 

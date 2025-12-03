@@ -37,7 +37,7 @@ TacticalArena (exists during combat only)
 
 See `plans/tactical-physics.md` for full details.
 
-- Avian 2D with f64 precision
+- Avian 3D with f64 precision
 - 1 unit = 1 meter
 - Linear CCD on all entities (handles high-speed collisions)
 - Gravity disabled (ship thrust dominates in tactical)
@@ -139,7 +139,9 @@ Spawn static enemy fleets at certain bodies.
 - [x] Enemy fleets have LogicalShip children
 - [x] Enemy fleets visible on map (even if same color for now)
 
-**Completed.** Player starts at Saturn (10 ships). Enemy garrisons at Ceres (5), Mars (10), Earth (15). Faction-based colors: green for player, imperial red for enemy. Victory condition changed to "destroy all enemy fleets" with red rings around enemy-occupied bodies.
+**Completed.** Faction-based colors: green for player, imperial red for enemy. Victory condition changed to "destroy all enemy fleets" with red rings around enemy-occupied bodies.
+
+*Note: For f32 precision testing, spawn locations temporarily changed to Venus (player, 10 ships) and Mercury (enemy, 10 ships). Original plan was Saturn/Ceres/Mars/Earth.*
 
 ---
 
@@ -285,7 +287,7 @@ Draw individual ships in tactical view.
 - [x] Player vs enemy visually distinct
 - [x] Ships visible at tactical zoom level
 
-**Completed.** Ships render as triangles using ShapePainter (1000km size for visibility). Green for player, red for enemy.
+**Completed.** Ships render as triangles using ShapePainter with LOD system. Green for player, red for enemy. White ring indicator on selected ships.
 
 ---
 
@@ -330,34 +332,37 @@ pub struct Selected;  // Reuse existing? Or new TacticalSelected?
 ## Step 2.8a: Avian Setup
 
 ### Goal
-Integrate Avian 2D physics engine.
+Integrate Avian 3D physics engine with f64 precision.
 
 ### Changes Required
 
 **1. Cargo.toml**
 ```toml
 [dependencies]
-avian2d = { version = "0.4", features = ["f64"] }
+avian3d = { version = "0.3", features = ["f64"] }
 ```
 
 **2. main.rs - Plugin setup**
 ```rust
-use avian2d::prelude::*;
+use avian3d::prelude::*;
 
 app.add_plugins(PhysicsPlugins::default())
-   .insert_resource(Gravity(Vec2::ZERO));
+   .insert_resource(Gravity(DVec3::ZERO));
 ```
 
-**3. Test with large coordinates**
-- Spawn test bodies at ~10^11 meter positions
-- Verify collisions still work
-- Remove test after confirming
+**3. VisualShip physics components**
+- RigidBody::Dynamic
+- Collider (sphere, 50m radius)
+- LinearVelocity, SweptCcd
+- SleepingDisabled (ships always active)
 
 ### Verification
-- [ ] Avian compiles and runs
-- [ ] Gravity disabled
-- [ ] f64 precision enabled
-- [ ] Large coordinate test passes
+- [x] Avian3D compiles and runs
+- [x] Gravity disabled
+- [x] f64 precision enabled
+- [x] VisualShips spawn with physics components
+
+**Completed.** Avian3D integrated with f64 precision. Ships have RigidBody, Collider, LinearVelocity, SweptCcd.
 
 ---
 
@@ -368,26 +373,29 @@ Right-click to set destination, ships move toward it.
 
 ### Changes Required
 
-**1. Destination component**
+**1. MoveOrder component**
 ```rust
 #[derive(Component)]
 pub struct MoveOrder {
-    pub destination: Vec2,  // Arena-local coordinates
+    pub destination: DVec3,  // Arena-local coordinates (f64)
 }
 ```
 
-**2. Right-click handler**
-- In tactical mode: right-click sets MoveOrder on selected ships
-- Convert screen position to arena-local coordinates
+**2. Right-click handler (picking.rs)**
+- `handle_tactical_move_order` system
+- Convert screen position to arena-local coordinates via `screen_to_arena_local`
+- Insert MoveOrder on all selected ships
 
-**3. Basic movement system**
-- Ships with MoveOrder accelerate toward destination
-- For now: simple "set velocity toward target" (refine in 2.8c)
+**3. Destination markers**
+- `render_move_markers` draws X at destination for selected ships with orders
 
 ### Verification
-- [ ] Right-click sets destination
-- [ ] Selected ships move toward destination
-- [ ] Unselected ships don't move
+- [x] Right-click sets destination
+- [x] Selected ships get MoveOrder
+- [x] X marker appears at destination
+- [x] Unselected ships don't get orders
+
+**Completed.** Right-click movement orders working. X markers rendered at destinations.
 
 ---
 
@@ -398,37 +406,105 @@ Realistic Newtonian movement with finite acceleration.
 
 ### Changes Required
 
-**1. Ship stats**
+**1. ShipStats component**
 ```rust
 #[derive(Component)]
 pub struct ShipStats {
-    pub max_acceleration: f64,  // m/s²
+    pub max_acceleration: f64,  // 10 m/s² (1g)
+    pub max_speed: f64,         // 50 km/s
 }
 ```
 
-**2. Movement system (refined)**
-```rust
-fn ship_movement(
-    mut ships: Query<(&MoveOrder, &ShipStats, &mut LinearVelocity, &Transform)>,
-) {
-    // Calculate desired direction
-    // Apply acceleration (clamped to max)
-    // Handle arrival (clear MoveOrder when close + slow)
-}
-```
+**2. Movement system - `update_ship_movement`**
+- Compute distance to destination
+- Calculate stopping distance: `d = v²/(2a)`
+- If distance > stopping_distance: accelerate toward target
+- Else: decelerate (brake opposite to velocity)
+- Clear MoveOrder when arrived (within 1km and <10 m/s)
 
-**3. Deceleration**
-- Ships need to slow down to stop at destination
-- Simple approach: start braking at halfway point
-- Or: always accelerate toward destination, overshoot and correct
-
-**4. Velocity clamping (optional)**
-- Max speed limit? Or let physics handle it?
+**3. Velocity clamping**
+- Clamp to max_speed (50 km/s)
 
 ### Verification
-- [ ] Ships accelerate gradually (not instant velocity)
-- [ ] Ships decelerate and stop at destination
-- [ ] Movement feels Newtonian
+- [x] Ships accelerate gradually
+- [x] Ships decelerate using stopping distance formula
+- [x] Ships stop at destination
+- [x] Movement feels Newtonian
+
+**Completed.** Newtonian thrust model implemented. Ships accelerate/decelerate realistically using stopping distance formula.
+
+*Note: Currently using 100,000x scaled values (see Step 2.8e workaround). Real values will be restored after big_space integration.*
+
+---
+
+## Step 2.8d: Ship Rendering Improvements
+
+### Goal
+Realistic ship sizing with LOD system.
+
+### Changes Required
+
+**1. Ship spacing and size**
+- Physical ship size: 100m (realistic)
+- Ship spacing: 1km between ships in formation
+
+**2. LOD system (inspired by bodies)**
+- Log-based scaling: ships stay visible at all zoom levels
+- `compute_ship_display()` returns (display_size, visibility)
+- Minimum size is physical size
+- Fade when screen size < 2 pixels
+
+**3. Zoom scale indicator**
+- Added to time panel: "100px = X km/AU/m"
+- `ZoomScaleText` component and `format_distance` helper
+
+### Verification
+- [x] Ships render with LOD scaling
+- [x] Ships visible at all zoom levels (until fade threshold)
+- [x] Zoom scale indicator shows in UI
+
+**Completed.** Ship rendering improved with LOD system.
+
+*Note: Currently using 100,000x scaled values (10,000 km ships, 100,000 km spacing) as f32 precision workaround. Real values will be restored after big_space integration.*
+
+---
+
+## Step 2.8e: F32 Precision Issue
+
+### Problem Identified
+Ship movement and rendering fail at planetary distances due to f32 precision limits:
+- Avian3D uses f64 internally but syncs Position → Transform (f32)
+- At Mercury (~50B meters): f32 can only represent changes of ~5,000m
+- At Venus (~100B meters): precision drops to ~10,000m
+
+**Symptoms observed:**
+- Transform.x stays constant while Avian Position.x changes correctly
+- Small velocity components get "eaten" by f32 precision loss
+- Ships appear to move only in the dominant direction
+
+### Temporary Workaround (Active)
+Scale all tactical values 100,000x larger so movements exceed f32 precision threshold:
+
+| Parameter | Real Value | Test Value |
+|-----------|------------|------------|
+| Ship size | 100m | 10,000 km |
+| Ship spacing | 1km | 100,000 km |
+| Acceleration | 10 m/s² (1g) | 1,000,000 m/s² |
+| Max speed | 50 km/s | 5,000,000 km/s |
+| Arrival distance | 1km | 10,000 km |
+| Arrival velocity | 10 m/s | 100 km/s |
+
+This workaround is documented in `src/tactical.rs` with a comment block explaining the issue.
+
+### Permanent Solution
+Integrate big_space 0.11 for camera-relative GlobalTransforms. See `plans/big_space_migration.md` for full implementation plan.
+
+### Verification (deferred to big_space integration)
+- [ ] Ships render at all zoom levels at any distance from Sun
+- [ ] No jitter at tactical zoom
+- [ ] Neptune-distance battles work with 100m ships
+
+**Status:** Working with temporary 100,000x scale workaround. Permanent fix requires big_space integration.
 
 ---
 
@@ -518,7 +594,31 @@ End conditions for tactical combat.
 
 ---
 
-## Phase 2 Complete
+## Phase 2 Progress Summary
+
+### Completed
+- ✅ 2.1: LogicalShip entities
+- ✅ 2.2: Factions
+- ✅ 2.3: Enemy garrisons
+- ✅ 2.4: Combat trigger
+- ✅ 2.5: Tactical mode entry
+- ✅ 2.6: VisualShip rendering
+- ✅ 2.7: Ship selection
+- ✅ 2.8a: Avian physics setup
+- ✅ 2.8b: Movement orders
+- ✅ 2.8c: Thrust/acceleration model
+- ✅ 2.8d: Ship rendering improvements
+
+### Working (with workaround)
+- ⚠️ 2.8e: F32 precision - working via 100,000x scale, needs big_space for proper fix
+
+### Not Started
+- ⬜ 2.9: Basic missiles
+- ⬜ 2.10: Retreat + win/lose + tactical exit
+
+---
+
+## Phase 2 Complete (Target)
 
 Playable tactical combat:
 - Fly to enemy body, trigger combat

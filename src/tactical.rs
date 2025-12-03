@@ -17,6 +17,31 @@ use crate::ComputedBody;
 // Constants
 // ============================================================================
 
+// TEMPORARY SCALING WORKAROUND (remove after big_space integration)
+// =================================================================
+// Ship movement exhibits f32 precision issues at planetary distances.
+// Avian3D uses f64 internally but syncs Position → Transform (f32).
+// At Mercury (~50 billion meters), f32 can only represent changes of ~5,000m.
+// At Venus (~100 billion meters), precision drops to ~10,000m.
+//
+// Symptoms observed:
+// - Transform.x stays constant while Avian Position.x changes correctly
+// - Small velocity components get "eaten" by f32 precision loss
+// - Ships appear to move only in the dominant direction
+//
+// Workaround: Scale ships/speeds 100,000x larger so movements exceed f32 precision.
+// Real values → Test values:
+// - Ship size: 100m → 10,000 km (SHIP_PHYSICAL_SIZE)
+// - Ship spacing: 1km → 100,000 km (SHIP_SPACING)
+// - Acceleration: 10 m/s² (1g) → 1,000,000 m/s² (SHIP_STATS)
+// - Max speed: 50 km/s → 5,000,000 km/s (SHIP_STATS)
+// - Arrival distance: 1km → 10,000 km (ARRIVAL_DISTANCE)
+// - Arrival velocity: 10 m/s → 100 km/s (ARRIVAL_VELOCITY)
+//
+// Fix: Integrate big_space for camera-relative GlobalTransforms.
+// See plans/big_space_migration.md for implementation details.
+// =================================================================
+
 /// Arena size in meters (400,000 km)
 pub const ARENA_SIZE: f64 = 400_000_000.0;
 
@@ -29,8 +54,14 @@ pub const TACTICAL_TIME_SCALE: f64 = 60.0;
 /// Offset from arena center for fleet spawns (50,000 km in meters)
 const FLEET_SPAWN_OFFSET: f64 = 50_000_000.0;
 
-/// Horizontal spacing between ships (5,000 km in meters)
-const SHIP_SPACING: f64 = 5_000_000.0;
+/// Horizontal spacing between ships (100,000 km - temporary 100,000x for testing without big_space)
+const SHIP_SPACING: f64 = 100_000_000.0;
+
+/// Physical ship size in meters (10,000 km - temporary 100,000x for testing without big_space)
+const SHIP_PHYSICAL_SIZE: f32 = 10_000_000.0;
+
+/// Minimum screen size for ships in pixels (below this they fade out)
+const SHIP_FADE_SCREEN_SIZE: f32 = 2.0;
 
 /// Camera scale for tactical view
 /// scale = world units per pixel. 400,000 km / 1000 pixels ≈ 4e5
@@ -39,11 +70,11 @@ const TACTICAL_CAMERA_SCALE: f32 = 4.0e5;
 /// Arena center offset from body (150,000 km to put body on right side)
 const ARENA_CENTER_OFFSET: f64 = 150_000_000.0;
 
-/// Arrival distance threshold in meters (1 km)
-const ARRIVAL_DISTANCE: f64 = 1_000.0;
+/// Arrival distance threshold in meters (10,000 km - scaled for testing)
+const ARRIVAL_DISTANCE: f64 = 10_000_000.0;
 
-/// Arrival velocity threshold in m/s
-const ARRIVAL_VELOCITY: f64 = 10.0;
+/// Arrival velocity threshold in m/s (100 km/s - scaled for testing)
+const ARRIVAL_VELOCITY: f64 = 100_000.0;
 
 // ============================================================================
 // Components
@@ -96,8 +127,8 @@ pub struct ShipStats {
 impl Default for ShipStats {
     fn default() -> Self {
         Self {
-            max_acceleration: 10.0,   // 1g
-            max_speed: 50_000.0,      // 50 km/s
+            max_acceleration: 1_000_000.0,   // 100,000g - temporary 100,000x scale for testing
+            max_speed: 5_000_000_000.0,      // 5,000,000 km/s - temporary 100,000x scale for testing
         }
     }
 }
@@ -325,31 +356,73 @@ pub fn update_arena_position(
     }
 }
 
+/// Computes ship display size using LOD system similar to bodies.
+/// Returns (display_size, visibility) where visibility is 0.0-1.0.
+fn compute_ship_display(cam_scale: f32) -> (f32, f32) {
+    // Use same log-based scaling as bodies:
+    // log_scaled_size = ((log_radius - 4.0).max(1.0) * 1.5).min(8.0) * cam_scale
+    // For 100m ship: log10(100) = 2, so (2 - 4).max(1) = 1, * 1.5 = 1.5 pixels target
+    // But that's tiny, so we use a slightly different formula for ships
+
+    let log_radius = SHIP_PHYSICAL_SIZE.log10();
+    // Ships get a bit more screen presence than bodies of same size
+    // Target ~4-6 pixels when zoomed out
+    let screen_pixels = ((log_radius - 1.0).max(1.0) * 3.0).min(8.0);
+    let log_scaled_size = screen_pixels * cam_scale;
+
+    // Take max of log-scaled size vs physical size (like bodies do)
+    let display_size = log_scaled_size.max(SHIP_PHYSICAL_SIZE);
+
+    // Compute what the screen size actually is
+    let actual_screen_size = display_size / cam_scale;
+
+    // Fade out when scaled marker would be less than 2 pixels
+    let visibility = if actual_screen_size < SHIP_FADE_SCREEN_SIZE {
+        (actual_screen_size / SHIP_FADE_SCREEN_SIZE).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
+    (display_size, visibility)
+}
+
 /// Renders VisualShips as triangles during tactical combat.
 pub fn render_visual_ships(
     combat: Res<CombatState>,
-    visual_ships: Query<(&VisualShip, &GlobalTransform, Option<&Selected>)>,
+    visual_ships: Query<(&VisualShip, &GlobalTransform, &Transform, Option<&Selected>)>,
+    camera_query: Query<&GlobalTransform, With<Camera3d>>,
+    cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
     if !combat.active {
         return;
     }
 
-    for (ship, global_transform, is_selected) in &visual_ships {
+    let (display_size, visibility) = compute_ship_display(cam_scale.0);
+
+    // Skip rendering if too faded
+    if visibility < 0.01 {
+        return;
+    }
+
+    for (ship, global_transform, _local_transform, is_selected) in &visual_ships {
         let pos = global_transform.translation();
 
-        let color = match ship.faction {
+        let base_color = match ship.faction {
             Faction::Player => Color::srgb(0.4, 1.0, 0.4),
             Faction::Enemy => Color::srgb(1.0, 0.3, 0.3),
         };
+
+        // Apply visibility fade
+        let color = base_color.with_alpha(visibility);
 
         painter.set_translation(pos);
         painter.set_rotation(Quat::IDENTITY);
         painter.set_color(color);
 
-        // Triangle size in meters (1000 km for visibility at tactical zoom)
-        let size = 1_000_000.0_f32; // 1000 km
-        painter.thickness = size * 0.15; // Thickness proportional to shape size
+        // Triangle dimensions
+        let size = display_size;
+        painter.thickness = size * 0.15;
         let half_base = size * 0.5;
         let height = size;
 
@@ -368,11 +441,11 @@ pub fn render_visual_ships(
 
         // Selection indicator: white ring around selected ships
         if is_selected.is_some() {
-            painter.set_color(Color::srgba(1.0, 1.0, 1.0, 0.8));
+            painter.set_color(Color::srgba(1.0, 1.0, 1.0, 0.8 * visibility));
             painter.hollow = true;
             painter.thickness = size * 0.1;
             painter.circle(size * 0.8);
-            painter.hollow = false; // Reset for next ship
+            painter.hollow = false;
         }
     }
 }
@@ -389,6 +462,7 @@ pub fn update_ship_movement(
             &ShipStats,
             &mut LinearVelocity,
             &Transform,
+            &Position,
         ),
         With<VisualShip>,
     >,
@@ -399,7 +473,19 @@ pub fn update_ship_movement(
         return;
     }
 
-    for (entity, order, stats, mut velocity, transform) in &mut ships {
+    // Throttled logging
+    static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let last = LAST_LOG.load(std::sync::atomic::Ordering::Relaxed);
+    let should_log = now - last > 500;
+    if should_log {
+        LAST_LOG.store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    for (entity, order, stats, mut velocity, transform, avian_pos) in &mut ships {
         // Current position in arena-local coords (from Transform)
         let current_pos = DVec3::new(
             transform.translation.x as f64,
@@ -420,6 +506,26 @@ pub fn update_ship_movement(
         } else {
             0.0
         };
+
+        if should_log {
+            let mode = if distance <= ARRIVAL_DISTANCE && current_speed <= ARRIVAL_VELOCITY {
+                "ARRIVED"
+            } else if distance > stopping_distance + ARRIVAL_DISTANCE {
+                "ACCEL"
+            } else {
+                "BRAKE"
+            };
+            let direction = to_target.normalize_or_zero();
+            info!(
+                "Ship movement: mode={}, transform=({:.0},{:.0})km, avian_pos=({:.0},{:.0})km, dest=({:.0},{:.0})km, dir=({:.2},{:.2}), vel=({:.0},{:.0})km/s",
+                mode,
+                transform.translation.x as f64 / 1000.0, transform.translation.y as f64 / 1000.0,
+                avian_pos.x / 1000.0, avian_pos.y / 1000.0,
+                order.destination.x / 1000.0, order.destination.y / 1000.0,
+                direction.x, direction.y,
+                velocity.0.x / 1000.0, velocity.0.y / 1000.0
+            );
+        }
 
         if distance <= ARRIVAL_DISTANCE && current_speed <= ARRIVAL_VELOCITY {
             // ARRIVED: clear order and stop

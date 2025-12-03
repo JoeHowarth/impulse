@@ -205,15 +205,15 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         body_entities.insert(body.name.clone(), entity);
     }
 
-    // Player fleet at Vesta
-    if let Some(&vesta) = body_entities.get("Vesta") {
+    // Player fleet at Venus (for testing f32 precision - closer to sun = smaller coordinates)
+    if let Some(&venus) = body_entities.get("Venus") {
         commands
             .spawn((
                 ship::Fleet {
                     delta_v_remaining: 500_000.0,
                     name: "Alpha".to_string(),
                 },
-                ship::FleetLocation::AtBody(vesta),
+                ship::FleetLocation::AtBody(venus),
                 ship::Faction::Player,
                 ship::Selected,
                 ship::FlightPlan::default(),
@@ -225,56 +225,20 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
             });
     }
 
-    // Enemy garrisons (inner system)
-    if let Some(&ceres) = body_entities.get("Ceres") {
+    // Enemy garrison at Mercury (for testing f32 precision)
+    if let Some(&mercury) = body_entities.get("Mercury") {
         commands
             .spawn((
                 ship::Fleet {
                     delta_v_remaining: 500_000.0,
-                    name: "Ceres Garrison".to_string(),
+                    name: "Mercury Garrison".to_string(),
                 },
-                ship::FleetLocation::AtBody(ceres),
-                ship::Faction::Enemy,
-                ship::FlightPlan::default(),
-            ))
-            .with_children(|builder| {
-                for _ in 0..5 {
-                    builder.spawn(ship::LogicalShip);
-                }
-            });
-    }
-
-    if let Some(&mars) = body_entities.get("Mars") {
-        commands
-            .spawn((
-                ship::Fleet {
-                    delta_v_remaining: 500_000.0,
-                    name: "Mars Garrison".to_string(),
-                },
-                ship::FleetLocation::AtBody(mars),
+                ship::FleetLocation::AtBody(mercury),
                 ship::Faction::Enemy,
                 ship::FlightPlan::default(),
             ))
             .with_children(|builder| {
                 for _ in 0..10 {
-                    builder.spawn(ship::LogicalShip);
-                }
-            });
-    }
-
-    if let Some(&earth) = body_entities.get("Earth") {
-        commands
-            .spawn((
-                ship::Fleet {
-                    delta_v_remaining: 500_000.0,
-                    name: "Earth Garrison".to_string(),
-                },
-                ship::FleetLocation::AtBody(earth),
-                ship::Faction::Enemy,
-                ship::FlightPlan::default(),
-            ))
-            .with_children(|builder| {
-                for _ in 0..15 {
                     builder.spawn(ship::LogicalShip);
                 }
             });

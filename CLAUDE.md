@@ -13,3 +13,4 @@ This project uses a local Bevy dependency via git submodule, allowing us to:
 - Reference example code directly
 - Ensure all dependencies use the same Bevy version via `[patch.crates-io]`
 - Do not use cargo run
+- You can't run the game yourself - I must do that
