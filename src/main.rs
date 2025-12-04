@@ -1,4 +1,4 @@
-use std::cell::LazyCell;
+use std::{cell::LazyCell, time::Duration};
 
 use astrora_core::core::{Vector3, elements::coe_to_rv};
 use avian3d::prelude::Position;
@@ -92,7 +92,10 @@ fn main() {
         .add_plugins(physics::TacticalPhysicsPlugin)
         // Performance diagnostics - logs to console every second
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
-        .add_plugins(LogDiagnosticsPlugin::default())
+        .add_plugins(LogDiagnosticsPlugin {
+            wait_duration: Duration::from_secs(10),
+            ..default()
+        })
         .insert_resource(SimulationTime::from_start_day(start_day))
         .init_resource::<ui::TransferPopup>()
         .init_resource::<ui::FleetKeyState>()
@@ -138,7 +141,7 @@ fn main() {
                     // Keep tactical arena synced with body position
                     tactical::update_arena_position,
                     // Expire uncommitted legs whose departure_day passed
-                    ship::expire_stale_legs,
+                    ship::expire_stale_uncommitted_legs,
                     // Sync Transfer entities to FleetLocation + committed legs
                     ship::sync_transfer_entities,
                     transfer_vis::check_transfer_expiration,
@@ -158,7 +161,7 @@ fn main() {
                     ui::handle_close_button,
                     ui::handle_escape_key,
                     ui::handle_option_hover,
-                    transfer_vis::update_preview_arc,
+                    transfer_vis::update_hovered_arc,
                     ui::handle_option_selection,
                 )
                     .chain(),
@@ -166,7 +169,7 @@ fn main() {
                 (
                     camera::animate_camera,
                     // update_orbit_positions,
-                    transfer_vis::update_transfer_arc_positions,
+                    // transfer_vis::update_transfer_arc_positions,
                     render_system,
                     ship::update_fleet_positions,
                     ship::sync_fleet_shapes,
@@ -179,7 +182,7 @@ fn main() {
                     // ship::render_departure_markers,
                     // TODO: Remove me
                     ship::render_plan_markers,
-                    ship::render_plan_arcs,
+                    // ship::render_plan_arcs,
                     // TODO: remove me - now handled by spawn_transfer_visualization in sync_transfer_entities system
                     // transfer_vis::render_burn_arrows,
                     ui::update_labels,
@@ -281,6 +284,7 @@ fn setup(
             continue;
         };
         let orbit_asset = create_orbit_gizmo_asset(body, parent_body);
+        let body_shape_bundle = create_body_shape_bundle(body);
 
         commands.entity(*parent_entity).with_child((
             Gizmo {
@@ -291,6 +295,7 @@ fn setup(
             OrbitGizmo,
             Transform::default(),
         ));
+        commands.entity(body_entity).with_child(body_shape_bundle);
     }
 
     // Spawn time control panel
@@ -325,38 +330,6 @@ fn init_parent_entities(mut bodies: Query<(Entity, &mut Body)>) {
 fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
     config.line.joints = GizmoLineJoint::None;
-}
-
-/// Create a GizmoAsset containing the orbit linestrip (points at origin, will be translated by Transform).
-fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
-    let mut gizmo = GizmoAsset::new();
-
-    let period = body
-        .orbital_elements
-        .period(parent_body.std_grav_param)
-        .unwrap_or(0.0);
-    let step_dt = period / ORBIT_SEGMENTS as f64;
-
-    // Collect orbit points in local coordinates (relative to parent)
-    let mut points = Vec::with_capacity(ORBIT_SEGMENTS + 1);
-    for i in 0..ORBIT_SEGMENTS {
-        let t = i as f64 * step_dt;
-        if let Ok(elems) = propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t)
-        {
-            let (r_local, _) = coe_to_rv(&elems, parent_body.std_grav_param);
-            points.push(phys_vec_to_vec3(r_local));
-        }
-    }
-
-    // Close the orbit loop
-    if !points.is_empty() {
-        points.push(points[0]);
-    }
-
-    let color = Color::srgba(1.0, 1.0, 1.0, 0.3);
-    gizmo.linestrip(points, color);
-
-    gizmo
 }
 
 /// Computes positions, visibility, and display sizes for all bodies.
@@ -433,21 +406,6 @@ fn update_body_positions(
         computed.display_size = compute_display_size(body, cam_scale);
     }
 }
-
-/// Update orbit gizmo Transform positions to match their parent body positions.
-// TODO: we can remove this now that gizmos are children of their parents and track their parent's position automatically
-// fn update_orbit_positions(
-//     mut orbit_query: Query<(&OrbitGizmo, &mut Transform)>,
-//     body_query: Query<&GlobalTransform, With<Body>>,
-// ) {
-//     for (orbit_gizmo, mut transform) in &mut orbit_query {
-//         let parent_pos = body_query
-//             .get(orbit_gizmo.parent)
-//             .map(|gt| gt.translation())
-//             .expect("No GlobalTransform found for orbit gizmo parent body");
-//         transform.translation = parent_pos;
-//     }
-// }
 
 // ============================================================================
 // Coordinate Conversion & Position Resolution
@@ -543,86 +501,44 @@ fn calculate_visibility_f64(
         .clamp(0.0, 1.0)
 }
 
-/// Recursively resolves a body's absolute position in visual coordinates using entity keys.
-/// LEGACY: Used by orbit gizmos. Will be removed when they use GlobalTransform.
-fn resolve_position_with_queries(
-    entity: Entity,
-    bodies: &Query<(Entity, &Body)>,
-    cache: &mut HashMap<Entity, Vec3>,
-    t: f64,
-) -> Vec3 {
-    // Return cached position if available
-    if let Some(&pos) = cache.get(&entity) {
-        return pos;
-    }
-
-    // Find the body component for this entity
-    let body = bodies.iter().find(|(e, _)| *e == entity).map(|(_, b)| b);
-
-    let Some(body) = body else {
-        return Vec3::ZERO;
-    };
-
-    // Resolve parent's position first
-    let parent_pos = body
-        .parent_entity
-        .map(|p| resolve_position_with_queries(p, bodies, cache, t))
-        .unwrap_or(Vec3::ZERO);
-
-    // Calculate local position relative to parent
-    let local_pos = if let Some(parent_entity) = body.parent_entity {
-        // Find parent body
-        let parent_body = bodies
-            .iter()
-            .find(|(e, _)| *e == parent_entity)
-            .map(|(_, b)| b);
-
-        if let Some(parent_body) = parent_body {
-            propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t)
-                .ok()
-                .map(|elems| {
-                    let (r_vec, _) = coe_to_rv(&elems, parent_body.std_grav_param);
-                    r_vec
-                })
-                .unwrap_or_default()
-        } else {
-            Vector3::default()
-        }
-    } else {
-        Vector3::default()
-    };
-
-    let abs_pos = parent_pos + phys_vec_to_vec3(local_pos);
-    cache.insert(entity, abs_pos);
-    abs_pos
-}
-
 // ============================================================================
 // Visibility & Rendering
 // ============================================================================
 
-/// Calculate visibility (0.0-1.0) based on screen-space separation from parent.
-fn calculate_visibility(
-    body: &Body,
-    body_pos: Vec3,
-    positions: &HashMap<Entity, Vec3>,
-    cam_scale: f32,
-) -> f32 {
-    // Bodies without parents (Sun) are always visible
-    let Some(parent_entity) = body.parent_entity else {
-        return 1.0;
-    };
+/// Create a GizmoAsset containing the orbit linestrip (points at origin, will be translated by Transform).
+fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
+    let mut gizmo = GizmoAsset::new();
 
-    let parent_pos = positions.get(&parent_entity).copied().unwrap_or(Vec3::ZERO);
-    let world_dist = (body_pos - parent_pos).length();
+    let period = body
+        .orbital_elements
+        .period(parent_body.std_grav_param)
+        .unwrap_or(0.0);
+    let step_dt = period / ORBIT_SEGMENTS as f64;
 
-    // Convert to approximate screen distance
-    // For orthographic: screen_dist ≈ world_dist / cam_scale
-    let screen_dist = world_dist / cam_scale;
+    // Collect orbit points in local coordinates (relative to parent)
+    let mut points = Vec::with_capacity(ORBIT_SEGMENTS + 1);
+    for i in 0..ORBIT_SEGMENTS {
+        let t = i as f64 * step_dt;
+        if let Ok(elems) = propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t)
+        {
+            let (r_local, _) = coe_to_rv(&elems, parent_body.std_grav_param);
+            points.push(phys_vec_to_vec3(r_local));
+        }
+    }
 
-    // Smooth fade between thresholds
-    ((screen_dist - LOD_MIN_SCREEN_DIST) / (LOD_MAX_SCREEN_DIST - LOD_MIN_SCREEN_DIST))
-        .clamp(0.0, 1.0)
+    // Close the orbit loop
+    if !points.is_empty() {
+        points.push(points[0]);
+    }
+
+    let color = Color::srgba(1.0, 1.0, 1.0, 0.3);
+    gizmo.linestrip(points, color);
+
+    gizmo
+}
+
+fn create_body_shape_bundle(body: &Body) -> ShapeBundle<DiscComponent> {
+    bevy_vector_shapes::prelude::ShapeBundle::circle(&ShapeConfig::default_3d(), body.radius as f32)
 }
 
 /// Draws all visible bodies using GlobalTransform for camera-relative positioning.

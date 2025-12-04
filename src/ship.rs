@@ -11,6 +11,7 @@
 //! - Solutions looked up from cache, not stored in legs
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bevy::gizmos::GizmoAsset;
 use bevy::math::DVec3;
@@ -24,6 +25,7 @@ use crate::orbital_data::{Body, MU_SUN};
 use crate::simulation::SimulationTime;
 use crate::transfer::{TransferSolution, propagate_kepler_full};
 use crate::transfer_lut::TransferLut;
+use crate::transfer_vis::{HoveredTransferArc, TransferArcType};
 use crate::{phys_vec_to_vec3, transfer_vis};
 
 // ============================================================================
@@ -217,7 +219,10 @@ pub fn leg_base_day(
 
 /// Expires uncommitted legs whose departure_day has passed.
 /// Committed legs are never expired (execute_departure handles them).
-pub fn expire_stale_legs(mut ships: Query<&mut FlightPlan>, sim_time: Res<SimulationTime>) {
+pub fn expire_stale_uncommitted_legs(
+    mut ships: Query<&mut FlightPlan>,
+    sim_time: Res<SimulationTime>,
+) {
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
 
     for mut plan in &mut ships {
@@ -234,13 +239,11 @@ pub fn expire_stale_legs(mut ships: Query<&mut FlightPlan>, sim_time: Res<Simula
         let committed = plan.committed_count;
         let before_len = plan.legs.len();
 
-        plan.legs = plan
-            .legs
-            .iter()
-            .enumerate()
-            .filter(|(i, leg)| *i < committed || leg.departure_day >= current_day)
-            .map(|(_, leg)| leg.clone())
-            .collect();
+        let mut i = 0;
+        plan.legs.retain(|leg| {
+            i += 1;
+            i - 1 < committed || leg.departure_day >= current_day
+        });
 
         let expired = before_len - plan.legs.len();
         if expired > 0 {
@@ -729,15 +732,13 @@ pub fn sync_transfer_entities(
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     fleets: Query<(Entity, &FleetLocation, &FlightPlan)>,
     lut: Res<TransferLut>,
-    transfers: Query<(Entity, &transfer_vis::Transfer)>,
+    transfers: Query<(Entity, &transfer_vis::Transfer), Without<HoveredTransferArc>>,
     bodies: Query<&Body>,
     cam_scale: Res<CameraScale>,
-    big_space_root: Res<BigSpaceRoot>,
-    grid: Query<&Grid, With<BigSpace>>,
 ) {
     for (fleet_entity, location, plan) in &fleets {
         // Build list of (source, target, solution, departure_time) for active visualizations
-        let mut active: Vec<(Entity, Entity, TransferSolution, f64)> = Vec::new();
+        let mut active: Vec<(Entity, Entity, TransferSolution, f64, TransferArcType)> = Vec::new();
 
         // Add active transfer if InTransit
         if let FleetLocation::InTransit {
@@ -747,26 +748,40 @@ pub fn sync_transfer_entities(
             departure_time,
         } = location
         {
-            active.push((*source, *target, solution.clone(), *departure_time));
+            active.push((
+                *source,
+                *target,
+                solution.clone(),
+                *departure_time,
+                TransferArcType::Committed,
+            ));
         }
 
-        // Add committed future legs
-        for i in 0..plan.committed_count.min(plan.legs.len()) {
-            let leg = &plan.legs[i];
+        for (i, leg) in plan.legs.iter().enumerate() {
             let source = leg_source(location, plan, i);
-            if let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) {
-                if let Some(solution) = lut.get_transfer(
+
+            let [src_body, tgt_body] = bodies
+                .get_many([source, leg.target])
+                .expect("Source and target bodies not found");
+
+            let solution = lut
+                .get_transfer(
                     source,
                     leg.target,
                     &src_body.orbital_elements,
                     &tgt_body.orbital_elements,
                     leg.departure_day,
                     leg.tof_days,
-                ) {
-                    let departure_time = leg.departure_day as f64 * 86400.0;
-                    active.push((source, leg.target, solution, departure_time));
-                }
-            }
+                )
+                .expect("No transfer solution found for leg");
+
+            let departure_time = leg.departure_day as f64 * 86400.0;
+            let ty = if i < plan.committed_count {
+                TransferArcType::Committed
+            } else {
+                TransferArcType::Preview
+            };
+            active.push((source, leg.target, solution, departure_time, ty));
         }
 
         // Find existing Transfer entities for this fleet
@@ -777,52 +792,66 @@ pub fn sync_transfer_entities(
 
         // Despawn entities that don't match any active transfer
         for (transfer_entity, transfer) in &fleet_transfers {
-            let has_match = active.iter().any(|(_, target, _, dep_time)| {
+            let has_match = active.iter().any(|(_, target, _, dep_time, _)| {
                 *target == transfer.target && (*dep_time - transfer.departure_time).abs() < 1.0
             });
+
             if !has_match {
                 commands.entity(*transfer_entity).despawn();
             }
         }
 
         // Spawn entities for active transfers that don't have one
-        for (source, target, solution, departure_time) in &active {
-            let has_entity = fleet_transfers.iter().any(|(_, t)| {
+        for (source, target, solution, departure_time, arc_type) in &active {
+            let transfer_ent = fleet_transfers.iter().find(|(_, t)| {
                 t.target == *target && (t.departure_time - *departure_time).abs() < 1.0
             });
-            if !has_entity {
-                let parent_entity = bodies
-                    .get(*source)
-                    .map(|b| b.parent_entity)
-                    .expect("Source is not a body")
-                    .expect("Source body has no parent");
-                transfer_vis::spawn_transfer_visualization(
-                    &mut commands,
-                    &mut gizmo_assets,
-                    parent_entity,
-                    big_space_root.0,
-                    grid.get(big_space_root.0).unwrap(),
-                    fleet_entity,
-                    *source,
-                    *target,
-                    solution,
-                    *departure_time,
-                    cam_scale.0,
-                );
+
+            match transfer_ent {
+                Some((transfer_entity, t)) => {
+                    // Wrong type of transfer arc, despawn and recreate as an active transfer arc
+                    if t.arc_type == *arc_type {
+                        continue;
+                    }
+                    commands.entity(*transfer_entity).despawn();
+                }
+                None => {}
             }
+            let parent_entity = bodies
+                .get(*source)
+                .map(|b| b.parent_entity)
+                .expect("Body has no parent")
+                .expect("Body has no parent");
+            transfer_vis::spawn_transfer_visualization(
+                &mut commands,
+                &mut gizmo_assets,
+                parent_entity,
+                fleet_entity,
+                *source,
+                *target,
+                solution,
+                *departure_time,
+                cam_scale.0,
+                *arc_type,
+            );
         }
 
         // Debug logging
-        if !active.is_empty() {
+        static DEDUP_LOG_THRESHOLD: AtomicUsize = AtomicUsize::new(0);
+        let dedup_log_threshold = DEDUP_LOG_THRESHOLD.load(Ordering::Relaxed);
+        if dedup_log_threshold < 10 {
+            DEDUP_LOG_THRESHOLD.fetch_add(1, Ordering::Relaxed);
+        } else {
             let names: Vec<String> = active
                 .iter()
-                .map(|(src, tgt, _, _)| {
+                .map(|(src, tgt, _, _, _)| {
                     let src_name = bodies.get(*src).map(|b| b.name.as_str()).unwrap_or("?");
                     let tgt_name = bodies.get(*tgt).map(|b| b.name.as_str()).unwrap_or("?");
                     format!("{}->{}", src_name, tgt_name)
                 })
                 .collect();
             debug!("sync_transfer_entities: [{}]", names.join(", "));
+            DEDUP_LOG_THRESHOLD.store(0, Ordering::Relaxed);
         }
     }
 }

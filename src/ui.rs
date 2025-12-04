@@ -1084,6 +1084,7 @@ pub fn handle_option_selection(
         });
 
         // Close the popup
+        info!("handle_option_selection: closing popup");
         despawn_transfer_popup(&mut commands, &mut popup);
 
         // Only handle one click per frame
@@ -1409,7 +1410,6 @@ pub fn update_victory_overlay(
     mut commands: Commands,
     victory: Res<crate::ship::VictoryState>,
     existing: Query<Entity, With<VictoryOverlay>>,
-    sim_time: Res<SimulationTime>,
 ) {
     // Only show if victory achieved and overlay doesn't exist
     if !victory.victory_achieved {
