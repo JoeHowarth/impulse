@@ -2,12 +2,12 @@
 
 use bevy::prelude::*;
 
-use crate::orbital_data::{Body, MU_SUN};
-use crate::phys_to_visual;
-use crate::simulation::SimulationTime;
-use crate::transfer::{propagate_kepler_full, TransferSolution};
-use crate::transfer_lut::TransferLut;
 use crate::ComputedBody;
+use crate::orbital_data::{Body, MU_SUN};
+use crate::phys_vec_to_vec3;
+use crate::simulation::SimulationTime;
+use crate::transfer::{TransferSolution, propagate_kepler_full};
+use crate::transfer_lut::TransferLut;
 
 // ============================================================================
 // Resources
@@ -145,7 +145,7 @@ pub fn spawn_body_label(commands: &mut Commands, name: &str, body_entity: Entity
 /// Updates body label positions by projecting world coordinates to screen space.
 pub fn update_labels(
     mut labels: Query<(&mut Node, &mut TextColor, &BodyLabel)>,
-    bodies: Query<&ComputedBody>,
+    bodies: Query<(&ComputedBody, &GlobalTransform)>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     let Ok((camera, camera_transform)) = camera_query.single() else {
@@ -153,7 +153,7 @@ pub fn update_labels(
     };
 
     for (mut node, mut text_color, label) in &mut labels {
-        let Ok(computed) = bodies.get(label.body) else {
+        let Ok((computed, body_transform)) = bodies.get(label.body) else {
             continue;
         };
 
@@ -161,7 +161,9 @@ pub fn update_labels(
         text_color.0 = Color::srgba(1.0, 1.0, 1.0, 0.8 * computed.visibility);
 
         // Project right edge of body to screen (offset by radius in world x)
-        let right_edge_world = computed.position + Vec3::new(computed.display_size, 0.0, 0.0);
+        // Use GlobalTransform for camera-relative positioning
+        let body_pos = body_transform.translation();
+        let right_edge_world = body_pos + Vec3::new(computed.display_size, 0.0, 0.0);
         if let Ok(edge_screen) = camera.world_to_viewport(camera_transform, right_edge_world) {
             node.left = Val::Px(edge_screen.x + 4.0);
             node.top = Val::Px(edge_screen.y - 6.0);
@@ -173,9 +175,30 @@ pub fn update_labels(
 pub fn update_time_ui(
     sim_time: Res<SimulationTime>,
     cam_scale: Res<crate::camera::CameraScale>,
-    mut date_query: Query<&mut Text, (With<SimDateText>, Without<SimSpeedText>, Without<ZoomScaleText>)>,
-    mut speed_query: Query<&mut Text, (With<SimSpeedText>, Without<SimDateText>, Without<ZoomScaleText>)>,
-    mut zoom_query: Query<&mut Text, (With<ZoomScaleText>, Without<SimDateText>, Without<SimSpeedText>)>,
+    mut date_query: Query<
+        &mut Text,
+        (
+            With<SimDateText>,
+            Without<SimSpeedText>,
+            Without<ZoomScaleText>,
+        ),
+    >,
+    mut speed_query: Query<
+        &mut Text,
+        (
+            With<SimSpeedText>,
+            Without<SimDateText>,
+            Without<ZoomScaleText>,
+        ),
+    >,
+    mut zoom_query: Query<
+        &mut Text,
+        (
+            With<ZoomScaleText>,
+            Without<SimDateText>,
+            Without<SimSpeedText>,
+        ),
+    >,
 ) {
     // Convert simulation seconds to days since J2000
     let days = sim_time.sim_time / (60.0 * 60.0 * 24.0);
@@ -287,7 +310,15 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
 /// Shows the selected fleet's info.
 pub fn update_transfer_panel(
     bodies: Query<&Body>,
-    selected_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    selected_query: Query<
+        (
+            Entity,
+            &crate::ship::Fleet,
+            &crate::ship::FleetLocation,
+            &crate::ship::FlightPlan,
+        ),
+        With<crate::ship::Selected>,
+    >,
     children_query: Query<&Children>,
     logical_ships: Query<&crate::ship::LogicalShip>,
     sim_time: Res<SimulationTime>,
@@ -311,19 +342,32 @@ pub fn update_transfer_panel(
 
     // Build header: fleet name, ship count, location, delta-v
     let location_name = match location {
-        crate::ship::FleetLocation::AtBody(body) => {
-            bodies.get(*body).map(|b| b.name.clone()).unwrap_or_else(|_| "???".into())
-        }
-        crate::ship::FleetLocation::InTransit { target, solution, departure_time } => {
-            let target_name = bodies.get(*target).map(|b| b.name.as_str()).unwrap_or("???");
-            let arrival_day = ((*departure_time + solution.time_of_flight) / 86400.0).floor() as i32;
+        crate::ship::FleetLocation::AtBody(body) => bodies
+            .get(*body)
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|_| "???".into()),
+        crate::ship::FleetLocation::InTransit {
+            source: _,
+            target,
+            solution,
+            departure_time,
+        } => {
+            let target_name = bodies
+                .get(*target)
+                .map(|b| b.name.as_str())
+                .unwrap_or("???");
+            let arrival_day =
+                ((*departure_time + solution.time_of_flight) / 86400.0).floor() as i32;
             let days_left = arrival_day - current_day;
             format!("→ {} ({}d)", target_name, days_left)
         }
     };
 
     if let Ok(mut text) = fleet_status_query.single_mut() {
-        **text = format!("{} ({} ships) @ {} | {:.0} m/s", fleet.name, ship_count, location_name, fleet.delta_v_remaining);
+        **text = format!(
+            "{} ({} ships) @ {} | {:.0} m/s",
+            fleet.name, ship_count, location_name, fleet.delta_v_remaining
+        );
     }
 
     // Build flight plan rows
@@ -335,11 +379,16 @@ pub fn update_transfer_panel(
             let mut running_dv = fleet.delta_v_remaining;
 
             for (i, leg) in plan.legs.iter().enumerate() {
-                let target_name = bodies.get(leg.target).map(|b| b.name.as_str()).unwrap_or("???");
+                let target_name = bodies
+                    .get(leg.target)
+                    .map(|b| b.name.as_str())
+                    .unwrap_or("???");
                 let source = crate::ship::leg_source(location, plan, i);
 
                 // Look up solution to get delta-v
-                let dv = if let (Ok(source_body), Ok(target_body)) = (bodies.get(source), bodies.get(leg.target)) {
+                let dv = if let (Ok(source_body), Ok(target_body)) =
+                    (bodies.get(source), bodies.get(leg.target))
+                {
                     lut.get_transfer(
                         source,
                         leg.target,
@@ -347,7 +396,9 @@ pub fn update_transfer_panel(
                         &target_body.orbital_elements,
                         leg.departure_day,
                         leg.tof_days,
-                    ).map(|s| s.total_dv).unwrap_or(0.0)
+                    )
+                    .map(|s| s.total_dv)
+                    .unwrap_or(0.0)
                 } else {
                     0.0
                 };
@@ -367,7 +418,10 @@ pub fn update_transfer_panel(
             // Add hint line
             let uncommitted = plan.legs.len() - plan.committed_count;
             if uncommitted > 0 {
-                rows.push(format!("* = uncommitted ({}) | Enter=commit, N=cancel", uncommitted));
+                rows.push(format!(
+                    "* = uncommitted ({}) | Enter=commit, N=cancel",
+                    uncommitted
+                ));
             }
 
             **text = rows.join("\n");
@@ -542,8 +596,12 @@ pub fn build_transfer_options(
 
     // 1. Now (tomorrow to avoid immediate expiration)
     if let Some((dep_day, tof_days, sol)) = lut.find_best_transfer(
-        source_entity, target_entity, source_elements, target_elements,
-        current_day + 1, current_day + 3,
+        source_entity,
+        target_entity,
+        source_elements,
+        target_elements,
+        current_day + 1,
+        current_day + 3,
     ) {
         options.push(TransferOption {
             label: "Now".to_string(),
@@ -555,8 +613,12 @@ pub fn build_transfer_options(
 
     // 2. Best in 30 days
     if let Some((dep_day, tof_days, sol)) = lut.find_best_transfer(
-        source_entity, target_entity, source_elements, target_elements,
-        current_day, current_day + 30,
+        source_entity,
+        target_entity,
+        source_elements,
+        target_elements,
+        current_day,
+        current_day + 30,
     ) {
         let is_different = options.first().map_or(true, |o| {
             (o.solution.total_dv - sol.total_dv).abs() > 100.0 || (dep_day - current_day) > 2
@@ -573,12 +635,16 @@ pub fn build_transfer_options(
 
     // 3. Best in 180 days
     if let Some((dep_day, tof_days, sol)) = lut.find_best_transfer(
-        source_entity, target_entity, source_elements, target_elements,
-        current_day, current_day + 180,
+        source_entity,
+        target_entity,
+        source_elements,
+        target_elements,
+        current_day,
+        current_day + 180,
     ) {
-        let is_different = options.iter().all(|o| {
-            (o.solution.total_dv - sol.total_dv).abs() > 100.0
-        });
+        let is_different = options
+            .iter()
+            .all(|o| (o.solution.total_dv - sol.total_dv).abs() > 100.0);
         if is_different {
             options.push(TransferOption {
                 label: "Best 180d".to_string(),
@@ -591,12 +657,16 @@ pub fn build_transfer_options(
 
     // 4. Best in 500 days (full search window)
     if let Some((dep_day, tof_days, sol)) = lut.find_best_transfer(
-        source_entity, target_entity, source_elements, target_elements,
-        current_day, current_day + 500,
+        source_entity,
+        target_entity,
+        source_elements,
+        target_elements,
+        current_day,
+        current_day + 500,
     ) {
-        let is_different = options.iter().all(|o| {
-            (o.solution.total_dv - sol.total_dv).abs() > 100.0
-        });
+        let is_different = options
+            .iter()
+            .all(|o| (o.solution.total_dv - sol.total_dv).abs() > 100.0);
         if is_different {
             options.push(TransferOption {
                 label: "Best 500d".to_string(),
@@ -626,8 +696,16 @@ pub fn handle_popup_spawn(
     mut popup: ResMut<TransferPopup>,
     lut: Res<TransferLut>,
     sim_time: Res<SimulationTime>,
-    bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    bodies: Query<(&Body, &ComputedBody, &GlobalTransform)>,
+    player_query: Query<
+        (
+            Entity,
+            &crate::ship::Fleet,
+            &crate::ship::FleetLocation,
+            &crate::ship::FlightPlan,
+        ),
+        With<crate::ship::Selected>,
+    >,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Check if we need to spawn a popup
@@ -652,29 +730,30 @@ pub fn handle_popup_spawn(
     let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
 
     // Get source body orbital elements
-    let Ok((source_body, _)) = bodies.get(source_entity) else {
+    let Ok((source_body, _, _)) = bodies.get(source_entity) else {
         popup.target_entity = None;
         return;
     };
 
     // Get target body info
-    let Ok((target_body, target_computed)) = bodies.get(target_entity) else {
+    let Ok((target_body, _target_computed, target_transform)) = bodies.get(target_entity) else {
         popup.target_entity = None;
         return;
     };
 
-    // Get screen position
+    // Get screen position (using GlobalTransform which is camera-relative via big_space)
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
 
-    let screen_pos = match camera.world_to_viewport(camera_transform, target_computed.position) {
-        Ok(pos) => pos,
-        Err(_) => {
-            popup.target_entity = None;
-            return;
-        }
-    };
+    let screen_pos =
+        match camera.world_to_viewport(camera_transform, target_transform.translation()) {
+            Ok(pos) => pos,
+            Err(_) => {
+                popup.target_entity = None;
+                return;
+            }
+        };
 
     // Get available delta-v from player ship
     let available_dv = ship.delta_v_remaining;
@@ -689,7 +768,11 @@ pub fn handle_popup_spawn(
         base_day,
     );
 
-    info!("Spawning popup for {} with {} options", target_body.name, options.len());
+    info!(
+        "Spawning popup for {} with {} options",
+        target_body.name,
+        options.len()
+    );
 
     // Store options in popup resource for later selection handling
     popup.options = options;
@@ -712,7 +795,7 @@ pub fn handle_popup_spawn(
 /// System to update popup position to follow target body.
 pub fn update_popup_position(
     popup: Res<TransferPopup>,
-    bodies: Query<&ComputedBody>,
+    bodies: Query<&GlobalTransform, With<Body>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut popup_nodes: Query<&mut Node, With<TransferPopupUI>>,
 ) {
@@ -724,8 +807,8 @@ pub fn update_popup_position(
         return;
     };
 
-    // Get target body position
-    let Ok(target_computed) = bodies.get(target_entity) else {
+    // Get target body position (camera-relative via big_space)
+    let Ok(target_transform) = bodies.get(target_entity) else {
         return;
     };
 
@@ -733,7 +816,8 @@ pub fn update_popup_position(
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
-    let Ok(screen_pos) = camera.world_to_viewport(camera_transform, target_computed.position) else {
+    let Ok(screen_pos) = camera.world_to_viewport(camera_transform, target_transform.translation())
+    else {
         return;
     };
 
@@ -751,8 +835,16 @@ pub fn update_popup_options(
     mut popup: ResMut<TransferPopup>,
     lut: Res<TransferLut>,
     sim_time: Res<SimulationTime>,
-    bodies: Query<(&Body, &ComputedBody)>,
-    player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    bodies: Query<(&Body, &ComputedBody, &GlobalTransform)>,
+    player_query: Query<
+        (
+            Entity,
+            &crate::ship::Fleet,
+            &crate::ship::FleetLocation,
+            &crate::ship::FlightPlan,
+        ),
+        With<crate::ship::Selected>,
+    >,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only process if popup is open
@@ -780,23 +872,24 @@ pub fn update_popup_options(
     }
 
     // Get source body orbital elements
-    let Ok((source_body, _)) = bodies.get(source_entity) else {
+    let Ok((source_body, _, _)) = bodies.get(source_entity) else {
         return;
     };
 
     // Get target body info
-    let Ok((target_body, target_computed)) = bodies.get(target_entity) else {
+    let Ok((target_body, _target_computed, target_transform)) = bodies.get(target_entity) else {
         return;
     };
 
-    // Get screen position for respawning popup
+    // Get screen position for respawning popup (camera-relative via big_space)
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
-    let screen_pos = match camera.world_to_viewport(camera_transform, target_computed.position) {
-        Ok(pos) => pos,
-        Err(_) => return,
-    };
+    let screen_pos =
+        match camera.world_to_viewport(camera_transform, target_transform.translation()) {
+            Ok(pos) => pos,
+            Err(_) => return,
+        };
 
     // Get available delta-v from player ship
     let available_dv = ship.delta_v_remaining;
@@ -892,7 +985,15 @@ pub fn handle_option_hover(
 pub fn handle_option_selection(
     mut commands: Commands,
     mut popup: ResMut<TransferPopup>,
-    mut player_query: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &mut crate::ship::FlightPlan), With<crate::ship::Selected>>,
+    mut player_query: Query<
+        (
+            Entity,
+            &crate::ship::Fleet,
+            &crate::ship::FleetLocation,
+            &mut crate::ship::FlightPlan,
+        ),
+        With<crate::ship::Selected>,
+    >,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
     bodies: Query<&crate::orbital_data::Body>,
@@ -931,7 +1032,9 @@ pub fn handle_option_selection(
         let tof_days = option.tof_days;
 
         // Calculate total delta-v needed (all existing legs + this new one)
-        let existing_dv: f64 = plan.legs.iter()
+        let existing_dv: f64 = plan
+            .legs
+            .iter()
             .enumerate()
             .filter_map(|(i, leg)| {
                 let src = crate::ship::leg_source(location, &plan, i);
@@ -945,7 +1048,8 @@ pub fn handle_option_selection(
                     &tgt_body.orbital_elements,
                     leg.departure_day,
                     leg.tof_days,
-                ).map(|s| s.total_dv)
+                )
+                .map(|s| s.total_dv)
             })
             .sum();
 
@@ -959,8 +1063,14 @@ pub fn handle_option_selection(
             continue;
         }
 
-        let target_name = bodies.get(target_entity).map(|b| b.name.as_str()).unwrap_or("???");
-        let source_name = bodies.get(source_entity).map(|b| b.name.as_str()).unwrap_or("???");
+        let target_name = bodies
+            .get(target_entity)
+            .map(|b| b.name.as_str())
+            .unwrap_or("???");
+        let source_name = bodies
+            .get(source_entity)
+            .map(|b| b.name.as_str())
+            .unwrap_or("???");
 
         info!(
             "Queueing leg {} -> {} (dep day {}, {} m/s)",
@@ -1017,7 +1127,12 @@ pub fn spawn_fleet_tabs(commands: &mut Commands) {
 /// Updates fleet tabs - rebuilds when fleet count changes.
 pub fn update_fleet_tabs(
     mut commands: Commands,
-    fleets: Query<(Entity, &crate::ship::Fleet, Option<&crate::ship::Selected>, &crate::ship::Faction)>,
+    fleets: Query<(
+        Entity,
+        &crate::ship::Fleet,
+        Option<&crate::ship::Selected>,
+        &crate::ship::Faction,
+    )>,
     children_query: Query<&Children>,
     logical_ships: Query<&crate::ship::LogicalShip>,
     container_query: Query<Entity, With<FleetTabsContainer>>,
@@ -1028,7 +1143,8 @@ pub fn update_fleet_tabs(
     };
 
     // Collect player fleet info sorted for consistent ordering
-    let mut fleet_info: Vec<_> = fleets.iter()
+    let mut fleet_info: Vec<_> = fleets
+        .iter()
         .filter(|(_, _, _, faction)| **faction == crate::ship::Faction::Player)
         .collect();
     fleet_info.sort_by(|a, b| a.1.name.cmp(&b.1.name));
@@ -1054,7 +1170,8 @@ pub fn update_fleet_tabs(
 
             let fleet_entity_copy = *fleet_entity;
             let fleet_name = fleet.name.clone();
-            let ship_count = crate::ship::ship_count(*fleet_entity, &children_query, &logical_ships);
+            let ship_count =
+                crate::ship::ship_count(*fleet_entity, &children_query, &logical_ships);
             let delta_v = fleet.delta_v_remaining;
 
             commands.entity(container).with_children(|parent| {
@@ -1076,34 +1193,55 @@ pub fn update_fleet_tabs(
                         },
                         BackgroundColor(bg_color),
                         BorderRadius::all(Val::Px(4.0)),
-                        FleetTab { fleet_entity: fleet_entity_copy },
+                        FleetTab {
+                            fleet_entity: fleet_entity_copy,
+                        },
                     ))
                     .with_children(|tab| {
                         // Number key hint
                         tab.spawn((
                             Text::new(format!("{}", index + 1)),
-                            TextFont { font_size: 10.0, ..default() },
+                            TextFont {
+                                font_size: 10.0,
+                                ..default()
+                            },
                             TextColor(Color::srgba(0.6, 0.7, 0.8, text_alpha * 0.7)),
                         ));
 
                         // Color indicator
                         tab.spawn((
-                            Node { width: Val::Px(8.0), height: Val::Px(8.0), ..default() },
-                            BackgroundColor(crate::ship::FLEET_PLAYER_SELECTED.with_alpha(if is_selected { 1.0 } else { 0.5 })),
+                            Node {
+                                width: Val::Px(8.0),
+                                height: Val::Px(8.0),
+                                ..default()
+                            },
+                            BackgroundColor(
+                                crate::ship::FLEET_PLAYER_SELECTED.with_alpha(if is_selected {
+                                    1.0
+                                } else {
+                                    0.5
+                                }),
+                            ),
                             BorderRadius::all(Val::Px(2.0)),
                         ));
 
                         // Fleet name
                         tab.spawn((
                             Text::new(&fleet_name),
-                            TextFont { font_size: 12.0, ..default() },
+                            TextFont {
+                                font_size: 12.0,
+                                ..default()
+                            },
                             TextColor(Color::srgba(0.9, 0.95, 1.0, text_alpha)),
                         ));
 
                         // Ship count
                         tab.spawn((
                             Text::new(format!("{}s", ship_count)),
-                            TextFont { font_size: 10.0, ..default() },
+                            TextFont {
+                                font_size: 10.0,
+                                ..default()
+                            },
                             TextColor(Color::srgba(0.7, 0.8, 0.9, text_alpha * 0.8)),
                         ));
 
@@ -1115,7 +1253,10 @@ pub fn update_fleet_tabs(
                         };
                         tab.spawn((
                             Text::new(dv_str),
-                            TextFont { font_size: 10.0, ..default() },
+                            TextFont {
+                                font_size: 10.0,
+                                ..default()
+                            },
                             TextColor(Color::srgba(0.5, 0.9, 0.5, text_alpha * 0.8)),
                         ));
                     });
@@ -1124,7 +1265,10 @@ pub fn update_fleet_tabs(
     } else {
         // Just update existing tabs' appearance
         for (tab_entity, tab) in existing_tabs.iter() {
-            let Some((_, _fleet, is_selected, _)) = fleet_info.iter().find(|(e, _, _, _)| *e == tab.fleet_entity) else {
+            let Some((_, _fleet, is_selected, _)) = fleet_info
+                .iter()
+                .find(|(e, _, _, _)| *e == tab.fleet_entity)
+            else {
                 continue;
             };
             let is_selected = is_selected.is_some();
@@ -1135,7 +1279,9 @@ pub fn update_fleet_tabs(
             } else {
                 Color::srgba(0.1, 0.15, 0.2, 0.7)
             };
-            commands.entity(tab_entity).insert(BackgroundColor(bg_color));
+            commands
+                .entity(tab_entity)
+                .insert(BackgroundColor(bg_color));
 
             // Update text content would require additional children queries
             // For simplicity, we'll rebuild on selection change - check below
@@ -1150,9 +1296,14 @@ pub fn handle_fleet_number_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut key_state: ResMut<FleetKeyState>,
-    fleets: Query<(Entity, &crate::ship::Fleet, &crate::ship::FleetLocation, &crate::ship::Faction)>,
+    fleets: Query<(
+        Entity,
+        &crate::ship::Fleet,
+        &crate::ship::FleetLocation,
+        &crate::ship::Faction,
+    )>,
     selected: Query<Entity, With<crate::ship::Selected>>,
-    bodies: Query<&ComputedBody>,
+    bodies: Query<&GlobalTransform, With<Body>>,
     sim_time: Res<SimulationTime>,
     mut camera_query: Query<&mut crate::camera::CameraTarget>,
 ) {
@@ -1172,7 +1323,8 @@ pub fn handle_fleet_number_keys(
     for (key, index) in key_to_index {
         if keyboard.just_pressed(key) {
             // Get player fleets sorted by name for consistent ordering
-            let mut fleet_list: Vec<_> = fleets.iter()
+            let mut fleet_list: Vec<_> = fleets
+                .iter()
                 .filter(|(_, _, _, faction)| **faction == crate::ship::Faction::Player)
                 .collect();
             fleet_list.sort_by(|a, b| a.1.name.cmp(&b.1.name));
@@ -1188,9 +1340,10 @@ pub fn handle_fleet_number_keys(
 
                     // Get fleet position
                     let fleet_pos = match location {
-                        crate::ship::FleetLocation::AtBody(body_entity) => {
-                            bodies.get(*body_entity).map(|c| c.position).unwrap_or(Vec3::ZERO)
-                        }
+                        crate::ship::FleetLocation::AtBody(body_entity) => bodies
+                            .get(*body_entity)
+                            .map(|gt| gt.translation())
+                            .unwrap_or(Vec3::ZERO),
                         crate::ship::FleetLocation::InTransit {
                             solution,
                             departure_time,
@@ -1204,7 +1357,7 @@ pub fn handle_fleet_number_keys(
                                     MU_SUN,
                                     elapsed,
                                 ) {
-                                    phys_to_visual(r_vec)
+                                    phys_vec_to_vec3(r_vec)
                                 } else {
                                     Vec3::ZERO
                                 }

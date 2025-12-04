@@ -175,8 +175,9 @@ pub fn enter_tactical_mode(
 
     // Offset arena center so body appears on right side of view
     // Offset in negative X to put body on positive X side
+    // TODO(Phase 5): Use CellCoord + Transform instead of f32 position
     let arena_offset = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
-    let arena_pos = body_computed.position + arena_offset;
+    let arena_pos = body_computed.helio_pos.as_vec3() + arena_offset;
 
     info!(
         "Entering tactical mode at body (pos: {:?}), {} player fleets, {} enemy fleets",
@@ -330,8 +331,9 @@ pub fn update_arena_position(
     for (arena, mut arena_transform) in &mut arena_query {
         if let Ok(body) = bodies.get(arena.body) {
             // Apply same offset as spawn to keep body on right side
+            // TODO(Phase 5): Use CellCoord + Transform instead of f32 position
             let arena_offset = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
-            let new_pos = body.position + arena_offset;
+            let new_pos = body.helio_pos.as_vec3() + arena_offset;
 
             // Calculate how much the arena moved this frame
             let delta = new_pos - arena_transform.translation;

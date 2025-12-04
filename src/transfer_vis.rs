@@ -3,20 +3,17 @@
 //! Renders Lambert transfer arcs between celestial bodies with burn markers
 //! showing departure and arrival delta-v requirements.
 
-use bevy::{
-    asset::Assets,
-    gizmos::GizmoAsset,
-    prelude::*,
-};
-use bevy_vector_shapes::prelude::*;
 use astrora_core::core::Vector3;
+use bevy::{asset::Assets, gizmos::GizmoAsset, math::DVec3, prelude::*};
+use bevy_vector_shapes::prelude::*;
+use big_space::prelude::*;
 
 use crate::{
-    camera::CameraScale,
-    orbital_data::MU_SUN,
-    transfer::{TransferSolution, propagate_kepler},
+    camera::{BigSpaceRoot, CameraScale},
+    orbital_data::{Body, MU_SUN},
+    phys_vec_to_vec3,
     simulation::SimulationTime,
-    phys_to_visual,
+    transfer::{TransferSolution, propagate_kepler},
 };
 
 // ============================================================================
@@ -63,8 +60,6 @@ pub struct TransferArc;
 /// Marker for burn visualization points.
 #[derive(Component)]
 pub struct BurnMarker {
-    /// Parent transfer entity
-    pub transfer: Entity,
     /// True = departure burn, False = arrival burn
     pub is_departure: bool,
     /// Delta-v vector in physics coordinates (m/s)
@@ -74,7 +69,6 @@ pub struct BurnMarker {
 // ============================================================================
 // Resources
 // ============================================================================
-
 
 /// Marker for preview transfer arc (dimmer color, shown during hover)
 #[derive(Component)]
@@ -88,56 +82,130 @@ const PREVIEW_TRANSFER_COLOR: Color = Color::srgba(1.0, 0.6, 0.2, 0.35);
 // ============================================================================
 
 /// Spawns the transfer visualization entities and returns the transfer entity.
+/// Transfer is positioned in big_space hierarchy at the departure position.
 pub fn spawn_transfer_visualization(
     commands: &mut Commands,
     gizmo_assets: &mut ResMut<Assets<GizmoAsset>>,
+    parent_entity: Entity,
+    big_space_root: Entity,
+    grid: &Grid,
     fleet_entity: Entity,
     source_entity: Entity,
     target_entity: Entity,
     solution: &TransferSolution,
     departure_time: f64,
+    cam_scale: f32,
 ) -> Entity {
-    // Create the transfer arc gizmo
+    // Create the transfer arc gizmo asset
     let arc_asset = create_transfer_arc(solution, MU_SUN);
 
-    // Spawn the Transfer entity
-    let transfer_entity = commands
-        .spawn(Transfer {
-            fleet: fleet_entity,
-            source: source_entity,
-            target: target_entity,
-            solution: solution.clone(),
-            departure_time,
-        })
-        .id();
-
-    // Spawn the arc gizmo as a child of the transfer
-    let arc_entity = commands.spawn((
-        Gizmo {
-            handle: gizmo_assets.add(arc_asset),
-            depth_bias: 0.05,
-            ..default()
+    // Create the Transfer entity
+    let transfer = Transfer {
+        fleet: fleet_entity,
+        source: source_entity,
+        target: target_entity,
+        solution: solution.clone(),
+        departure_time,
+    };
+    let (departure_arrow_asset, departure_circle_bundle) = create_burn_arrow(
+        &transfer,
+        &BurnMarker {
+            is_departure: true,
+            delta_v: solution.departure_dv,
         },
-        TransferArc,
-    )).id();
+        cam_scale,
+    );
+    let (arrival_arrow_asset, arrival_circle_bundle) = create_burn_arrow(
+        &transfer,
+        &BurnMarker {
+            is_departure: false,
+            delta_v: solution.arrival_dv,
+        },
+        cam_scale,
+    );
+    let line_config = GizmoLineConfig {
+        width: cam_scale * 0.5,
+        ..default()
+    };
 
-    // Spawn burn markers as children of the transfer
-    let departure_marker = commands.spawn(BurnMarker {
-        transfer: transfer_entity,
-        is_departure: true,
-        delta_v: solution.departure_dv,
-    }).id();
+    {
+        let mut gizmo = GizmoAsset::new();
+        gizmo.line(
+            Vec3::new(1E10, 0., 0.),
+            Vec3::new(-1E10, 0., 0.),
+            Color::srgb(1.0, 0.0, 0.0),
+        );
+        let handle = gizmo_assets.add(gizmo);
+        commands.spawn((
+            Gizmo {
+                handle,
+                depth_bias: 0.05,
+                line_config: line_config.clone(),
+                ..default()
+            },
+            Transform::default(),
+            ChildOf(parent_entity),
+        ));
+    }
+    {
+        let mut gizmo = GizmoAsset::new();
+        gizmo.line(
+            Vec3::new(1E10, 0., 0.),
+            Vec3::new(-1E10, 0., 0.),
+            Color::srgb(0.0, 0.9, 0.3),
+        );
+        let handle = gizmo_assets.add(gizmo);
+        commands.spawn((
+            Gizmo {
+                handle,
+                depth_bias: 0.05,
+                line_config: line_config.clone(),
+                ..default()
+            },
+            Transform::default(),
+            CellCoord::default(),
+            ChildOf(parent_entity),
+        ));
+    }
 
-    let arrival_marker = commands.spawn(BurnMarker {
-        transfer: transfer_entity,
-        is_departure: false,
-        delta_v: solution.arrival_dv,
-    }).id();
-
-    // Set up parent-child relationships
-    commands.entity(transfer_entity).add_children(&[arc_entity, departure_marker, arrival_marker]);
-
-    transfer_entity
+    commands
+        .spawn((
+            transfer,
+            // Position at ZERO relative to parent
+            Transform::default(),
+            // CellCoord::default(),
+            // Parent entity is part of big space hierarchy
+            // ChildOf(big_space_root),
+            ChildOf(parent_entity),
+        ))
+        .with_children(|builder| {
+            builder.spawn((
+                Gizmo {
+                    handle: gizmo_assets.add(arc_asset),
+                    depth_bias: 0.05,
+                    ..default()
+                },
+                TransferArc,
+            ));
+            builder.spawn(departure_circle_bundle);
+            builder.spawn((
+                Gizmo {
+                    handle: gizmo_assets.add(departure_arrow_asset),
+                    depth_bias: 0.05,
+                    line_config: line_config.clone(),
+                    ..default()
+                },
+                CellCoord::default(),
+            ));
+            builder.spawn(arrival_circle_bundle);
+            builder.spawn(Gizmo {
+                handle: gizmo_assets.add(arrival_arrow_asset),
+                depth_bias: 0.05,
+                line_config: line_config,
+                ..default()
+            });
+        })
+        .id()
 }
 
 // ============================================================================
@@ -152,18 +220,19 @@ fn generate_arc_points(solution: &TransferSolution, mu: f64, segments: usize) ->
     let mut points = Vec::with_capacity(segments + 1);
 
     // First point is the known departure position
-    points.push(phys_to_visual(solution.departure_pos));
+    points.push(phys_vec_to_vec3(solution.departure_pos));
 
     // Propagate intermediate points
     for i in 1..segments {
         let t = i as f64 * step_dt;
-        if let Some(r_vec) = propagate_kepler(solution.departure_pos, solution.departure_vel, mu, t) {
-            points.push(phys_to_visual(r_vec));
+        if let Some(r_vec) = propagate_kepler(solution.departure_pos, solution.departure_vel, mu, t)
+        {
+            points.push(phys_vec_to_vec3(r_vec));
         }
     }
 
     // Last point is the known arrival position
-    points.push(phys_to_visual(solution.arrival_pos));
+    points.push(phys_vec_to_vec3(solution.arrival_pos));
 
     points
 }
@@ -190,7 +259,9 @@ fn create_transfer_arc(solution: &TransferSolution, mu: f64) -> GizmoAsset {
             let transfer_angle = (dot / (r0.norm() * solution.arrival_pos.norm())).acos();
             warn!(
                 "Transfer arc endpoint mismatch: {:.2e} m error ({:.1}%), transfer_angle={:.1}°",
-                error, error_pct, transfer_angle.to_degrees()
+                error,
+                error_pct,
+                transfer_angle.to_degrees()
             );
         }
     }
@@ -203,28 +274,100 @@ fn create_transfer_arc(solution: &TransferSolution, mu: f64) -> GizmoAsset {
 // Update Systems
 // ============================================================================
 
+pub fn create_burn_arrow(
+    transfer: &Transfer,
+    marker: &BurnMarker,
+    cam_scale: f32,
+) -> (GizmoAsset, ShapeBundle<DiscComponent>) {
+    let mut gizmo = GizmoAsset::new();
+
+    // Calculate position for this marker (heliocentric + sun offset for floating origin)
+    let relative_pos = if marker.is_departure {
+        // Departure: at the computed departure position
+        phys_vec_to_vec3(transfer.solution.departure_pos)
+    } else {
+        // Arrival: at the computed arrival position (where Mars will be)
+        phys_vec_to_vec3(transfer.solution.arrival_pos)
+    };
+    // no need to add sun position because we're using local coordinates since sun is parent
+    let position = relative_pos;
+
+    // Determine color based on burn type
+    let color = if marker.is_departure {
+        DEPARTURE_COLOR
+    } else {
+        ARRIVAL_COLOR
+    };
+
+    // Scale arrow length by delta-v magnitude (in pixels, then scaled)
+    let dv_mag = marker.delta_v.norm();
+    let arrow_len_pixels = (dv_mag / 1000.0).clamp(5.0, 30.0) as f32;
+    let arrow_len = cam_scale * arrow_len_pixels;
+
+    // Direction of delta-v in visual space
+    let dv_dir = Vec3::new(
+        marker.delta_v.x as f32,
+        marker.delta_v.y as f32,
+        marker.delta_v.z as f32,
+    )
+    .normalize_or_zero();
+
+    // painter.thickness = cam_scale * 0.5;
+
+    // Draw the arrow
+    gizmo.line(position, position + dv_dir * arrow_len, color);
+
+    // Draw arrowhead (small lines at angle)
+    let arrow_end = position + dv_dir * arrow_len;
+    let perp = if dv_dir.x.abs() < 0.9 {
+        dv_dir.cross(Vec3::X).normalize()
+    } else {
+        dv_dir.cross(Vec3::Y).normalize()
+    };
+    let head_size = arrow_len * 0.2;
+    let head_back = -dv_dir * head_size;
+
+    gizmo.line(
+        arrow_end,
+        arrow_end + head_back + perp * head_size * 0.5,
+        color,
+    );
+    gizmo.line(
+        arrow_end,
+        arrow_end + head_back - perp * head_size * 0.5,
+        color,
+    );
+
+    let circle_bundle = bevy_vector_shapes::prelude::ShapeBundle::circle(
+        &ShapeConfig::default_3d(),
+        cam_scale * 3.0,
+    );
+
+    (gizmo, circle_bundle)
+}
+
 /// Renders burn arrows using the shape painter.
 pub fn render_burn_arrows(
     transfers: Query<&Transfer>,
-    markers: Query<&BurnMarker>,
+    markers: Query<(&BurnMarker, &ChildOf)>,
     cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
     let cam_scale = cam_scale.0;
 
-    for marker in markers.iter() {
-        let Ok(transfer) = transfers.get(marker.transfer) else {
-            continue;
-        };
+    for (marker, parent) in markers.iter() {
+        let transfer = transfers.get(parent.parent()).expect("Transfer not found");
 
-        // Calculate position for this marker
-        let position = if marker.is_departure {
+        // Calculate position for this marker (heliocentric + sun offset for floating origin)
+        let relative_pos = if marker.is_departure {
             // Departure: at the computed departure position
-            phys_to_visual(transfer.solution.departure_pos)
+            phys_vec_to_vec3(transfer.solution.departure_pos)
         } else {
             // Arrival: at the computed arrival position (where Mars will be)
-            phys_to_visual(transfer.solution.arrival_pos)
+            phys_vec_to_vec3(transfer.solution.arrival_pos)
         };
+        // no need to add sun position because we're using local coordinates since sun is parent
+        let position = relative_pos;
 
         // Determine color based on burn type
         let color = if marker.is_departure {
@@ -326,12 +469,35 @@ fn spawn_preview_arc(
     let points = generate_arc_points(solution, MU_SUN, TRANSFER_ARC_SEGMENTS);
     gizmo.linestrip(points, PREVIEW_TRANSFER_COLOR);
 
-    commands.spawn((
-        Gizmo {
-            handle: gizmo_assets.add(gizmo),
-            depth_bias: 0.04, // Slightly behind main arc
-            ..default()
-        },
-        PreviewTransferArc,
-    )).id()
+    commands
+        .spawn((
+            Gizmo {
+                handle: gizmo_assets.add(gizmo),
+                depth_bias: 0.04, // Slightly behind main arc
+                ..default()
+            },
+            PreviewTransferArc,
+            Transform::default(),
+        ))
+        .id()
+}
+
+/// Updates transfer arc Transform positions to match the Sun's GlobalTransform.
+/// Transfer arcs use heliocentric coordinates, so they need to move with the Sun
+/// in the floating-origin coordinate system.
+pub fn update_transfer_arc_positions(
+    mut arc_query: Query<&mut Transform, Or<(With<TransferArc>, With<PreviewTransferArc>)>>,
+    bodies: Query<(&GlobalTransform, &Body)>,
+) {
+    // Find the Sun (body with no parent)
+    let sun_pos = bodies
+        .iter()
+        .find(|(_, body)| body.parent_name.is_none())
+        .map(|(gt, _)| gt.translation())
+        .unwrap_or(Vec3::ZERO);
+
+    // Update all arc transforms to match Sun position
+    // for mut transform in &mut arc_query {
+    //     transform.translation = sun_pos;
+    // }
 }

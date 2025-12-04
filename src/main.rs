@@ -1,6 +1,7 @@
 use std::cell::LazyCell;
 
 use astrora_core::core::{Vector3, elements::coe_to_rv};
+use avian3d::prelude::Position;
 use bevy::{
     asset::Assets,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
@@ -8,13 +9,15 @@ use bevy::{
         GizmoAsset,
         config::{GizmoConfigStore, GizmoLineJoint},
     },
-    math::Vec3,
+    math::{DVec3, Vec3},
     platform::collections::HashMap,
     prelude::*,
+    transform::TransformPlugin,
     window::PrimaryWindow,
 };
 use bevy_pancam::{PanCam, PanCamPlugin};
 use bevy_vector_shapes::prelude::*;
+use big_space::prelude::*;
 
 mod camera;
 mod orbital_data;
@@ -60,20 +63,19 @@ type BodyEntity = Entity;
 // Components
 // ============================================================================
 
-/// Computed per-frame data for a body (position, visibility, display size).
+/// Computed per-frame data for a body (visibility, display size, cached helio position).
 /// Written by update_body_positions, read by rendering and UI systems.
 #[derive(Component, Default)]
 pub struct ComputedBody {
-    pub position: Vec3,
+    /// High-precision heliocentric position (f64) - used for distance calculations
+    pub helio_pos: DVec3,
     pub visibility: f32,
     pub display_size: f32,
 }
 
 /// Links an orbit gizmo entity to its parent body for position updates.
 #[derive(Component)]
-struct OrbitGizmo {
-    parent: BodyEntity,
-}
+struct OrbitGizmo;
 
 fn main() {
     let start_day = simulation::parse_start_day();
@@ -82,7 +84,9 @@ fn main() {
     }
 
     App::new()
-        .add_plugins(DefaultPlugins)
+        // Disable Bevy's TransformPlugin - big_space replaces it
+        .add_plugins(DefaultPlugins.build().disable::<TransformPlugin>())
+        .add_plugins(BigSpaceDefaultPlugins)
         .add_plugins(PanCamPlugin)
         .add_plugins(ShapePlugin::default())
         .add_plugins(physics::TacticalPhysicsPlugin)
@@ -99,6 +103,7 @@ fn main() {
             Startup,
             (
                 spawn_camera,
+                ApplyDeferred, // Ensure BigSpaceRoot resource is available
                 setup,
                 ApplyDeferred,
                 init_parent_entities,
@@ -111,97 +116,112 @@ fn main() {
         .add_systems(
             Update,
             (
-                camera::update_camera_scale,
-                simulation::handle_time_controls,
-                // Flight plan modifications
-                ship::commit_plan,
-                ship::cancel_last_leg,
-                // Fleet management
-                ship::split_fleet,
-                ship::merge_fleets,
-                // Objective tracking
-                ship::check_objectives,
-                // Transfer execution (runs before expire so committed legs depart first)
-                ship::execute_departure,
-                ship::check_arrival,
-                // Combat detection (after arrival)
-                ship::detect_combat,
-                // Tactical mode entry (after combat detection)
-                tactical::enter_tactical_mode,
-                // Keep tactical arena synced with body position
-                tactical::update_arena_position,
-                // Expire uncommitted legs whose departure_day passed
-                ship::expire_stale_legs,
-                // Sync Transfer entities to FleetLocation + committed legs
-                ship::sync_transfer_entities,
-                transfer_vis::check_transfer_expiration,
-                update_body_positions,
+                (
+                    camera::update_camera_scale,
+                    simulation::handle_time_controls,
+                    update_body_positions,
+                    // Flight plan modifications
+                    ship::commit_plan,
+                    ship::cancel_last_leg,
+                    // Fleet management
+                    ship::split_fleet,
+                    ship::merge_fleets,
+                    // Objective tracking
+                    ship::check_objectives,
+                    // Transfer execution (runs before expire so committed legs depart first)
+                    ship::execute_departure,
+                    ship::check_arrival,
+                    // Combat detection (after arrival)
+                    ship::detect_combat,
+                    // Tactical mode entry (after combat detection)
+                    tactical::enter_tactical_mode,
+                    // Keep tactical arena synced with body position
+                    tactical::update_arena_position,
+                    // Expire uncommitted legs whose departure_day passed
+                    ship::expire_stale_legs,
+                    // Sync Transfer entities to FleetLocation + committed legs
+                    ship::sync_transfer_entities,
+                    transfer_vis::check_transfer_expiration,
+                )
+                    .chain(),
+                // UI interaction systems
+                (
+                    handle_body_click,
+                    // Tactical picking (box selection must run before click to set drag state)
+                    picking::update_box_selection,
+                    picking::handle_tactical_click,
+                    picking::handle_tactical_move_order,
+                    ui::handle_fleet_number_keys,
+                    ui::handle_popup_spawn,
+                    ui::update_popup_options,
+                    ui::update_popup_position,
+                    ui::handle_close_button,
+                    ui::handle_escape_key,
+                    ui::handle_option_hover,
+                    transfer_vis::update_preview_arc,
+                    ui::handle_option_selection,
+                )
+                    .chain(),
+                // Rendering systems (run last)
+                (
+                    camera::animate_camera,
+                    // update_orbit_positions,
+                    transfer_vis::update_transfer_arc_positions,
+                    render_system,
+                    ship::update_fleet_positions,
+                    ship::sync_fleet_shapes,
+                    // ship::render_fleets, // TODO: Remove after verifying sync_fleet_shapes works
+                    tactical::update_ship_movement,
+                    tactical::render_visual_ships,
+                    tactical::render_move_markers,
+                    picking::render_box_selection,
+                    ship::sync_objective_rings,
+                    // ship::render_departure_markers,
+                    // TODO: Remove me
+                    ship::render_plan_markers,
+                    ship::render_plan_arcs,
+                    // TODO: remove me - now handled by spawn_transfer_visualization in sync_transfer_entities system
+                    // transfer_vis::render_burn_arrows,
+                    ui::update_labels,
+                    ui::update_time_ui,
+                    ui::update_transfer_panel,
+                    ui::update_fleet_tabs,
+                    ui::update_victory_overlay,
+                )
+                    .chain(),
             )
                 .chain(),
-        )
-        // UI interaction systems
-        .add_systems(
-            Update,
-            (
-                handle_body_click,
-                // Tactical picking (box selection must run before click to set drag state)
-                picking::update_box_selection,
-                picking::handle_tactical_click,
-                picking::handle_tactical_move_order,
-                ui::handle_fleet_number_keys,
-                ui::handle_popup_spawn,
-                ui::update_popup_options,
-                ui::update_popup_position,
-                ui::handle_close_button,
-                ui::handle_escape_key,
-                ui::handle_option_hover,
-                transfer_vis::update_preview_arc,
-                ui::handle_option_selection,
-            )
-                .chain()
-                .after(update_body_positions),
-        )
-        // Rendering systems (run last)
-        .add_systems(
-            Update,
-            (
-                camera::animate_camera,
-                update_orbit_positions,
-                render_system,
-                ship::update_fleet_positions,
-                ship::render_fleets,
-                tactical::update_ship_movement,
-                tactical::render_visual_ships,
-                tactical::render_move_markers,
-                picking::render_box_selection,
-                ship::render_objectives,
-                ship::render_departure_markers,
-                ship::render_plan_markers,
-                ship::render_plan_arcs,
-                transfer_vis::render_burn_arrows,
-                ui::update_labels,
-                ui::update_time_ui,
-                ui::update_transfer_panel,
-                ui::update_fleet_tabs,
-                ui::update_victory_overlay,
-            )
-                .chain()
-                .after(ui::handle_option_selection),
         )
         .run();
 }
 
-fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
+fn setup(
+    mut commands: Commands,
+    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
+    big_space_root: Res<camera::BigSpaceRoot>,
+    grid: Query<&Grid, With<BigSpace>>,
+) {
+    let grid = grid.single().unwrap();
     // Load planetary data
     let bodies = PlanetaryElements::get_planetary_elements();
     commands.insert_resource(PlanetaryElements {
         bodies: bodies.clone(),
     });
 
-    // First pass: spawn all bodies and build name -> entity map
+    // First pass: spawn all bodies as children of BigSpace with CellCoord
     let mut body_entities: HashMap<String, BodyEntity> = HashMap::new();
     for body in bodies.values() {
-        let entity = commands.spawn((body.clone(), ComputedBody::default())).id();
+        // Spawn body as child of BigSpace root with spatial components
+        // Initial CellCoord is origin - update_body_positions will compute correct position
+        let entity = commands
+            .spawn((
+                body.clone(),
+                ComputedBody::default(),
+                CellCoord::default(), // Will be updated by update_body_positions
+                Transform::default(), // Will be updated by update_body_positions
+                ChildOf(big_space_root.0), // Parent to BigSpace root
+            ))
+            .id();
         body_entities.insert(body.name.clone(), entity);
     }
 
@@ -250,27 +270,28 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
         ui::spawn_body_label(&mut commands, &body.name, body_entity);
 
         // Create orbit gizmo if body has a parent
-        if let Some(parent_name) = &body.parent_name {
-            if let Some(&parent_entity) = body_entities.get(parent_name) {
-                if let Some(parent_body) = bodies.get(parent_name) {
-                    let orbit_asset = create_orbit_gizmo_asset(body, parent_body);
-                    commands.spawn((
-                        Gizmo {
-                            handle: gizmo_assets.add(orbit_asset),
-                            depth_bias: 0.1,
-                            ..default()
-                        },
-                        OrbitGizmo {
-                            parent: parent_entity,
-                        },
-                    ));
-                }
-            }
-        }
-    }
+        // Gizmos stay outside BigSpace - their Transform is set from parent's GlobalTransform
+        let Some(parent_name) = &body.parent_name else {
+            continue;
+        };
+        let Some(parent_entity) = body_entities.get(parent_name) else {
+            continue;
+        };
+        let Some(parent_body) = bodies.get(parent_name) else {
+            continue;
+        };
+        let orbit_asset = create_orbit_gizmo_asset(body, parent_body);
 
-    // Note: Parent entities will be linked after all entities are spawned
-    // This happens in a deferred system (init_parent_entities) that runs after setup
+        commands.entity(*parent_entity).with_child((
+            Gizmo {
+                handle: gizmo_assets.add(orbit_asset),
+                depth_bias: 0.1,
+                ..default()
+            },
+            OrbitGizmo,
+            Transform::default(),
+        ));
+    }
 
     // Spawn time control panel
     ui::spawn_time_panel(&mut commands);
@@ -284,6 +305,7 @@ fn setup(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
 
 /// Links parent entities in Body components after all bodies are spawned.
 /// This must run after ApplyDeferred to ensure all entities exist.
+/// TODO: Can we just do this in the setup function? We just need entity ids, they don't need to actually be spawned.
 fn init_parent_entities(mut bodies: Query<(Entity, &mut Body)>) {
     // Build entity map by name
     let entity_map: HashMap<String, Entity> = bodies
@@ -322,7 +344,7 @@ fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
         if let Ok(elems) = propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t)
         {
             let (r_local, _) = coe_to_rv(&elems, parent_body.std_grav_param);
-            points.push(phys_to_visual(r_local));
+            points.push(phys_vec_to_vec3(r_local));
         }
     }
 
@@ -338,11 +360,18 @@ fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
 }
 
 /// Computes positions, visibility, and display sizes for all bodies.
+/// Updates CellCoord + Transform for big_space integration.
 /// Runs once per frame before orbit updates and rendering.
 fn update_body_positions(
     body_query: Query<(Entity, &Body)>,
-    mut computed_query: Query<&mut ComputedBody>,
+    mut spatial_query: Query<(
+        &mut ComputedBody,
+        &mut CellCoord,
+        &mut Transform,
+        // &mut Position,
+    )>,
     camera_query: Query<&Projection, With<Camera3d>>,
+    grid_query: Query<&Grid, With<BigSpace>>,
     sim_time: Res<SimulationTime>,
 ) {
     let cam_scale = camera_query
@@ -351,53 +380,171 @@ fn update_body_positions(
             Projection::Orthographic(ortho) => ortho.scale,
             _ => 1.0,
         })
-        .unwrap_or(1.0);
+        .expect("No camera found");
+
+    let Ok(grid) = grid_query.single() else {
+        warn!("No BigSpace grid found");
+        return;
+    };
 
     let t = sim_time.sim_time;
 
-    // Build position cache using entity keys
-    let mut positions: HashMap<Entity, Vec3> = HashMap::new();
+    // Build position cache using entity keys (f64 for precision)
+    let mut helio_positions: HashMap<Entity, DVec3> = HashMap::new();
 
-    // First pass: compute all positions
+    // First pass: compute all heliocentric positions in f64
     for (entity, _) in body_query.iter() {
-        resolve_position_with_queries(entity, &body_query, &mut positions, t);
+        resolve_helio_position(entity, &body_query, &mut helio_positions, t);
     }
 
-    // Second pass: update ComputedBody components with computed positions and metadata
+    // Second pass: update CellCoord, Transform, and ComputedBody
     for (entity, body) in body_query.iter() {
-        if let Ok(mut computed) = computed_query.get_mut(entity) {
-            let pos = positions.get(&entity).copied().unwrap_or(Vec3::ZERO);
-            computed.position = pos;
-            computed.visibility = calculate_visibility(body, pos, &positions, cam_scale);
-            computed.display_size = compute_display_size(body, cam_scale);
-        }
+        let helio_pos = helio_positions[&entity];
+
+        let (
+            mut computed,
+            mut cell,
+            mut transform,
+            // mut position
+        ) = spatial_query
+            .get_mut(entity)
+            .inspect_err(|e| {
+                error!(
+                    "No ComputedBody, CellCoord, or Transform found for entity: {:?}",
+                    e
+                )
+            })
+            .expect("No ComputedBody, CellCoord, or Transform found for entity");
+
+        // Convert heliocentric position to CellCoord + local Transform
+        let (new_cell, local) = grid.translation_to_grid(helio_pos);
+        *cell = new_cell;
+        transform.translation = local;
+
+        // Update physics position
+        // position.0 = helio_pos;
+
+        // Cache heliocentric position for other systems
+        computed.helio_pos = helio_pos;
+
+        // Compute visibility using f64 positions
+        computed.visibility =
+            calculate_visibility_f64(body, helio_pos, &helio_positions, cam_scale);
+        computed.display_size = compute_display_size(body, cam_scale);
     }
 }
 
 /// Update orbit gizmo Transform positions to match their parent body positions.
-fn update_orbit_positions(
-    mut orbit_query: Query<(&OrbitGizmo, &mut Transform)>,
-    body_query: Query<&ComputedBody>,
-) {
-    for (orbit_gizmo, mut transform) in &mut orbit_query {
-        let parent_pos = body_query
-            .get(orbit_gizmo.parent)
-            .map(|c| c.position)
-            .unwrap_or(Vec3::ZERO);
-        transform.translation = parent_pos;
-    }
-}
+// TODO: we can remove this now that gizmos are children of their parents and track their parent's position automatically
+// fn update_orbit_positions(
+//     mut orbit_query: Query<(&OrbitGizmo, &mut Transform)>,
+//     body_query: Query<&GlobalTransform, With<Body>>,
+// ) {
+//     for (orbit_gizmo, mut transform) in &mut orbit_query {
+//         let parent_pos = body_query
+//             .get(orbit_gizmo.parent)
+//             .map(|gt| gt.translation())
+//             .expect("No GlobalTransform found for orbit gizmo parent body");
+//         transform.translation = parent_pos;
+//     }
+// }
 
 // ============================================================================
 // Coordinate Conversion & Position Resolution
 // ============================================================================
 
 /// Converts physics coordinates (meters) to visual coordinates (1:1 meters).
-pub fn phys_to_visual(v: Vector3) -> Vec3 {
+pub fn phys_vec_to_vec3(v: Vector3) -> Vec3 {
     Vec3::new(v.x as f32, v.y as f32, v.z as f32)
 }
 
+/// Converts physics coordinates (meters) to DVec3 (f64).
+fn phys_to_dvec3(v: Vector3) -> DVec3 {
+    DVec3::new(v.x, v.y, v.z)
+}
+
+/// Recursively resolves a body's absolute heliocentric position in f64.
+fn resolve_helio_position(
+    entity: Entity,
+    bodies: &Query<(Entity, &Body)>,
+    cache: &mut HashMap<Entity, DVec3>,
+    t: f64,
+) -> DVec3 {
+    // Return cached position if available
+    if let Some(&pos) = cache.get(&entity) {
+        return pos;
+    }
+
+    // Find the body component for this entity
+    let body = bodies.iter().find(|(e, _)| *e == entity).map(|(_, b)| b);
+
+    let Some(body) = body else {
+        return DVec3::ZERO;
+    };
+
+    // Resolve parent's position first
+    let parent_pos = body
+        .parent_entity
+        .map(|p| resolve_helio_position(p, bodies, cache, t))
+        .unwrap_or(DVec3::ZERO);
+
+    // Calculate local position relative to parent
+    let local_pos = if let Some(parent_entity) = body.parent_entity {
+        // Find parent body
+        let parent_body = bodies
+            .iter()
+            .find(|(e, _)| *e == parent_entity)
+            .map(|(_, b)| b);
+
+        if let Some(parent_body) = parent_body {
+            propagate_elliptic(body.orbital_elements, parent_body.std_grav_param, t)
+                .ok()
+                .map(|elems| {
+                    let (r_vec, _) = coe_to_rv(&elems, parent_body.std_grav_param);
+                    phys_to_dvec3(r_vec)
+                })
+                .unwrap_or_default()
+        } else {
+            DVec3::ZERO
+        }
+    } else {
+        DVec3::ZERO
+    };
+
+    let abs_pos = parent_pos + local_pos;
+    cache.insert(entity, abs_pos);
+    abs_pos
+}
+
+/// Calculate visibility (0.0-1.0) based on screen-space separation from parent (f64 version).
+fn calculate_visibility_f64(
+    body: &Body,
+    body_pos: DVec3,
+    positions: &HashMap<Entity, DVec3>,
+    cam_scale: f32,
+) -> f32 {
+    // Bodies without parents (Sun) are always visible
+    let Some(parent_entity) = body.parent_entity else {
+        return 1.0;
+    };
+
+    let parent_pos = positions
+        .get(&parent_entity)
+        .copied()
+        .unwrap_or(DVec3::ZERO);
+    let world_dist = (body_pos - parent_pos).length();
+
+    // Convert to approximate screen distance
+    // For orthographic: screen_dist ≈ world_dist / cam_scale
+    let screen_dist = (world_dist / cam_scale as f64) as f32;
+
+    // Smooth fade between thresholds
+    ((screen_dist - LOD_MIN_SCREEN_DIST) / (LOD_MAX_SCREEN_DIST - LOD_MIN_SCREEN_DIST))
+        .clamp(0.0, 1.0)
+}
+
 /// Recursively resolves a body's absolute position in visual coordinates using entity keys.
+/// LEGACY: Used by orbit gizmos. Will be removed when they use GlobalTransform.
 fn resolve_position_with_queries(
     entity: Entity,
     bodies: &Query<(Entity, &Body)>,
@@ -445,7 +592,7 @@ fn resolve_position_with_queries(
         Vector3::default()
     };
 
-    let abs_pos = parent_pos + phys_to_visual(local_pos);
+    let abs_pos = parent_pos + phys_vec_to_vec3(local_pos);
     cache.insert(entity, abs_pos);
     abs_pos
 }
@@ -478,14 +625,18 @@ fn calculate_visibility(
         .clamp(0.0, 1.0)
 }
 
-/// Draws all visible bodies. Positions and visibility are precomputed by update_body_positions.
-fn render_system(body_query: Query<(&Body, &ComputedBody)>, mut painter: ShapePainter) {
-    for (body, computed) in body_query.iter() {
+/// Draws all visible bodies using GlobalTransform for camera-relative positioning.
+fn render_system(
+    body_query: Query<(&Body, &ComputedBody, &GlobalTransform)>,
+    mut painter: ShapePainter,
+) {
+    for (body, computed, global_transform) in body_query.iter() {
         if computed.visibility < 0.01 {
             continue;
         }
 
-        painter.set_translation(computed.position);
+        // Use GlobalTransform for precise camera-relative positioning
+        painter.set_translation(global_transform.translation());
         let base_color = body.color.to_srgba();
         painter.set_color(Color::srgba(
             base_color.red,
@@ -528,7 +679,7 @@ fn handle_body_click(
     keyboard: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    body_query: Query<(Entity, &Body, &ComputedBody)>,
+    body_query: Query<(Entity, &Body, &ComputedBody, &GlobalTransform)>,
     fleet_query: Query<(Entity, &ship::Fleet, &ship::FleetLocation, &ship::Faction)>,
     fleet_positions: Query<(Entity, &ship::ComputedFleetPosition, &ship::Faction)>,
     selected_query: Query<Entity, With<ship::Selected>>,
@@ -563,7 +714,7 @@ fn handle_body_click(
         let current_entity = selected_fleet.map(|(_, _, loc, _)| loc.effective_body());
 
         let mut best_match: Option<(Entity, f32)> = None;
-        for (entity, _body, computed) in body_query.iter() {
+        for (entity, _body, computed, global_transform) in body_query.iter() {
             if computed.visibility < 0.01 {
                 continue;
             }
@@ -571,7 +722,8 @@ fn handle_body_click(
                 continue;
             }
 
-            let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position)
+            let Ok(screen_pos) =
+                camera.world_to_viewport(camera_transform, global_transform.translation())
             else {
                 continue;
             };
@@ -592,7 +744,7 @@ fn handle_body_click(
         if let Some((clicked_entity, _)) = best_match {
             let body_name = body_query
                 .get(clicked_entity)
-                .map(|(_, b, _)| b.name.clone())
+                .map(|(_, b, _, _)| b.name.clone())
                 .unwrap_or_default();
             info!("Shift+clicked on body: {}", body_name);
             popup.target_entity = Some(clicked_entity);

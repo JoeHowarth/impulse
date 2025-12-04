@@ -13,16 +13,18 @@
 use std::collections::VecDeque;
 
 use bevy::gizmos::GizmoAsset;
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
+use big_space::prelude::*;
 
 use crate::ComputedBody;
-use crate::camera::CameraScale;
+use crate::camera::{BigSpaceRoot, CameraScale};
 use crate::orbital_data::{Body, MU_SUN};
 use crate::simulation::SimulationTime;
 use crate::transfer::{TransferSolution, propagate_kepler_full};
 use crate::transfer_lut::TransferLut;
-use crate::{phys_to_visual, transfer_vis};
+use crate::{phys_vec_to_vec3, transfer_vis};
 
 // ============================================================================
 // Components
@@ -99,6 +101,21 @@ pub struct CombatState {
     pub enemy_fleets: Vec<Entity>,
 }
 
+/// Marker for objective ring entities (retained shape showing enemy presence at a body).
+/// These are spawned as children of Body entities.
+#[derive(Component)]
+pub struct ObjectiveRing;
+
+/// Marker for fleet visual entities (retained shape for strategic map).
+/// Links the shape to its logical fleet entity.
+#[derive(Component)]
+pub struct FleetShape {
+    pub fleet_entity: Entity,
+    /// True if shape was spawned for InTransit (has CellCoord, parented to BigSpace).
+    /// False if spawned for AtBody (parented to body entity).
+    pub is_transit_shape: bool,
+}
+
 /// Fleet's current location - either at a body or in transit.
 #[derive(Component)]
 pub enum FleetLocation {
@@ -106,6 +123,7 @@ pub enum FleetLocation {
     AtBody(Entity),
     /// Fleet is in transit between bodies
     InTransit {
+        source: Entity,
         target: Entity,
         solution: TransferSolution,
         departure_time: f64,
@@ -193,7 +211,6 @@ pub fn leg_base_day(
     }
 }
 
-
 // ============================================================================
 // Systems
 // ============================================================================
@@ -257,7 +274,8 @@ pub fn execute_departure(
         }
 
         // Get orbital elements for lookup
-        let (Ok(source_body), Ok(target_body)) = (bodies.get(current_body), bodies.get(leg.target)) else {
+        let (Ok(source_body), Ok(target_body)) = (bodies.get(current_body), bodies.get(leg.target))
+        else {
             warn!("Cannot get body data for departure");
             continue;
         };
@@ -289,6 +307,7 @@ pub fn execute_departure(
 
         // Transition to InTransit
         *location = FleetLocation::InTransit {
+            source: current_body,
             target: leg.target,
             solution,
             departure_time: leg.departure_day as f64 * 86400.0,
@@ -309,6 +328,7 @@ pub fn check_arrival(
 ) {
     for (mut fleet, mut location) in &mut fleets {
         let FleetLocation::InTransit {
+            source: _,
             target,
             solution,
             departure_time,
@@ -412,7 +432,8 @@ pub fn commit_plan(
             .skip(plan.committed_count)
             .filter_map(|(i, leg)| {
                 let source = leg_source(location, &plan, i);
-                let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) else {
+                let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target))
+                else {
                     return None;
                 };
                 lut.get_transfer(
@@ -422,7 +443,8 @@ pub fn commit_plan(
                     &tgt_body.orbital_elements,
                     leg.departure_day,
                     leg.tof_days,
-                ).map(|s| s.total_dv)
+                )
+                .map(|s| s.total_dv)
             })
             .sum();
 
@@ -439,7 +461,10 @@ pub fn commit_plan(
             let leg = &plan.legs[i];
             let source = leg_source(location, &plan, i);
             let source_name = bodies.get(source).map(|b| b.name.as_str()).unwrap_or("?");
-            let target_name = bodies.get(leg.target).map(|b| b.name.as_str()).unwrap_or("?");
+            let target_name = bodies
+                .get(leg.target)
+                .map(|b| b.name.as_str())
+                .unwrap_or("?");
 
             if let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) {
                 if let Some(solution) = lut.get_transfer(
@@ -509,9 +534,9 @@ static FLEET_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU3
 /// Generate a unique fleet name based on NATO phonetic alphabet
 fn generate_fleet_name() -> String {
     const NAMES: &[&str] = &[
-        "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet", "Kilo",
-        "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra",
-        "Tango", "Uniform", "Victor", "Whiskey", "Xray", "Yankee", "Zulu",
+        "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet", "Kilo", "Lima", "Mike",
+        "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor",
+        "Whiskey", "Xray", "Yankee", "Zulu",
     ];
     let idx = FLEET_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
     if idx < NAMES.len() {
@@ -576,15 +601,17 @@ pub fn split_fleet(
         split_count, fleet.name, new_name
     );
 
-    let new_fleet = commands.spawn((
-        Fleet {
-            delta_v_remaining: fleet.delta_v_remaining,
-            name: new_name,
-        },
-        FleetLocation::AtBody(*body),
-        Faction::Player,
-        FlightPlan::default(),
-    )).id();
+    let new_fleet = commands
+        .spawn((
+            Fleet {
+                delta_v_remaining: fleet.delta_v_remaining,
+                name: new_name,
+            },
+            FleetLocation::AtBody(*body),
+            Faction::Player,
+            FlightPlan::default(),
+        ))
+        .id();
 
     // Reparent ships to new fleet
     for ship in ships_to_move {
@@ -704,6 +731,9 @@ pub fn sync_transfer_entities(
     lut: Res<TransferLut>,
     transfers: Query<(Entity, &transfer_vis::Transfer)>,
     bodies: Query<&Body>,
+    cam_scale: Res<CameraScale>,
+    big_space_root: Res<BigSpaceRoot>,
+    grid: Query<&Grid, With<BigSpace>>,
 ) {
     for (fleet_entity, location, plan) in &fleets {
         // Build list of (source, target, solution, departure_time) for active visualizations
@@ -711,15 +741,13 @@ pub fn sync_transfer_entities(
 
         // Add active transfer if InTransit
         if let FleetLocation::InTransit {
+            source,
             target,
             solution,
             departure_time,
         } = location
         {
-            // Source for active transfer is where we departed from
-            // We don't store it, but we can get the body the ship was at
-            // For now, use PLACEHOLDER - the visualization doesn't need source entity
-            active.push((Entity::PLACEHOLDER, *target, solution.clone(), *departure_time));
+            active.push((*source, *target, solution.clone(), *departure_time));
         }
 
         // Add committed future legs
@@ -763,14 +791,23 @@ pub fn sync_transfer_entities(
                 t.target == *target && (t.departure_time - *departure_time).abs() < 1.0
             });
             if !has_entity {
+                let parent_entity = bodies
+                    .get(*source)
+                    .map(|b| b.parent_entity)
+                    .expect("Source is not a body")
+                    .expect("Source body has no parent");
                 transfer_vis::spawn_transfer_visualization(
                     &mut commands,
                     &mut gizmo_assets,
+                    parent_entity,
+                    big_space_root.0,
+                    grid.get(big_space_root.0).unwrap(),
                     fleet_entity,
                     *source,
                     *target,
                     solution,
                     *departure_time,
+                    cam_scale.0,
                 );
             }
         }
@@ -810,9 +847,10 @@ const FLEET_OFFSET_PIXELS: f32 = 10.0;
 
 /// Computes visual positions for all fleets, offsetting multiple fleets at the same body.
 /// Returns a map from fleet entity to (world_position, velocity_direction).
+/// Note: Uses GlobalTransform for body positions (camera-relative via big_space).
 pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
     ships: &Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction), F>,
-    bodies: &Query<&ComputedBody>,
+    bodies: &Query<&GlobalTransform, With<Body>>,
     sim_time: &SimulationTime,
     cam_scale: f32,
 ) -> bevy::platform::collections::HashMap<Entity, (Vec3, Vec3)> {
@@ -836,11 +874,20 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
 
         let (position, velocity_dir) = match location {
             FleetLocation::AtBody(body) => {
-                let body_pos = bodies.get(*body).map(|c| c.position).unwrap_or(Vec3::ZERO);
+                let body_pos = bodies
+                    .get(*body)
+                    .map(|gt| gt.translation())
+                    .unwrap_or(Vec3::ZERO);
 
                 // Get index of this fleet among all fleets at this body
-                let fleets_here = fleets_at_body.get(body).map(|v| v.as_slice()).unwrap_or(&[]);
-                let fleet_index = fleets_here.iter().position(|e| *e == fleet_entity).unwrap_or(0);
+                let fleets_here = fleets_at_body
+                    .get(body)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let fleet_index = fleets_here
+                    .iter()
+                    .position(|e| *e == fleet_entity)
+                    .unwrap_or(0);
                 let fleet_count = fleets_here.len();
 
                 // Compute offset angle for this fleet
@@ -849,7 +896,8 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
                     Vec3::new(offset_distance * size_mult, 0.0, 0.0)
                 } else {
                     // Multiple fleets: fan out in a semicircle (top half)
-                    let angle = PI * 0.25 + (fleet_index as f32 / (fleet_count - 1).max(1) as f32) * PI * 0.5;
+                    let angle = PI * 0.25
+                        + (fleet_index as f32 / (fleet_count - 1).max(1) as f32) * PI * 0.5;
                     let x = offset_distance * size_mult * angle.cos();
                     let y = offset_distance * size_mult * angle.sin();
                     Vec3::new(x, y, 0.0)
@@ -873,8 +921,9 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
                     MU_SUN,
                     elapsed,
                 ) {
-                    let pos = phys_to_visual(r_vec);
-                    let vel_dir = Vec3::new(v_vec.x as f32, v_vec.y as f32, 0.0).normalize_or_zero();
+                    let pos = phys_vec_to_vec3(r_vec);
+                    let vel_dir =
+                        Vec3::new(v_vec.x as f32, v_vec.y as f32, 0.0).normalize_or_zero();
                     (pos, vel_dir)
                 } else {
                     continue;
@@ -893,7 +942,7 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
 pub fn update_fleet_positions(
     mut commands: Commands,
     fleets: Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction)>,
-    bodies: Query<&ComputedBody>,
+    bodies: Query<&GlobalTransform, With<Body>>,
     sim_time: Res<SimulationTime>,
     cam_scale: Res<CameraScale>,
 ) {
@@ -979,74 +1028,330 @@ pub fn render_fleets(
     }
 }
 
+/// Syncs fleet shape entities with fleet positions.
+/// Spawns shapes for new fleets, updates existing shapes, despawns orphaned shapes.
+/// - AtBody fleets: shape is child of body entity (inherits body's Transform)
+/// - InTransit fleets: shape has CellCoord + Transform from orbital position
+pub fn sync_fleet_shapes(
+    mut commands: Commands,
+    combat: Res<CombatState>,
+    big_space_root: Res<BigSpaceRoot>,
+    grid_query: Query<&Grid, With<BigSpace>>,
+    fleets: Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction)>,
+    existing_shapes: Query<(Entity, &FleetShape)>,
+    mut shape_transforms: Query<&mut Transform, With<FleetShape>>,
+    sim_time: Res<SimulationTime>,
+    cam_scale: Res<CameraScale>,
+) {
+    use bevy::platform::collections::{HashMap, HashSet};
+
+    // Skip during tactical mode
+    if combat.active {
+        return;
+    }
+
+    let Ok(grid) = grid_query.single() else {
+        return;
+    };
+
+    let cam_scale = cam_scale.0;
+    let fleet_size = cam_scale * FLEET_SIZE_PIXELS;
+
+    // Track which fleets currently exist and have shapes
+    let mut fleets_with_shapes: HashMap<Entity, Entity> = HashMap::new();
+    for (shape_entity, fleet_shape) in &existing_shapes {
+        fleets_with_shapes.insert(fleet_shape.fleet_entity, shape_entity);
+    }
+
+    // Track which fleets we've processed
+    let mut processed_fleets: HashSet<Entity> = HashSet::new();
+
+    // Process all fleets
+    for (fleet_entity, _fleet, location, is_selected, faction) in &fleets {
+        processed_fleets.insert(fleet_entity);
+
+        let is_selected = is_selected.is_some();
+        let size_mult = if is_selected { 1.3 } else { 1.0 };
+        let color = match (faction, is_selected) {
+            (Faction::Player, true) => FLEET_PLAYER_SELECTED,
+            (Faction::Player, false) => FLEET_PLAYER_UNSELECTED,
+            (Faction::Enemy, true) => FLEET_ENEMY_SELECTED,
+            (Faction::Enemy, false) => FLEET_ENEMY_UNSELECTED,
+        };
+
+        // Compute velocity direction for triangle orientation
+        let velocity_dir = match location {
+            FleetLocation::AtBody(_) => Vec3::Y, // Default up when stationary
+            FleetLocation::InTransit {
+                solution,
+                departure_time,
+                ..
+            } => {
+                let elapsed = sim_time.sim_time - departure_time;
+                if elapsed >= 0.0 {
+                    if let Some((_, v_vec)) = propagate_kepler_full(
+                        solution.departure_pos,
+                        solution.departure_vel,
+                        MU_SUN,
+                        elapsed,
+                    ) {
+                        phys_vec_to_vec3(v_vec).normalize_or_zero()
+                    } else {
+                        Vec3::Y
+                    }
+                } else {
+                    Vec3::Y
+                }
+            }
+        };
+
+        let rotation = if velocity_dir.length_squared() > 0.001 {
+            Quat::from_rotation_arc(Vec3::Y, velocity_dir)
+        } else {
+            Quat::IDENTITY
+        };
+
+        // Build triangle vertices (scaled, Vec2 for bevy_vector_shapes)
+        let half_base = fleet_size * 0.5 * size_mult;
+        let height = fleet_size * size_mult;
+        let v_top = Vec2::new(0.0, height * 0.5);
+        let v_left = Vec2::new(-half_base, -height * 0.5);
+        let v_right = Vec2::new(half_base, -height * 0.5);
+
+        let is_in_transit = matches!(location, FleetLocation::InTransit { .. });
+
+        if let Some(&shape_entity) = fleets_with_shapes.get(&fleet_entity) {
+            // Check if we have a matching shape
+            let shape_info = existing_shapes.get(shape_entity).ok();
+
+            // If shape type doesn't match location type, despawn and let respawn happen
+            if let Some((_, fleet_shape)) = shape_info {
+                if fleet_shape.is_transit_shape != is_in_transit {
+                    // Location type changed - despawn old shape, spawn new one below
+                    commands.entity(shape_entity).despawn();
+                    // Fall through to spawn new shape
+                } else {
+                    // Update existing shape
+                    if let Ok(mut transform) = shape_transforms.get_mut(shape_entity) {
+                        match location {
+                            FleetLocation::AtBody(_body) => {
+                                // Shape is child of body - just update local offset and rotation
+                                transform.translation = Vec3::new(cam_scale * 15.0, 0.0, 0.2);
+                                transform.rotation = rotation;
+                            }
+                            FleetLocation::InTransit {
+                                solution,
+                                departure_time,
+                                ..
+                            } => {
+                                // Compute position from orbital mechanics
+                                let elapsed = sim_time.sim_time - departure_time;
+                                if elapsed >= 0.0 {
+                                    if let Some((r_vec, _)) = propagate_kepler_full(
+                                        solution.departure_pos,
+                                        solution.departure_vel,
+                                        MU_SUN,
+                                        elapsed,
+                                    ) {
+                                        // Convert nalgebra Vector3 to DVec3, then to CellCoord + local
+                                        let helio_pos = DVec3::new(r_vec.x, r_vec.y, r_vec.z);
+                                        let (cell, local) = grid.translation_to_grid(helio_pos);
+                                        // Update CellCoord component
+                                        commands.entity(shape_entity).insert(cell);
+                                        transform.translation = local;
+                                        transform.translation.z = 0.2; // Slight Z offset for visibility
+                                    }
+                                }
+                                transform.rotation = rotation;
+                            }
+                        }
+                    }
+
+                    // Update triangle component and color
+                    commands.entity(shape_entity).insert((
+                        TriangleComponent::new(
+                            &ShapeConfig {
+                                color,
+                                hollow: false,
+                                ..ShapeConfig::default_3d()
+                            },
+                            v_top,
+                            v_left,
+                            v_right,
+                        ),
+                        ShapeFill {
+                            color,
+                            ty: FillType::Fill,
+                        },
+                    ));
+                    continue; // Shape updated, move to next fleet
+                }
+            }
+        }
+
+        // Spawn new shape (either no existing shape, or old one was despawned due to type change)
+        {
+            match location {
+                FleetLocation::AtBody(body) => {
+                    // Spawn as child of body entity
+                    let local_transform =
+                        Transform::from_xyz(cam_scale * 15.0, 0.0, 0.2).with_rotation(rotation);
+                    let config = ShapeConfig {
+                        color,
+                        thickness: cam_scale * 1.0,
+                        hollow: false,
+                        transform: local_transform,
+                        ..ShapeConfig::default_3d()
+                    };
+                    commands.spawn((
+                        ShapeBundle::triangle(&config, v_top, v_left, v_right).insert_3d(),
+                        FleetShape {
+                            fleet_entity,
+                            is_transit_shape: false,
+                        },
+                        ChildOf(*body),
+                    ));
+                }
+                FleetLocation::InTransit {
+                    solution,
+                    departure_time,
+                    ..
+                } => {
+                    // Compute position and spawn with CellCoord
+                    let elapsed = sim_time.sim_time - departure_time;
+                    let helio_pos = if elapsed >= 0.0 {
+                        if let Some((r_vec, _)) = propagate_kepler_full(
+                            solution.departure_pos,
+                            solution.departure_vel,
+                            MU_SUN,
+                            elapsed,
+                        ) {
+                            // Convert nalgebra Vector3 to bevy DVec3
+                            DVec3::new(r_vec.x, r_vec.y, r_vec.z)
+                        } else {
+                            DVec3::ZERO
+                        }
+                    } else {
+                        DVec3::ZERO
+                    };
+
+                    let (cell, local) = grid.translation_to_grid(helio_pos);
+                    let local_transform =
+                        Transform::from_translation(local + Vec3::Z * 0.2).with_rotation(rotation);
+                    let config = ShapeConfig {
+                        color,
+                        thickness: cam_scale * 1.0,
+                        hollow: false,
+                        transform: local_transform,
+                        ..ShapeConfig::default_3d()
+                    };
+
+                    commands.spawn((
+                        ShapeBundle::triangle(&config, v_top, v_left, v_right).insert_3d(),
+                        FleetShape {
+                            fleet_entity,
+                            is_transit_shape: true,
+                        },
+                        cell,
+                        ChildOf(big_space_root.0),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Despawn shapes for fleets that no longer exist
+    for (shape_entity, fleet_shape) in &existing_shapes {
+        if !processed_fleets.contains(&fleet_shape.fleet_entity) {
+            commands.entity(shape_entity).despawn();
+        }
+    }
+}
+
 /// Enemy marker color (matches fleet color)
 const ENEMY_MARKER_COLOR: Color = Color::srgba(0.8, 0.2, 0.2, 0.6);
 
-/// Renders enemy presence markers at bodies with enemy fleets.
-/// Shows red rings around occupied bodies.
-/// Skipped during tactical combat.
-pub fn render_objectives(
+/// Syncs objective ring entities with enemy fleet presence.
+/// Spawns rings as children of bodies with enemies, despawns when enemies leave.
+/// Ring size updates each frame based on camera scale.
+pub fn sync_objective_rings(
+    mut commands: Commands,
     combat: Res<CombatState>,
     fleets: Query<(Entity, &FleetLocation, &Faction)>,
-    children_query: Query<&Children>,
+    fleet_children: Query<&Children>,
     ships: Query<&LogicalShip>,
-    bodies: Query<&ComputedBody>,
+    bodies: Query<(Entity, &ComputedBody), With<Body>>,
+    existing_rings: Query<(Entity, &ChildOf), With<ObjectiveRing>>,
+    mut ring_shapes: Query<(&mut DiscComponent, &mut ShapeFill), With<ObjectiveRing>>,
     cam_scale: Res<CameraScale>,
-    mut painter: ShapePainter,
 ) {
-    // Skip during tactical mode
+    use bevy::platform::collections::HashSet;
+
+    // Hide rings during tactical mode
     if combat.active {
+        // Could set Visibility::Hidden instead of despawning, but for now just skip updates
         return;
     }
 
     let cam_scale = cam_scale.0;
 
     // Collect bodies with enemy fleets
-    let mut enemy_bodies: bevy::platform::collections::HashSet<Entity> = bevy::platform::collections::HashSet::new();
-    let mut total_enemy_fleets = 0u32;
-
+    let mut enemy_bodies: HashSet<Entity> = HashSet::new();
     for (fleet_entity, location, faction) in &fleets {
         if *faction != Faction::Enemy {
             continue;
         }
-        // Only count fleets with ships
-        if ship_count(fleet_entity, &children_query, &ships) == 0 {
+        if ship_count(fleet_entity, &fleet_children, &ships) == 0 {
             continue;
         }
-        total_enemy_fleets += 1;
         if let FleetLocation::AtBody(body) = location {
             enemy_bodies.insert(*body);
         }
     }
 
-    // Draw red rings around enemy-occupied bodies
+    // Track which bodies already have rings
+    let mut bodies_with_rings: HashSet<Entity> = HashSet::new();
+    for (ring_entity, child_of) in &existing_rings {
+        let parent = child_of.parent();
+        if enemy_bodies.contains(&parent) {
+            // Body still has enemies - keep ring, update size
+            bodies_with_rings.insert(parent);
+            if let Ok((mut disc, mut fill)) = ring_shapes.get_mut(ring_entity) {
+                // Update radius based on body's display size + offset
+                if let Ok((_, computed)) = bodies.get(parent) {
+                    disc.radius = computed.display_size + cam_scale * 5.0;
+                    fill.ty = FillType::Stroke(cam_scale * 1.5, ThicknessType::World);
+                }
+            }
+        } else {
+            // No enemies at this body - despawn ring
+            commands.entity(ring_entity).despawn();
+        }
+    }
+
+    // Spawn rings for bodies that need them but don't have one
     for body_entity in &enemy_bodies {
-        let Ok(computed) = bodies.get(*body_entity) else {
+        if bodies_with_rings.contains(body_entity) {
+            continue;
+        }
+        let Ok((_, computed)) = bodies.get(*body_entity) else {
             continue;
         };
 
-        let pos = computed.position;
-        // Ring slightly larger than body display size (5 pixels)
         let ring_radius = computed.display_size + cam_scale * 5.0;
+        let config = ShapeConfig {
+            color: ENEMY_MARKER_COLOR,
+            thickness: cam_scale * 1.5,
+            hollow: true,
+            transform: Transform::from_xyz(0.0, 0.0, 0.1), // Slight Z offset
+            ..ShapeConfig::default_3d()
+        };
 
-        painter.set_translation(pos);
-        painter.set_rotation(Quat::IDENTITY);
-        painter.set_color(ENEMY_MARKER_COLOR);
-        painter.thickness = cam_scale * 1.5;
-        painter.hollow = true;
-        painter.circle(ring_radius);
-    }
-
-    // Draw enemy fleet counter in top-left corner (screen space handled by UI)
-    // For now, draw at a fixed world position - we'll need UI text for proper screen-space
-    // This is a placeholder - proper implementation would use egui or bevy_ui
-    if total_enemy_fleets > 0 {
-        // Draw a small indicator showing fleet count at origin offset
-        // This will be replaced by proper UI text later
-        let num_offset = cam_scale * 45.0;
-        painter.set_translation(Vec3::new(-num_offset, num_offset, 0.0));
-        painter.set_color(ENEMY_MARKER_COLOR);
-        draw_number(&mut painter, total_enemy_fleets as usize, Vec3::ZERO, cam_scale * 4.0);
+        commands.spawn((
+            ShapeBundle::circle(&config, ring_radius).insert_3d(),
+            ObjectiveRing,
+            ChildOf(*body_entity),
+        ));
     }
 }
 
@@ -1074,7 +1379,7 @@ pub fn render_departure_markers(
         }
 
         // Draw an X at the departure position
-        let departure_pos = phys_to_visual(transfer.solution.departure_pos);
+        let departure_pos = phys_vec_to_vec3(transfer.solution.departure_pos);
 
         painter.set_translation(departure_pos);
         painter.set_rotation(Quat::IDENTITY);
@@ -1097,7 +1402,7 @@ const QUEUE_ARC_COLOR: Color = Color::srgba(1.0, 0.6, 0.2, 0.4);
 /// Renders numbered waypoint markers at queued destination bodies.
 pub fn render_plan_markers(
     fleets: Query<&FlightPlan>,
-    bodies: Query<&ComputedBody>,
+    bodies: Query<&GlobalTransform, With<Body>>,
     cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
@@ -1105,12 +1410,12 @@ pub fn render_plan_markers(
 
     for plan in &fleets {
         for (index, leg) in plan.legs.iter().enumerate() {
-            // Get target body position
-            let Ok(computed) = bodies.get(leg.target) else {
+            // Get target body position (camera-relative via big_space)
+            let Ok(body_transform) = bodies.get(leg.target) else {
                 continue;
             };
 
-            let pos = computed.position;
+            let pos = body_transform.translation();
 
             // Draw a circle with number
             painter.set_translation(pos);
@@ -1187,8 +1492,8 @@ pub fn render_plan_arcs(
                         t1,
                     ),
                 ) {
-                    let p0 = phys_to_visual(pos0);
-                    let p1 = phys_to_visual(pos1);
+                    let p0 = phys_vec_to_vec3(pos0);
+                    let p1 = phys_vec_to_vec3(pos1);
                     painter.line(p0, p1);
                 }
             }

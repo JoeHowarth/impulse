@@ -2,7 +2,18 @@
 //!
 //! Tactical combat uses physics for ship movement and collision detection.
 //! Strategic layer does not use physics - positions computed from orbital mechanics.
+//!
+//! ## big_space Integration
+//!
+//! Avian's built-in transform sync systems are disabled because they lose f64 precision:
+//! - `transform_to_position`: reads from f32 GlobalTransform (camera-relative in big_space)
+//! - `position_to_transform`: writes via `.f32()` losing precision at planetary distances
+//!
+//! Custom sync systems in this module preserve f64 precision via CellCoord:
+//! - `cell_transform_to_position`: CellCoord + Transform → Position (before physics)
+//! - `position_to_cell_transform`: Position → CellCoord + Transform (after physics)
 
+use avian3d::physics_transform::PhysicsTransformConfig;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
@@ -12,7 +23,13 @@ pub struct TacticalPhysicsPlugin;
 impl Plugin for TacticalPhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(PhysicsPlugins::default())
-            .insert_resource(Gravity::ZERO);
+            .insert_resource(Gravity::ZERO)
+            // Disable Avian's built-in transform sync - we replace with big_space-aware versions
+            .insert_resource(PhysicsTransformConfig {
+                transform_to_position: false,
+                position_to_transform: false,
+                ..default()
+            });
     }
 }
 

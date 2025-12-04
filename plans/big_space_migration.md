@@ -446,14 +446,41 @@ This replaces `ComputedBody.position: Vec3` with f64-precision data that other s
 
 ## Implementation Approach
 
-**Phase by phase**: Each phase results in a runnable game. This makes debugging easier and allows stopping partway if needed.
+**Phase by phase**: Each phase results in a runnable game.
 
-- Phase 1 (Plugin + Camera): Game runs, camera works, but nothing renders correctly yet
-- Phase 2 (Bodies): Bodies render at correct positions
-- Phase 3 (Rendering): All visual systems work
-- Phase 4 (Click/UI): Interaction works
-- Phase 5 (Tactical + Avian): Custom Avian sync, tactical mode works, **remove scaling hack**
-- Phase 6 (Fleets): Full game functionality restored
+## Current Progress (as of session)
+
+### ✅ Phase 1: Plugin Setup - COMPLETE
+- Disabled TransformPlugin, added BigSpaceDefaultPlugins
+- Grid configured: 10km cells, 100m switch threshold
+- Camera spawns in BigSpace with FloatingOrigin
+- Avian sync disabled via PhysicsTransformConfig
+- BigSpaceRoot resource tracks root entity
+
+### ✅ Phase 2: Body Positions - COMPLETE
+- Bodies spawn as children of BigSpace with CellCoord + ChildOf
+- ComputedBody now has helio_pos: DVec3
+- update_body_positions uses Grid::translation_to_grid()
+- resolve_helio_position computes f64 positions
+- Bodies visible, zoom works, pan works
+
+### 🔄 Phase 3: Rendering - IN PROGRESS
+**Done:**
+- render_system uses GlobalTransform.translation()
+- update_orbit_positions uses GlobalTransform
+- update_labels uses GlobalTransform
+
+**Still needs GlobalTransform:**
+- ship.rs: compute_fleet_positions (line 839: `c.position` → body GlobalTransform)
+- ship.rs: render_fleets, render_objectives, render_departure_markers, render_plan_markers
+- For InTransit fleets: phys_to_visual returns f32 - need CellCoord approach
+- ui.rs: popup positioning (lines 671, 736, 796)
+- main.rs: handle_body_click (lines 704, 738) - Phase 4
+
+### Pending: Phase 4-6
+- Phase 4: Click detection uses computed.position - switch to GlobalTransform
+- Phase 5: Add custom Avian sync systems, remove 100,000x scaling hack
+- Phase 6: Fleets need CellCoord for InTransit, or compute from transfer solution
 
 ## Testing Strategy
 

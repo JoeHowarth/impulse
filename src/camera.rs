@@ -1,8 +1,9 @@
 //! Camera setup, control, and animation systems.
 
 use astrora_core::core::constants::AU;
-use bevy::{prelude::*, input::mouse::MouseButton, window::PrimaryWindow};
+use bevy::{input::mouse::MouseButton, prelude::*, window::PrimaryWindow};
 use bevy_pancam::PanCam;
+use big_space::prelude::*;
 
 // ============================================================================
 // Constants
@@ -31,6 +32,11 @@ const CAMERA_Z: f32 = 1.0e12;
 /// Use this for screen-space sizing: `cam_scale.0 * pixels` gives world units.
 #[derive(Resource, Default)]
 pub struct CameraScale(pub f32);
+
+/// The root entity of the BigSpace hierarchy.
+/// All spatial entities (bodies, fleets, ships) should be children of this entity.
+#[derive(Resource)]
+pub struct BigSpaceRoot(pub Entity);
 
 /// Updates the CameraScale resource from the current camera projection.
 /// Run this before any rendering systems that need screen-space sizing.
@@ -124,32 +130,57 @@ pub fn animate_camera(
 }
 
 // ============================================================================
+// Constants for Grid Configuration
+// ============================================================================
+
+/// Grid cell edge length in meters.
+/// 10km cells give sub-meter precision for tactical combat (100m ships, 0.1m projectiles).
+const GRID_CELL_SIZE: f32 = 10_000.0;
+
+/// Switching threshold - how far past cell edge before recentering (in meters).
+const GRID_SWITCH_THRESHOLD: f32 = 100.0;
+
+// ============================================================================
 // Setup
 // ============================================================================
 
-/// Spawns the main orthographic camera with pan/zoom support.
-/// Also initializes the CameraScale resource.
+/// Spawns the BigSpace root with Grid, and the camera with FloatingOrigin.
+/// The camera is the floating origin, so GlobalTransforms are computed relative to it.
 pub fn spawn_camera(mut commands: Commands, query: Query<&Window, With<PrimaryWindow>>) {
     let window = query.single().unwrap();
     let window_width = window.resolution.width();
     let initial_scale = AU as f32 * 3. / window_width;
 
-    commands.spawn((
-        Camera3d::default(),
-        Projection::from(OrthographicProjection {
-            far: CAMERA_FAR,
-            near: CAMERA_NEAR,
-            scale: initial_scale,
-            ..OrthographicProjection::default_3d()
-        }),
-        Transform::from_xyz(0.0, 0.0, CAMERA_Z).looking_at(Vec3::ZERO, Vec3::Y),
-        PanCam {
-            // Only use right/middle mouse for panning - left is for selection
-            grab_buttons: vec![MouseButton::Right, MouseButton::Middle],
-            ..default()
-        },
-        CameraTarget::default(),
-    ));
+    // Configure the heliocentric grid
+    let grid = Grid::new(GRID_CELL_SIZE, GRID_SWITCH_THRESHOLD);
+
+    // Track the root entity so other systems can spawn children
+    let mut root_entity = Entity::PLACEHOLDER;
+
+    // Spawn BigSpace with camera inside
+    commands.spawn_big_space(grid, |root| {
+        root_entity = root.id();
+        root.spawn_spatial((
+            Camera3d::default(),
+            FloatingOrigin, // Camera is the floating origin for precise rendering
+            Projection::from(OrthographicProjection {
+                far: CAMERA_FAR,
+                near: CAMERA_NEAR,
+                scale: initial_scale,
+                ..OrthographicProjection::default_3d()
+            }),
+            Transform::from_xyz(0.0, 0.0, CAMERA_Z).looking_at(Vec3::ZERO, Vec3::Y),
+            PanCam {
+                // Only use right/middle mouse for panning - left is for selection
+                grab_buttons: vec![MouseButton::Right, MouseButton::Middle],
+                ..default()
+            },
+            CameraTarget::default(),
+        ));
+    });
+
+    // Store the BigSpace root for other systems to use
+    commands.insert_resource(BigSpaceRoot(root_entity));
 
     // Initialize the CameraScale resource with the starting scale
     commands.insert_resource(CameraScale(initial_scale));
