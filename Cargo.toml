@@ -3,16 +3,21 @@ name = "impulse"
 version = "0.1.0"
 edition = "2024"
 
+# Enable a small amount of optimization in the dev profile.
+[profile.dev]
+opt-level = 1
+
+# Enable a large amount of optimization in the dev profile for dependencies.
+[profile.dev.package."*"]
+opt-level = 3
+
 [dependencies]
 astrora_core = { path = "astrora", features = ["serde"] }
-bevy = { path = "bevy" }
+bevy = { path = "bevy", features = ["dynamic_linking"] }
 avian3d = { version = "0.4", default-features = false, features = ["3d", "f64", "parry-f64"] }
 bevy_pancam = "0.19.0"
-# use git branch wb/updatebevy0.17
-# from https://github.com/ForesightMiningSoftwareCorporation/bevy_polyline
-bevy_polyline = { git = "https://github.com/ForesightMiningSoftwareCorporation/bevy_polyline", branch = "wb/updatebevy0.17" }
 bevy_vector_shapes = "0.11.0"
-big_space = "0.11.0"
+big_space = { version = "0.11.0", features = ["bevy_camera"] }
 serde = "1.0.228"
 serde_json = "1.0.145"
 rand = "0.8.5"

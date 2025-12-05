@@ -1,9 +1,18 @@
 //! Camera setup, control, and animation systems.
 
 use astrora_core::core::constants::AU;
-use bevy::{input::mouse::MouseButton, prelude::*, window::PrimaryWindow};
+use bevy::{
+    camera::visibility::NoFrustumCulling, input::mouse::MouseButton, prelude::*,
+    window::PrimaryWindow,
+};
 use bevy_pancam::PanCam;
+use bevy_vector_shapes::{
+    prelude::ShapeConfig,
+    shapes::{DiscBundle, ShapeBundle},
+};
 use big_space::prelude::*;
+
+use crate::BodyShape;
 
 // ============================================================================
 // Constants
@@ -16,13 +25,16 @@ const CAMERA_LERP_SPEED: f32 = 8.0;
 const DEFAULT_CAMERA_SCALE: f32 = 1.0e11;
 
 /// Camera far plane (must encompass solar system)
-const CAMERA_FAR: f32 = 1.0e15;
+// const CAMERA_FAR: f32 = 1.0e15;
 
 /// Camera near plane
-const CAMERA_NEAR: f32 = 0.1;
+// const CAMERA_NEAR: f32 = 0.1;
+
+const CAMERA_NEAR: f32 = -2e11; // Negative is valid for ortho - allows objects "behind" camera position
+const CAMERA_FAR: f32 = 2e11;
 
 /// Camera Z position (looking down at XY plane)
-const CAMERA_Z: f32 = 1.0e12;
+const CAMERA_Z: f32 = 1.0e7;
 
 // ============================================================================
 // Resources
@@ -169,7 +181,8 @@ pub fn spawn_camera(mut commands: Commands, query: Query<&Window, With<PrimaryWi
                 scale: initial_scale,
                 ..OrthographicProjection::default_3d()
             }),
-            Transform::from_xyz(0.0, 0.0, CAMERA_Z).looking_at(Vec3::ZERO, Vec3::Y),
+            // Transform::from_xyz(0.0, 0.0, CAMERA_Z).looking_at(Vec3::ZERO, Vec3::Y),
+            Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::NEG_Z, Vec3::Y),
             PanCam {
                 // Only use right/middle mouse for panning - left is for selection
                 grab_buttons: vec![MouseButton::Right, MouseButton::Middle],
@@ -178,6 +191,7 @@ pub fn spawn_camera(mut commands: Commands, query: Query<&Window, With<PrimaryWi
             CameraTarget::default(),
         ));
     });
+    commands.entity(root_entity).insert(Visibility::Visible);
 
     // Store the BigSpace root for other systems to use
     commands.insert_resource(BigSpaceRoot(root_entity));

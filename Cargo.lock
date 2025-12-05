@@ -405,6 +405,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "bevy"
 version = "0.17.3"
 dependencies = [
+ "bevy_dylib",
  "bevy_internal",
 ]
 
@@ -688,6 +689,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_dylib"
+version = "0.17.3"
+dependencies = [
+ "bevy_internal",
+]
+
+[[package]]
 name = "bevy_ecs"
 version = "0.17.3"
 dependencies = [
@@ -912,7 +920,7 @@ dependencies = [
  "bevy_pbr",
  "bevy_picking",
  "bevy_platform",
- "bevy_post_process 0.17.3",
+ "bevy_post_process",
  "bevy_ptr",
  "bevy_reflect",
  "bevy_render",
@@ -1110,53 +1118,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_polyline"
-version = "0.13.0"
-source = "git+https://github.com/ForesightMiningSoftwareCorporation/bevy_polyline?branch=wb%2Fupdatebevy0.17#19ce07da024e19e1b28295a3db094d6741706540"
-dependencies = [
- "bevy",
- "bevy_post_process 0.17.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "bitflags 2.10.0",
- "bytemuck",
-]
-
-[[package]]
 name = "bevy_post_process"
 version = "0.17.3"
 dependencies = [
  "bevy_app",
  "bevy_asset",
  "bevy_camera 0.17.3",
- "bevy_color",
- "bevy_core_pipeline",
- "bevy_derive",
- "bevy_ecs",
- "bevy_image",
- "bevy_math",
- "bevy_platform",
- "bevy_reflect",
- "bevy_render",
- "bevy_shader",
- "bevy_transform",
- "bevy_utils",
- "bevy_window",
- "bitflags 2.10.0",
- "nonmax",
- "radsort",
- "smallvec",
- "thiserror 2.0.17",
- "tracing",
-]
-
-[[package]]
-name = "bevy_post_process"
-version = "0.17.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b857972f5d56b43b0dce2c843b75b64d5fbbd0f6177f6ecccd75e7e41f72deb"
-dependencies = [
- "bevy_app",
- "bevy_asset",
- "bevy_camera 0.17.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "bevy_color",
  "bevy_core_pipeline",
  "bevy_derive",
@@ -1606,6 +1573,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be65a23de201097c5528ffd28e3dc3398e9a1f0f51afbdb07ee69790fe5e4d9c"
 dependencies = [
  "bevy_app",
+ "bevy_camera 0.17.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "bevy_color",
  "bevy_ecs",
  "bevy_image",
@@ -2960,7 +2928,6 @@ dependencies = [
  "avian3d",
  "bevy",
  "bevy_pancam",
- "bevy_polyline",
  "bevy_vector_shapes",
  "big_space",
  "bincode",

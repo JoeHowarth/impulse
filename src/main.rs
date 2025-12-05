@@ -4,6 +4,7 @@ use astrora_core::core::{Vector3, elements::coe_to_rv};
 use avian3d::prelude::Position;
 use bevy::{
     asset::Assets,
+    camera::visibility::NoFrustumCulling,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     gizmos::{
         GizmoAsset,
@@ -16,7 +17,7 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_pancam::{PanCam, PanCamPlugin};
-use bevy_vector_shapes::prelude::*;
+use bevy_vector_shapes::{prelude as shape_prelude, prelude::*};
 use big_space::prelude::*;
 
 mod camera;
@@ -77,6 +78,9 @@ pub struct ComputedBody {
 #[derive(Component)]
 struct OrbitGizmo;
 
+#[derive(Component)]
+struct BodyShape;
+
 fn main() {
     let start_day = simulation::parse_start_day();
     if start_day != 0 {
@@ -90,12 +94,14 @@ fn main() {
         .add_plugins(PanCamPlugin)
         .add_plugins(ShapePlugin::default())
         .add_plugins(physics::TacticalPhysicsPlugin)
-        // Performance diagnostics - logs to console every second
-        .add_plugins(FrameTimeDiagnosticsPlugin::default())
-        .add_plugins(LogDiagnosticsPlugin {
-            wait_duration: Duration::from_secs(10),
-            ..default()
-        })
+        .add_plugins((
+            // Performance diagnostics - logs to console every X seconds
+            FrameTimeDiagnosticsPlugin::default(),
+            LogDiagnosticsPlugin {
+                wait_duration: Duration::from_secs(10),
+                ..default()
+            },
+        ))
         .insert_resource(SimulationTime::from_start_day(start_day))
         .init_resource::<ui::TransferPopup>()
         .init_resource::<ui::FleetKeyState>()
@@ -109,6 +115,7 @@ fn main() {
                 ApplyDeferred, // Ensure BigSpaceRoot resource is available
                 setup,
                 ApplyDeferred,
+                spawn_body_circles,
                 init_parent_entities,
                 transfer_lut::init_transfer_lut,
                 configure_gizmos,
@@ -145,6 +152,9 @@ fn main() {
                     // Sync Transfer entities to FleetLocation + committed legs
                     ship::sync_transfer_entities,
                     transfer_vis::check_transfer_expiration,
+                    debug_shapes,
+                    // debug_shape_components,
+                    debug_shape_visibility,
                 )
                     .chain(),
                 // UI interaction systems
@@ -170,7 +180,8 @@ fn main() {
                     camera::animate_camera,
                     // update_orbit_positions,
                     // transfer_vis::update_transfer_arc_positions,
-                    render_system,
+                    // render_system,
+                    update_body_shape_scale,
                     ship::update_fleet_positions,
                     ship::sync_fleet_shapes,
                     // ship::render_fleets, // TODO: Remove after verifying sync_fleet_shapes works
@@ -198,13 +209,88 @@ fn main() {
         .run();
 }
 
+fn spawn_body_circles(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    bodies: Query<(Entity, &Body), Without<BodyShape>>,
+) {
+    for (entity, body) in &bodies {
+        let mesh = meshes.add(Circle::new(1.0)); // Unit circle, scale via Transform
+        let material = materials.add(StandardMaterial {
+            base_color: body.color,
+            unlit: true,
+            ..default()
+        });
+
+        commands.spawn((
+            BodyShape,
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::default(),
+            dbg!(ChildOf(entity)),
+        ));
+    }
+}
+
+fn debug_shape_components(
+    shapes: Query<Entity, With<BodyShape>>,
+    world: &World,
+    mut frames: Local<usize>,
+) {
+    *frames += 1;
+    if *frames % 1000 != 1 {
+        return;
+    }
+
+    for entity in &shapes {
+        info!(
+            "Shape {:?} components: {:?}",
+            entity,
+            world.inspect_entity(entity).unwrap().collect::<Vec<_>>()
+        );
+    }
+}
+
+fn debug_shape_visibility(
+    shapes: Query<(&ViewVisibility, &GlobalTransform), With<BodyShape>>,
+    mut frames: Local<usize>,
+) {
+    *frames += 1;
+    if *frames % 500 != 1 {
+        return;
+    }
+    for (vis, gt) in &shapes {
+        info!(
+            "Shape visible: {:?}, pos: {:?}",
+            vis.get(),
+            gt.translation()
+        );
+    }
+}
+
+fn debug_shapes(
+    shapes: Query<(&GlobalTransform, &ChildOf), With<BodyShape>>,
+    mut frames: Local<usize>,
+) {
+    *frames += 1;
+    if *frames % 1500 != 1 {
+        return;
+    }
+    for (gt, parent) in &shapes {
+        info!(
+            "Shape GlobalTransform: {:?}, parent: {:?}",
+            gt.translation(),
+            parent.0
+        );
+    }
+}
+
 fn setup(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     big_space_root: Res<camera::BigSpaceRoot>,
-    grid: Query<&Grid, With<BigSpace>>,
 ) {
-    let grid = grid.single().unwrap();
     // Load planetary data
     let bodies = PlanetaryElements::get_planetary_elements();
     commands.insert_resource(PlanetaryElements {
@@ -219,10 +305,11 @@ fn setup(
         let entity = commands
             .spawn((
                 body.clone(),
+                Visibility::Visible,
                 ComputedBody::default(),
                 CellCoord::default(), // Will be updated by update_body_positions
                 Transform::default(), // Will be updated by update_body_positions
-                ChildOf(big_space_root.0), // Parent to BigSpace root
+                ChildOf(dbg!(big_space_root.0)), // Parent to BigSpace root
             ))
             .id();
         body_entities.insert(body.name.clone(), entity);
@@ -271,6 +358,15 @@ fn setup(
     for body in bodies.values() {
         let body_entity = body_entities[&body.name];
         ui::spawn_body_label(&mut commands, &body.name, body_entity);
+        // Body -> Body shape
+        // let mut config = shape_prelude::ShapeConfig::default_3d();
+        // config.color = body.color.clone();
+
+        // let mut shape_bundle = shape_prelude::ShapeBundle::circle(&config, 1E10 as f32);
+        // shape_bundle.visibility = Visibility::Visible;
+        // commands
+        //     .entity(dbg!(body_entity))
+        //     .with_child((BodyShape, shape_bundle, NoFrustumCulling));
 
         // Create orbit gizmo if body has a parent
         // Gizmos stay outside BigSpace - their Transform is set from parent's GlobalTransform
@@ -283,19 +379,16 @@ fn setup(
         let Some(parent_body) = bodies.get(parent_name) else {
             continue;
         };
-        let orbit_asset = create_orbit_gizmo_asset(body, parent_body);
-        let body_shape_bundle = create_body_shape_bundle(body);
-
+        // Parent Body -> Orbit gizmo
         commands.entity(*parent_entity).with_child((
             Gizmo {
-                handle: gizmo_assets.add(orbit_asset),
+                handle: gizmo_assets.add(create_orbit_gizmo_asset(body, parent_body)),
                 depth_bias: 0.1,
                 ..default()
             },
             OrbitGizmo,
             Transform::default(),
         ));
-        commands.entity(body_entity).with_child(body_shape_bundle);
     }
 
     // Spawn time control panel
@@ -337,12 +430,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 /// Runs once per frame before orbit updates and rendering.
 fn update_body_positions(
     body_query: Query<(Entity, &Body)>,
-    mut spatial_query: Query<(
-        &mut ComputedBody,
-        &mut CellCoord,
-        &mut Transform,
-        // &mut Position,
-    )>,
+    mut spatial_query: Query<(&mut ComputedBody, &mut CellCoord, &mut Transform)>,
     camera_query: Query<&Projection, With<Camera3d>>,
     grid_query: Query<&Grid, With<BigSpace>>,
     sim_time: Res<SimulationTime>,
@@ -537,8 +625,14 @@ fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
     gizmo
 }
 
-fn create_body_shape_bundle(body: &Body) -> ShapeBundle<DiscComponent> {
-    bevy_vector_shapes::prelude::ShapeBundle::circle(&ShapeConfig::default_3d(), body.radius as f32)
+fn update_body_shape_scale(
+    mut body_shapes: Query<(&mut Transform, &ChildOf), With<BodyShape>>,
+    computed_bodies: Query<&ComputedBody>,
+) {
+    for (mut transform, child_of) in body_shapes.iter_mut() {
+        let computed_body = computed_bodies.get(child_of.0).unwrap();
+        transform.scale = Vec3::splat(computed_body.display_size);
+    }
 }
 
 /// Draws all visible bodies using GlobalTransform for camera-relative positioning.
