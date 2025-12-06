@@ -152,9 +152,6 @@ fn main() {
                     // Sync Transfer entities to FleetLocation + committed legs
                     ship::sync_transfer_entities,
                     transfer_vis::check_transfer_expiration,
-                    debug_shapes,
-                    // debug_shape_components,
-                    debug_shape_visibility,
                 )
                     .chain(),
                 // UI interaction systems
@@ -186,13 +183,11 @@ fn main() {
                     ship::sync_fleet_shapes,
                     // ship::render_fleets, // TODO: Remove after verifying sync_fleet_shapes works
                     tactical::update_ship_movement,
-                    tactical::render_visual_ships,
+                    // tactical::render_visual_ships, // Now using retained gizmos spawned with VisualShip
                     tactical::render_move_markers,
-                    picking::render_box_selection,
+                    picking::sync_box_selection,
                     ship::sync_objective_rings,
-                    // ship::render_departure_markers,
-                    // TODO: Remove me
-                    ship::render_plan_markers,
+                    ship::sync_plan_markers,
                     // ship::render_plan_arcs,
                     // TODO: remove me - now handled by spawn_transfer_visualization in sync_transfer_entities system
                     // transfer_vis::render_burn_arrows,
@@ -230,59 +225,6 @@ fn spawn_body_circles(
             Transform::default(),
             dbg!(ChildOf(entity)),
         ));
-    }
-}
-
-fn debug_shape_components(
-    shapes: Query<Entity, With<BodyShape>>,
-    world: &World,
-    mut frames: Local<usize>,
-) {
-    *frames += 1;
-    if *frames % 1000 != 1 {
-        return;
-    }
-
-    for entity in &shapes {
-        info!(
-            "Shape {:?} components: {:?}",
-            entity,
-            world.inspect_entity(entity).unwrap().collect::<Vec<_>>()
-        );
-    }
-}
-
-fn debug_shape_visibility(
-    shapes: Query<(&ViewVisibility, &GlobalTransform), With<BodyShape>>,
-    mut frames: Local<usize>,
-) {
-    *frames += 1;
-    if *frames % 500 != 1 {
-        return;
-    }
-    for (vis, gt) in &shapes {
-        info!(
-            "Shape visible: {:?}, pos: {:?}",
-            vis.get(),
-            gt.translation()
-        );
-    }
-}
-
-fn debug_shapes(
-    shapes: Query<(&GlobalTransform, &ChildOf), With<BodyShape>>,
-    mut frames: Local<usize>,
-) {
-    *frames += 1;
-    if *frames % 1500 != 1 {
-        return;
-    }
-    for (gt, parent) in &shapes {
-        info!(
-            "Shape GlobalTransform: {:?}, parent: {:?}",
-            gt.translation(),
-            parent.0
-        );
     }
 }
 
@@ -632,29 +574,6 @@ fn update_body_shape_scale(
     for (mut transform, child_of) in body_shapes.iter_mut() {
         let computed_body = computed_bodies.get(child_of.0).unwrap();
         transform.scale = Vec3::splat(computed_body.display_size);
-    }
-}
-
-/// Draws all visible bodies using GlobalTransform for camera-relative positioning.
-fn render_system(
-    body_query: Query<(&Body, &ComputedBody, &GlobalTransform)>,
-    mut painter: ShapePainter,
-) {
-    for (body, computed, global_transform) in body_query.iter() {
-        if computed.visibility < 0.01 {
-            continue;
-        }
-
-        // Use GlobalTransform for precise camera-relative positioning
-        painter.set_translation(global_transform.translation());
-        let base_color = body.color.to_srgba();
-        painter.set_color(Color::srgba(
-            base_color.red,
-            base_color.green,
-            base_color.blue,
-            computed.visibility,
-        ));
-        painter.circle(computed.display_size);
     }
 }
 

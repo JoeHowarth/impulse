@@ -14,9 +14,9 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bevy::gizmos::GizmoAsset;
-use bevy::math::DVec3;
+use bevy::math::{DVec3, Isometry3d};
 use bevy::prelude::*;
-use bevy_vector_shapes::prelude::*;
+use bevy_vector_shapes::prelude::*; // TODO: Remove once retained shapes migrated
 use big_space::prelude::*;
 
 use crate::ComputedBody;
@@ -116,6 +116,16 @@ pub struct FleetShape {
     /// True if shape was spawned for InTransit (has CellCoord, parented to BigSpace).
     /// False if spawned for AtBody (parented to body entity).
     pub is_transit_shape: bool,
+}
+
+/// Marker for flight plan waypoint gizmos.
+/// Spawned as children of target body entities.
+#[derive(Component)]
+pub struct PlanMarker {
+    /// Which fleet's plan this marker belongs to
+    pub fleet: Entity,
+    /// Index in the flight plan
+    pub leg_index: usize,
 }
 
 /// Fleet's current location - either at a body or in transit.
@@ -990,72 +1000,72 @@ pub fn update_fleet_positions(
 /// Departure marker color (distinct from departure burn arrow)
 const DEPARTURE_MARKER_COLOR: Color = Color::srgb(0.9, 0.9, 0.3); // Yellow
 
-/// Renders fleets as triangles at their current positions.
-/// Reads from ComputedFleetPosition (updated by update_fleet_positions).
-/// Skipped during tactical combat (tactical.rs handles ship rendering).
-pub fn render_fleets(
-    combat: Res<CombatState>,
-    fleets: Query<(Entity, &ComputedFleetPosition, Option<&Selected>, &Faction)>,
-    children_query: Query<&Children>,
-    logical_ships: Query<&LogicalShip>,
-    cam_scale: Res<CameraScale>,
-    mut painter: ShapePainter,
-) {
-    // Skip strategic fleet rendering during tactical mode
-    if combat.active {
-        return;
-    }
+///// Renders fleets as triangles at their current positions.
+///// Reads from ComputedFleetPosition (updated by update_fleet_positions).
+///// Skipped during tactical combat (tactical.rs handles ship rendering).
+// pub fn render_fleets(
+//     combat: Res<CombatState>,
+//     fleets: Query<(Entity, &ComputedFleetPosition, Option<&Selected>, &Faction)>,
+//     children_query: Query<&Children>,
+//     logical_ships: Query<&LogicalShip>,
+//     cam_scale: Res<CameraScale>,
+//     mut painter: ShapePainter,
+// ) {
+//     // Skip strategic fleet rendering during tactical mode
+//     if combat.active {
+//         return;
+//     }
 
-    let fleet_size = cam_scale.0 * FLEET_SIZE_PIXELS;
+//     let fleet_size = cam_scale.0 * FLEET_SIZE_PIXELS;
 
-    for (fleet_entity, computed, is_selected, faction) in &fleets {
-        let is_selected = is_selected.is_some();
-        let size_mult = if is_selected { 1.3 } else { 1.0 };
-        let color = match (faction, is_selected) {
-            (Faction::Player, true) => FLEET_PLAYER_SELECTED,
-            (Faction::Player, false) => FLEET_PLAYER_UNSELECTED,
-            (Faction::Enemy, true) => FLEET_ENEMY_SELECTED,
-            (Faction::Enemy, false) => FLEET_ENEMY_UNSELECTED,
-        };
+//     for (fleet_entity, computed, is_selected, faction) in &fleets {
+//         let is_selected = is_selected.is_some();
+//         let size_mult = if is_selected { 1.3 } else { 1.0 };
+//         let color = match (faction, is_selected) {
+//             (Faction::Player, true) => FLEET_PLAYER_SELECTED,
+//             (Faction::Player, false) => FLEET_PLAYER_UNSELECTED,
+//             (Faction::Enemy, true) => FLEET_ENEMY_SELECTED,
+//             (Faction::Enemy, false) => FLEET_ENEMY_UNSELECTED,
+//         };
 
-        // Draw triangle pointing in velocity direction
-        painter.set_translation(computed.position);
+//         // Draw triangle pointing in velocity direction
+//         painter.set_translation(computed.position);
 
-        let rotation = if computed.velocity_dir.length_squared() > 0.001 {
-            Quat::from_rotation_arc(Vec3::Y, computed.velocity_dir)
-        } else {
-            Quat::IDENTITY
-        };
-        painter.set_rotation(rotation);
+//         let rotation = if computed.velocity_dir.length_squared() > 0.001 {
+//             Quat::from_rotation_arc(Vec3::Y, computed.velocity_dir)
+//         } else {
+//             Quat::IDENTITY
+//         };
+//         painter.set_rotation(rotation);
 
-        painter.set_color(color);
+//         painter.set_color(color);
 
-        // Draw an isoceles triangle (size scales with camera)
-        let half_base = fleet_size * 0.5 * size_mult;
-        let height = fleet_size * size_mult;
-        painter.thickness = fleet_size * 0.1; // Line thickness scales too
-        painter.line(
-            Vec3::new(0.0, height * 0.5, 0.0),
-            Vec3::new(-half_base, -height * 0.5, 0.0),
-        );
-        painter.line(
-            Vec3::new(-half_base, -height * 0.5, 0.0),
-            Vec3::new(half_base, -height * 0.5, 0.0),
-        );
-        painter.line(
-            Vec3::new(half_base, -height * 0.5, 0.0),
-            Vec3::new(0.0, height * 0.5, 0.0),
-        );
+//         // Draw an isoceles triangle (size scales with camera)
+//         let half_base = fleet_size * 0.5 * size_mult;
+//         let height = fleet_size * size_mult;
+//         painter.thickness = fleet_size * 0.1; // Line thickness scales too
+//         painter.line(
+//             Vec3::new(0.0, height * 0.5, 0.0),
+//             Vec3::new(-half_base, -height * 0.5, 0.0),
+//         );
+//         painter.line(
+//             Vec3::new(-half_base, -height * 0.5, 0.0),
+//             Vec3::new(half_base, -height * 0.5, 0.0),
+//         );
+//         painter.line(
+//             Vec3::new(half_base, -height * 0.5, 0.0),
+//             Vec3::new(0.0, height * 0.5, 0.0),
+//         );
 
-        // Draw ship count below the triangle for selected fleet
-        if is_selected {
-            painter.set_rotation(Quat::IDENTITY);
-            let count_pos = computed.position + Vec3::new(0.0, -height * 0.8, 0.0);
-            let count = ship_count(fleet_entity, &children_query, &logical_ships);
-            draw_number(&mut painter, count as usize, count_pos, fleet_size * 0.5);
-        }
-    }
-}
+//         // Draw ship count below the triangle for selected fleet
+//         if is_selected {
+//             painter.set_rotation(Quat::IDENTITY);
+//             let count_pos = computed.position + Vec3::new(0.0, -height * 0.8, 0.0);
+//             let count = ship_count(fleet_entity, &children_query, &logical_ships);
+//             draw_number(&mut painter, count as usize, count_pos, fleet_size * 0.5);
+//         }
+//     }
+// }
 
 /// Syncs fleet shape entities with fleet positions.
 /// Spawns shapes for new fleets, updates existing shapes, despawns orphaned shapes.
@@ -1384,292 +1394,81 @@ pub fn sync_objective_rings(
     }
 }
 
-/// Renders X markers at departure points for pending transfers.
-pub fn render_departure_markers(
-    transfers: Query<&transfer_vis::Transfer>,
-    fleets: Query<&FleetLocation>,
-    sim_time: Res<SimulationTime>,
-    cam_scale: Res<CameraScale>,
-    mut painter: ShapePainter,
-) {
-    let cam_scale = cam_scale.0;
-
-    for transfer in &transfers {
-        // Only show marker if transfer hasn't started yet
-        if transfer.departure_time <= sim_time.sim_time {
-            continue;
-        }
-
-        // Only show if fleet is still at body (not already transferring)
-        if let Ok(location) = fleets.get(transfer.fleet) {
-            if !matches!(location, FleetLocation::AtBody(_)) {
-                continue;
-            }
-        }
-
-        // Draw an X at the departure position
-        let departure_pos = phys_vec_to_vec3(transfer.solution.departure_pos);
-
-        painter.set_translation(departure_pos);
-        painter.set_rotation(Quat::IDENTITY);
-        painter.set_color(DEPARTURE_MARKER_COLOR);
-        painter.thickness = cam_scale * 0.8;
-
-        // Draw X (size in pixels)
-        let size = cam_scale * 5.0;
-        painter.line(Vec3::new(-size, -size, 0.0), Vec3::new(size, size, 0.0));
-        painter.line(Vec3::new(-size, size, 0.0), Vec3::new(size, -size, 0.0));
-    }
-}
 
 /// Queue waypoint marker color (cyan, dimmed)
 const QUEUE_MARKER_COLOR: Color = Color::srgba(0.3, 0.8, 0.8, 0.7);
 
-/// Queue arc color (dimmed orange)
-const QUEUE_ARC_COLOR: Color = Color::srgba(1.0, 0.6, 0.2, 0.4);
+/// Size of plan marker in pixels (scaled by cam_scale)
+const PLAN_MARKER_SIZE_PIXELS: f32 = 8.0;
 
-/// Renders numbered waypoint markers at queued destination bodies.
-pub fn render_plan_markers(
-    fleets: Query<&FlightPlan>,
-    bodies: Query<&GlobalTransform, With<Body>>,
+/// Syncs plan marker gizmo entities with flight plan state.
+/// Spawns markers as children of target body entities, despawns when legs are removed.
+/// Uses Transform.scale to adjust size based on camera scale.
+pub fn sync_plan_markers(
+    mut commands: Commands,
+    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
+    fleets: Query<(Entity, &FlightPlan)>,
+    existing_markers: Query<(Entity, &PlanMarker, &ChildOf)>,
+    mut marker_transforms: Query<&mut Transform, With<PlanMarker>>,
     cam_scale: Res<CameraScale>,
-    mut painter: ShapePainter,
 ) {
+    use bevy::platform::collections::HashSet;
+
     let cam_scale = cam_scale.0;
+    let marker_scale = cam_scale * PLAN_MARKER_SIZE_PIXELS;
 
-    for plan in &fleets {
-        for (index, leg) in plan.legs.iter().enumerate() {
-            // Get target body position (camera-relative via big_space)
-            let Ok(body_transform) = bodies.get(leg.target) else {
-                continue;
-            };
-
-            let pos = body_transform.translation();
-
-            // Draw a circle with number
-            painter.set_translation(pos);
-            painter.set_rotation(Quat::IDENTITY);
-            painter.set_color(QUEUE_MARKER_COLOR);
-            painter.thickness = cam_scale * 1.0;
-
-            // Circle around the waypoint (8 pixels)
-            let radius = cam_scale * 8.0;
-            painter.hollow = true;
-            painter.circle(radius);
-
-            // Draw the number (1-indexed) as simple lines
-            let num = index + 1;
-            let offset = Vec3::new(0.0, cam_scale * -2.0, 0.0);
-            draw_number(&mut painter, num, pos + offset, cam_scale * 3.0);
+    // Build set of desired markers: (fleet, leg_index, target_body)
+    let mut desired: HashSet<(Entity, usize, Entity)> = HashSet::new();
+    for (fleet_entity, plan) in &fleets {
+        for (leg_index, leg) in plan.legs.iter().enumerate() {
+            desired.insert((fleet_entity, leg_index, leg.target));
         }
     }
-}
 
-/// Renders dimmed preview arcs for uncommitted legs (not yet locked in).
-pub fn render_plan_arcs(
-    fleets: Query<(&FleetLocation, &FlightPlan)>,
-    lut: Res<TransferLut>,
-    bodies: Query<&Body>,
-    cam_scale: Res<CameraScale>,
-    mut painter: ShapePainter,
-) {
-    let cam_scale = cam_scale.0;
+    // Track which desired markers already exist
+    let mut existing_set: HashSet<(Entity, usize)> = HashSet::new();
 
-    for (location, plan) in &fleets {
-        // Only render uncommitted legs (index >= committed_count)
-        for i in plan.committed_count..plan.legs.len() {
-            let leg = &plan.legs[i];
-            let source = leg_source(location, plan, i);
+    // Update existing markers or despawn if no longer needed
+    for (marker_entity, marker, child_of) in &existing_markers {
+        let parent_body = child_of.parent();
+        let key = (marker.fleet, marker.leg_index, parent_body);
 
-            // Look up solution from LUT
-            let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) else {
-                continue;
-            };
-            let Some(solution) = lut.get_transfer(
-                source,
-                leg.target,
-                &src_body.orbital_elements,
-                &tgt_body.orbital_elements,
-                leg.departure_day,
-                leg.tof_days,
-            ) else {
-                continue;
-            };
-
-            // Draw a simplified arc (thickness scales with camera)
-            painter.set_color(QUEUE_ARC_COLOR);
-            painter.thickness = cam_scale * 2.0;
-
-            let num_segments = 100;
-            let tof = solution.time_of_flight;
-
-            for j in 0..num_segments {
-                let t0 = (j as f64 / num_segments as f64) * tof;
-                let t1 = ((j + 1) as f64 / num_segments as f64) * tof;
-
-                if let (Some(pos0), Some(pos1)) = (
-                    crate::transfer::propagate_kepler(
-                        solution.departure_pos,
-                        solution.departure_vel,
-                        MU_SUN,
-                        t0,
-                    ),
-                    crate::transfer::propagate_kepler(
-                        solution.departure_pos,
-                        solution.departure_vel,
-                        MU_SUN,
-                        t1,
-                    ),
-                ) {
-                    let p0 = phys_vec_to_vec3(pos0);
-                    let p1 = phys_vec_to_vec3(pos1);
-                    painter.line(p0, p1);
-                }
+        if desired.contains(&key) {
+            // Marker still valid - update scale
+            existing_set.insert((marker.fleet, marker.leg_index));
+            if let Ok(mut transform) = marker_transforms.get_mut(marker_entity) {
+                transform.scale = Vec3::splat(marker_scale);
             }
+        } else {
+            // Marker no longer needed - despawn
+            commands.entity(marker_entity).despawn();
         }
     }
-}
 
-/// Helper to draw a simple number using lines (1-9 only).
-fn draw_number(painter: &mut ShapePainter, num: usize, center: Vec3, size: f32) {
-    painter.set_translation(center);
-    let h = size;
-    let w = size * 0.6;
+    // Spawn markers for legs that don't have one
+    for (fleet_entity, plan) in &fleets {
+        for (leg_index, leg) in plan.legs.iter().enumerate() {
+            if existing_set.contains(&(fleet_entity, leg_index)) {
+                continue;
+            }
 
-    match num {
-        1 => {
-            painter.line(Vec3::new(0.0, h / 2.0, 0.0), Vec3::new(0.0, -h / 2.0, 0.0));
-        }
-        2 => {
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, 0.0, 0.0),
-            );
-            painter.line(Vec3::new(w / 2.0, 0.0, 0.0), Vec3::new(-w / 2.0, 0.0, 0.0));
-            painter.line(
-                Vec3::new(-w / 2.0, 0.0, 0.0),
-                Vec3::new(-w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(-w / 2.0, -h / 2.0, 0.0),
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-            );
-        }
-        3 => {
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(Vec3::new(-w / 2.0, 0.0, 0.0), Vec3::new(w / 2.0, 0.0, 0.0));
-        }
-        4 => {
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, 0.0, 0.0),
-            );
-            painter.line(Vec3::new(-w / 2.0, 0.0, 0.0), Vec3::new(w / 2.0, 0.0, 0.0));
-            painter.line(
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-            );
-        }
-        5 => {
-            painter.line(
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, 0.0, 0.0),
-            );
-            painter.line(Vec3::new(-w / 2.0, 0.0, 0.0), Vec3::new(w / 2.0, 0.0, 0.0));
-            painter.line(
-                Vec3::new(w / 2.0, 0.0, 0.0),
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, -h / 2.0, 0.0),
-            );
-        }
-        6 => {
-            painter.line(
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(-w / 2.0, -h / 2.0, 0.0),
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-                Vec3::new(w / 2.0, 0.0, 0.0),
-            );
-            painter.line(Vec3::new(w / 2.0, 0.0, 0.0), Vec3::new(-w / 2.0, 0.0, 0.0));
-        }
-        7 => {
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-            );
-        }
-        8 => {
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(-w / 2.0, -h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-            );
-            painter.line(Vec3::new(-w / 2.0, 0.0, 0.0), Vec3::new(w / 2.0, 0.0, 0.0));
-        }
-        9 => {
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(w / 2.0, h / 2.0, 0.0),
-                Vec3::new(w / 2.0, -h / 2.0, 0.0),
-            );
-            painter.line(
-                Vec3::new(-w / 2.0, h / 2.0, 0.0),
-                Vec3::new(-w / 2.0, 0.0, 0.0),
-            );
-            painter.line(Vec3::new(-w / 2.0, 0.0, 0.0), Vec3::new(w / 2.0, 0.0, 0.0));
-        }
-        _ => {
-            // For numbers > 9, just draw a dot
-            painter.circle(size * 0.3);
+            // Create a unit circle gizmo asset (radius 1.0, scaled by Transform)
+            let mut gizmo = GizmoAsset::new();
+            gizmo.circle(Isometry3d::IDENTITY, 1.0, QUEUE_MARKER_COLOR);
+
+            commands.spawn((
+                Gizmo {
+                    handle: gizmo_assets.add(gizmo),
+                    depth_bias: 0.08,
+                    ..default()
+                },
+                PlanMarker {
+                    fleet: fleet_entity,
+                    leg_index,
+                },
+                Transform::from_xyz(0.0, 0.0, 0.15).with_scale(Vec3::splat(marker_scale)),
+                ChildOf(leg.target),
+            ));
         }
     }
 }

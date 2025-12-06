@@ -1369,9 +1369,9 @@ pub fn handle_fleet_number_keys(
                     };
 
                     // Set camera target for smooth animation (just recenter, no zoom)
-                    if let Ok(mut camera_target) = camera_query.single_mut() {
-                        camera_target.pan_to(Vec2::new(fleet_pos.x, fleet_pos.y));
-                    }
+                    // if let Ok(mut camera_target) = camera_query.single_mut() {
+                    //     camera_target.pan_to(Vec2::new(fleet_pos.x, fleet_pos.y));
+                    // }
 
                     // Clear double-tap state
                     key_state.last_key = None;

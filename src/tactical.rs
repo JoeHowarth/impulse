@@ -4,14 +4,15 @@
 //! and VisualShip entities for each LogicalShip in the involved fleets.
 
 use avian3d::prelude::*;
-use bevy::math::DVec3;
+use bevy::gizmos::GizmoAsset;
+use bevy::math::{DVec2, DVec3, Isometry3d};
 use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
 
+use crate::ComputedBody;
 use crate::camera::{CameraScale, CameraTarget};
 use crate::ship::{CombatState, Faction, LogicalShip, Selected, ship_count};
 use crate::simulation::SimulationTime;
-use crate::ComputedBody;
 
 // ============================================================================
 // Constants
@@ -86,14 +87,14 @@ const ARRIVAL_VELOCITY: f64 = 100_000.0;
 pub struct TacticalArena {
     /// The body where this battle is occurring
     pub body: Entity,
-    /// Arena center in heliocentric coordinates (Vec3 visual units)
-    pub heliocentric_pos: Vec3,
-    /// Previous camera position for restoration
-    pub previous_camera_pos: Vec2,
-    /// Previous camera scale for restoration
-    pub previous_camera_scale: f32,
-    /// Previous time scale for restoration
-    pub previous_time_scale: f64,
+    // /// Arena center in heliocentric coordinates (Vec3 visual units)
+    // pub heliocentric_pos: Vec3,
+    // /// Previous camera position for restoration
+    // pub previous_camera_pos: Vec2,
+    // /// Previous camera scale for restoration
+    // pub previous_camera_scale: f32,
+    // /// Previous time scale for restoration
+    // pub previous_time_scale: f64,
 }
 
 /// A visual representation of a LogicalShip during tactical combat.
@@ -115,6 +116,14 @@ pub struct MoveOrder {
     pub destination: DVec3,
 }
 
+/// Marker for the ship triangle gizmo (child of VisualShip).
+#[derive(Component)]
+pub struct ShipGizmo;
+
+/// Marker for the selection ring gizmo (child of VisualShip, only when selected).
+#[derive(Component)]
+pub struct SelectionRingGizmo;
+
 /// Stats for ship movement and combat capabilities.
 #[derive(Component)]
 pub struct ShipStats {
@@ -127,8 +136,8 @@ pub struct ShipStats {
 impl Default for ShipStats {
     fn default() -> Self {
         Self {
-            max_acceleration: 1_000_000.0,   // 100,000g - temporary 100,000x scale for testing
-            max_speed: 5_000_000_000.0,      // 5,000,000 km/s - temporary 100,000x scale for testing
+            max_acceleration: 1_000_000.0, // 100,000g - temporary 100,000x scale for testing
+            max_speed: 5_000_000_000.0,    // 5,000,000 km/s - temporary 100,000x scale for testing
         }
     }
 }
@@ -141,9 +150,10 @@ impl Default for ShipStats {
 /// Spawns TacticalArena and VisualShips, animates camera, adjusts time scale.
 pub fn enter_tactical_mode(
     mut commands: Commands,
+    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     mut combat: ResMut<CombatState>,
     mut sim_time: ResMut<SimulationTime>,
-    mut camera_query: Query<(&Transform, &Projection, &mut CameraTarget)>,
+    mut camera_query: Query<&mut CameraTarget>,
     bodies: Query<&ComputedBody>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
@@ -164,24 +174,17 @@ pub fn enter_tactical_mode(
     };
 
     // Get current camera state for later restoration
-    let (camera_transform, camera_projection, mut camera_target) = camera_query
-        .single_mut()
-        .expect("No camera found");
-    let current_pos = Vec2::new(camera_transform.translation.x, camera_transform.translation.y);
-    let current_scale = match camera_projection {
-        Projection::Orthographic(ortho) => ortho.scale,
-        _ => 1.0,
-    };
+    let mut camera_target = camera_query.single_mut().expect("No camera found");
 
     // Offset arena center so body appears on right side of view
     // Offset in negative X to put body on positive X side
     // TODO(Phase 5): Use CellCoord + Transform instead of f32 position
-    let arena_offset = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
-    let arena_pos = body_computed.helio_pos.as_vec3() + arena_offset;
+    let arena_relative = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
+    let arena_helio = body_computed.helio_pos + DVec3::from(arena_relative);
 
     info!(
-        "Entering tactical mode at body (pos: {:?}), {} player fleets, {} enemy fleets",
-        arena_pos,
+        "Entering tactical mode at body (relative pos: {:?}), {} player fleets, {} enemy fleets",
+        arena_relative,
         combat.player_fleets.len(),
         combat.enemy_fleets.len()
     );
@@ -191,12 +194,13 @@ pub fn enter_tactical_mode(
         .spawn((
             TacticalArena {
                 body: body_entity,
-                heliocentric_pos: arena_pos,
-                previous_camera_pos: current_pos,
-                previous_camera_scale: current_scale,
-                previous_time_scale: sim_time.time_scale,
+                // heliocentric_pos: arena_pos,
+                // previous_camera_pos: current_pos,
+                // previous_camera_scale: current_scale,
+                // previous_time_scale: sim_time.time_scale,
             },
-            Transform::from_translation(arena_pos),
+            ChildOf(body_entity),
+            Transform::from_translation(arena_relative),
             Visibility::default(),
         ))
         .id();
@@ -216,6 +220,7 @@ pub fn enter_tactical_mode(
     // Spawn player ships (bottom center, y = -50,000 km)
     let player_spawned = spawn_fleet_ships(
         &mut commands,
+        &mut gizmo_assets,
         arena,
         &combat.player_fleets,
         Faction::Player,
@@ -228,6 +233,7 @@ pub fn enter_tactical_mode(
     // Spawn enemy ships (top center, y = +50,000 km)
     let enemy_spawned = spawn_fleet_ships(
         &mut commands,
+        &mut gizmo_assets,
         arena,
         &combat.enemy_fleets,
         Faction::Enemy,
@@ -246,7 +252,7 @@ pub fn enter_tactical_mode(
     combat.arena = Some(arena);
 
     // Animate camera to tactical view
-    camera_target.move_to(Vec2::new(arena_pos.x, arena_pos.y), TACTICAL_CAMERA_SCALE);
+    camera_target.move_to(arena_helio.xy(), TACTICAL_CAMERA_SCALE);
 
     // Set tactical time scale
     sim_time.time_scale = TACTICAL_TIME_SCALE;
@@ -256,6 +262,7 @@ pub fn enter_tactical_mode(
 /// Returns the number of ships spawned.
 fn spawn_fleet_ships(
     commands: &mut Commands,
+    gizmo_assets: &mut Assets<GizmoAsset>,
     arena: Entity,
     fleets: &[Entity],
     faction: Faction,
@@ -265,6 +272,24 @@ fn spawn_fleet_ships(
     ships: &Query<&LogicalShip>,
 ) -> usize {
     let mut index = 0;
+
+    // Create triangle gizmo asset (unit size, will be scaled by Transform)
+    let color = match faction {
+        Faction::Player => Color::srgb(0.4, 1.0, 0.4),
+        Faction::Enemy => Color::srgb(1.0, 0.3, 0.3),
+    };
+    let mut gizmo = GizmoAsset::new();
+    // Draw unit triangle pointing up (will be scaled by parent)
+    gizmo.linestrip(
+        [
+            Vec3::new(0.0, 0.5, 0.0),   // top
+            Vec3::new(-0.5, -0.5, 0.0), // bottom left
+            Vec3::new(0.5, -0.5, 0.0),  // bottom right
+            Vec3::new(0.0, 0.5, 0.0),   // back to top
+        ],
+        color,
+    );
+    let gizmo_handle = gizmo_assets.add(gizmo);
 
     for &fleet_entity in fleets {
         let Ok(children) = children_query.get(fleet_entity) else {
@@ -276,8 +301,9 @@ fn spawn_fleet_ships(
                 let x_offset = compute_ship_x_offset(index, total_ships);
                 let logical_ship = child;
 
-                commands.entity(arena).with_children(|builder| {
-                    builder.spawn((
+                // Spawn VisualShip
+                let visual_ship = commands
+                    .spawn((
                         VisualShip {
                             logical: logical_ship,
                             fleet: fleet_entity,
@@ -296,8 +322,21 @@ fn spawn_fleet_ships(
                         SweptCcd::default(), // Prevent tunneling at high speeds
                         // Movement stats
                         ShipStats::default(),
-                    ));
-                });
+                        ChildOf(arena),
+                    ))
+                    .id();
+
+                // Spawn triangle gizmo as child of VisualShip
+                commands.spawn((
+                    Gizmo {
+                        handle: gizmo_handle.clone(),
+                        depth_bias: 0.0,
+                        ..default()
+                    },
+                    ShipGizmo,
+                    Transform::from_scale(Vec3::splat(SHIP_PHYSICAL_SIZE)),
+                    ChildOf(visual_ship),
+                ));
 
                 index += 1;
             }
@@ -328,34 +367,34 @@ pub fn update_arena_position(
         Without<TacticalArena>,
     >,
 ) {
-    for (arena, mut arena_transform) in &mut arena_query {
-        if let Ok(body) = bodies.get(arena.body) {
-            // Apply same offset as spawn to keep body on right side
-            // TODO(Phase 5): Use CellCoord + Transform instead of f32 position
-            let arena_offset = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
-            let new_pos = body.helio_pos.as_vec3() + arena_offset;
+    // for (arena, mut arena_transform) in &mut arena_query {
+    //     if let Ok(body) = bodies.get(arena.body) {
+    //         // Apply same offset as spawn to keep body on right side
+    //         // TODO(Phase 5): Use CellCoord + Transform instead of f32 position
+    //         let arena_offset = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
+    //         let new_pos = body.helio_pos.as_vec3() + arena_offset;
 
-            // Calculate how much the arena moved this frame
-            let delta = new_pos - arena_transform.translation;
+    //         // Calculate how much the arena moved this frame
+    //         let delta = new_pos - arena_transform.translation;
 
-            // Update arena position
-            arena_transform.translation = new_pos;
+    //         // Update arena position
+    //         arena_transform.translation = new_pos;
 
-            // Move camera by the same delta to track the arena
-            // Always apply delta to camera position so it moves with arena
-            if let Ok((mut cam_transform, mut camera_target)) = camera_query.single_mut() {
-                // Always move camera position with arena
-                cam_transform.translation.x += delta.x;
-                cam_transform.translation.y += delta.y;
+    //         // Move camera by the same delta to track the arena
+    //         // Always apply delta to camera position so it moves with arena
+    //         if let Ok((mut cam_transform, mut camera_target)) = camera_query.single_mut() {
+    //             // Always move camera position with arena
+    //             cam_transform.translation.x += delta.x;
+    //             cam_transform.translation.y += delta.y;
 
-                // If animating, also move the target so we animate toward the right place
-                if let Some(ref mut target_pos) = camera_target.position {
-                    target_pos.x += delta.x;
-                    target_pos.y += delta.y;
-                }
-            }
-        }
-    }
+    //             // If animating, also move the target so we animate toward the right place
+    //             if let Some(ref mut target_pos) = camera_target.position {
+    //                 target_pos.x += delta.x;
+    //                 target_pos.y += delta.y;
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 /// Computes ship display size using LOD system similar to bodies.
@@ -521,11 +560,16 @@ pub fn update_ship_movement(
             info!(
                 "Ship movement: mode={}, transform=({:.0},{:.0})km, avian_pos=({:.0},{:.0})km, dest=({:.0},{:.0})km, dir=({:.2},{:.2}), vel=({:.0},{:.0})km/s",
                 mode,
-                transform.translation.x as f64 / 1000.0, transform.translation.y as f64 / 1000.0,
-                avian_pos.x / 1000.0, avian_pos.y / 1000.0,
-                order.destination.x / 1000.0, order.destination.y / 1000.0,
-                direction.x, direction.y,
-                velocity.0.x / 1000.0, velocity.0.y / 1000.0
+                transform.translation.x as f64 / 1000.0,
+                transform.translation.y as f64 / 1000.0,
+                avian_pos.x / 1000.0,
+                avian_pos.y / 1000.0,
+                order.destination.x / 1000.0,
+                order.destination.y / 1000.0,
+                direction.x,
+                direction.y,
+                velocity.0.x / 1000.0,
+                velocity.0.y / 1000.0
             );
         }
 
@@ -597,13 +641,7 @@ pub fn render_move_markers(
         painter.thickness = cam_scale.0 * 2.0;
 
         let size = cam_scale.0 * 15.0; // 15 pixels
-        painter.line(
-            Vec3::new(-size, -size, 0.0),
-            Vec3::new(size, size, 0.0),
-        );
-        painter.line(
-            Vec3::new(-size, size, 0.0),
-            Vec3::new(size, -size, 0.0),
-        );
+        painter.line(Vec3::new(-size, -size, 0.0), Vec3::new(size, size, 0.0));
+        painter.line(Vec3::new(-size, size, 0.0), Vec3::new(size, -size, 0.0));
     }
 }

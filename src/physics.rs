@@ -16,6 +16,7 @@
 use avian3d::physics_transform::PhysicsTransformConfig;
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use big_space::prelude::CellCoord;
 
 /// Physics plugin configuration for tactical combat.
 pub struct TacticalPhysicsPlugin;
@@ -28,8 +29,66 @@ impl Plugin for TacticalPhysicsPlugin {
             .insert_resource(PhysicsTransformConfig {
                 transform_to_position: false,
                 position_to_transform: false,
-                ..default()
+                propagate_before_physics: false,
+                transform_to_collider_scale: true,
             });
+    }
+}
+
+/// Copies [`GlobalTransform`] changes to [`Position`] and [`Rotation`].
+/// This allows users to use transforms for moving and positioning bodies and colliders.
+///
+/// To account for hierarchies, transform propagation should be run before this system.
+#[allow(clippy::type_complexity)]
+pub fn transform_to_position(
+    mut query: Query<(&Transform, &CellCoord, &mut Position, &mut Rotation)>,
+    length_unit: Res<PhysicsLengthUnit>,
+    last_physics_tick: Res<LastPhysicsTick>,
+    system_tick: SystemChangeTick,
+) {
+    // On the first tick, the last physics tick and system tick are both defaulted to 0,
+    // but to handle change detection correctly, the system tick should always be larger.
+    // So we use a minimum system tick of 1 here.
+    let this_run = if last_physics_tick.0.get() == 0 {
+        Tick::new(1)
+    } else {
+        system_tick.this_run()
+    };
+
+    // If the `GlobalTransform` translation and `Position` differ by less than 0.01 mm, we ignore the change.
+    let distance_tolerance = length_unit.0 * 1e-5;
+    // If the `GlobalTransform` rotation and `Rotation` differ by less than 0.1 degrees, we ignore the change.
+    let rotation_tolerance = (0.1 as Scalar).to_radians();
+
+    for (global_transform, mut position, mut rotation) in &mut query {
+        let global_transform = global_transform.compute_transform();
+        #[cfg(feature = "2d")]
+        let transform_translation = global_transform.translation.truncate().adjust_precision();
+        #[cfg(feature = "3d")]
+        let transform_translation = global_transform.translation.adjust_precision();
+        let transform_rotation = Rotation::from(global_transform.rotation.adjust_precision());
+
+        let position_changed = !position.is_added()
+            && is_changed_after_tick(
+                Ref::from(position.reborrow()),
+                last_physics_tick.0,
+                this_run,
+            );
+        if !position_changed && position.abs_diff_ne(&transform_translation, distance_tolerance) {
+            position.0 = transform_translation;
+        }
+
+        let rotation_changed = !rotation.is_added()
+            && is_changed_after_tick(
+                Ref::from(rotation.reborrow()),
+                last_physics_tick.0,
+                this_run,
+            );
+        if !rotation_changed
+            && rotation.angle_between(transform_rotation).abs() > rotation_tolerance
+        {
+            *rotation = transform_rotation;
+        }
     }
 }
 
@@ -146,7 +205,11 @@ mod tests {
         // Distance per frame: 10000 / 64 = 156.25 m/frame
 
         println!("\nHigh-speed slug test (10 km/s):");
-        println!("  Velocity: {} m/s ({} km/s)", slug_velocity, slug_velocity / 1000.0);
+        println!(
+            "  Velocity: {} m/s ({} km/s)",
+            slug_velocity,
+            slug_velocity / 1000.0
+        );
         println!("  Initial distance: {} m", initial_distance);
         println!(
             "  Time to impact: {:.4} seconds",
@@ -154,7 +217,10 @@ mod tests {
         );
         println!("  Frame duration: {:.4} seconds", 1.0 / 64.0);
         println!("  Distance per frame: {:.2} m", slug_velocity / 64.0);
-        println!("  Expected collision frame: ~{}", ((initial_distance - 1.5) / slug_velocity * 64.0) as i32);
+        println!(
+            "  Expected collision frame: ~{}",
+            ((initial_distance - 1.5) / slug_velocity * 64.0) as i32
+        );
 
         let mut collision_frame = None;
 
@@ -375,7 +441,10 @@ mod tests {
 
         println!("Position log (frame, A.x, B.y, separation):");
         for (frame, ax, by, sep) in &positions_log {
-            println!("  Frame {:3}: A.x={:8.1}, B.y={:8.1}, sep={:.1}m", frame, ax, by, sep);
+            println!(
+                "  Frame {:3}: A.x={:8.1}, B.y={:8.1}, sep={:.1}m",
+                frame, ax, by, sep
+            );
         }
 
         let collision_frame = collision_frame.expect("Collision should have occurred");
@@ -384,7 +453,11 @@ mod tests {
         // Verify z-coordinate precision - should still be exactly neptune_scale
         let final_pos_a = app.world().get::<Position>(object_a).unwrap().0;
         let z_error = (final_pos_a.z - neptune_scale).abs();
-        println!("Z-coordinate error: {:.2e} m (relative: {:.2e})", z_error, z_error / neptune_scale);
+        println!(
+            "Z-coordinate error: {:.2e} m (relative: {:.2e})",
+            z_error,
+            z_error / neptune_scale
+        );
 
         // Allow some tolerance for frame timing
         let tolerance = 10;

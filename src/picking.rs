@@ -3,13 +3,18 @@
 //! Strategic mode: Single fleet selection via click
 //! Tactical mode: Multi-ship selection via click, Shift+click, and box select
 
-use bevy::math::DVec3;
+use bevy::gizmos::GizmoAsset;
+use bevy::math::{DVec3, Isometry3d};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_vector_shapes::prelude::*;
 
 use crate::ship::{CombatState, Faction, Selected};
+
 use crate::tactical::{MoveOrder, TacticalArena, VisualShip};
+
+/// Marker for the box selection rectangle gizmo entity.
+#[derive(Component)]
+pub struct BoxSelectionGizmo;
 
 // ============================================================================
 // Constants
@@ -294,67 +299,83 @@ pub fn update_box_selection(
     }
 }
 
-/// Renders the box selection rectangle during drag.
-pub fn render_box_selection(
+/// Box selection rectangle color
+const BOX_SELECT_COLOR: Color = Color::srgba(0.5, 0.8, 1.0, 0.5);
+
+/// Syncs the box selection rectangle gizmo with drag state.
+/// Spawns gizmo when dragging starts, updates position/scale during drag, despawns when done.
+pub fn sync_box_selection(
+    mut commands: Commands,
+    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     box_sel: Res<BoxSelection>,
     combat: Res<CombatState>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
-    mut painter: bevy_vector_shapes::prelude::ShapePainter,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    existing_gizmo: Query<Entity, With<BoxSelectionGizmo>>,
+    mut gizmo_transforms: Query<&mut Transform, With<BoxSelectionGizmo>>,
 ) {
-    if !combat.active {
+    // Determine if we should show the box selection
+    let should_show = combat.active
+        && box_sel.start.is_some()
+        && box_sel.current.is_some()
+        && box_sel.start.unwrap().distance(box_sel.current.unwrap()) > BOX_SELECT_THRESHOLD;
+
+    if !should_show {
+        // Despawn any existing gizmo
+        for entity in &existing_gizmo {
+            commands.entity(entity).despawn();
+        }
         return;
     }
 
-    let (Some(start), Some(current)) = (box_sel.start, box_sel.current) else {
-        return;
-    };
-
-    // Only draw if dragged enough
-    if start.distance(current) <= BOX_SELECT_THRESHOLD {
-        return;
-    }
+    let start = box_sel.start.unwrap();
+    let current = box_sel.current.unwrap();
 
     let Ok(window) = windows.single() else {
         return;
     };
-    let Ok((camera, camera_transform, projection)) = camera_query.single() else {
+    let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
-    };
-
-    // Convert screen corners to world space
-    let window_size = Vec2::new(window.width(), window.height());
-
-    // Get camera scale for line thickness
-    let cam_scale = match projection {
-        Projection::Orthographic(ortho) => ortho.scale,
-        _ => 1.0,
     };
 
     // Convert screen coords to world coords
-    let start_world = screen_to_world(start, window_size, camera, camera_transform);
-    let end_world = screen_to_world(current, window_size, camera, camera_transform);
-
-    let Some(start_world) = start_world else {
+    let window_size = Vec2::new(window.width(), window.height());
+    let Some(start_world) = screen_to_world(start, window_size, camera, camera_transform) else {
         return;
     };
-    let Some(end_world) = end_world else {
+    let Some(end_world) = screen_to_world(current, window_size, camera, camera_transform) else {
         return;
     };
 
-    // Draw rectangle
-    painter.set_color(Color::srgba(0.5, 0.8, 1.0, 0.5));
-    painter.thickness = cam_scale * 1.0;
+    // Calculate center and size for the rectangle
+    let center = Vec3::new(
+        (start_world.x + end_world.x) / 2.0,
+        (start_world.y + end_world.y) / 2.0,
+        0.1, // Z offset for visibility
+    );
+    let size = Vec2::new(
+        (end_world.x - start_world.x).abs(),
+        (end_world.y - start_world.y).abs(),
+    );
 
-    let corners = [
-        Vec3::new(start_world.x, start_world.y, 0.1),
-        Vec3::new(end_world.x, start_world.y, 0.1),
-        Vec3::new(end_world.x, end_world.y, 0.1),
-        Vec3::new(start_world.x, end_world.y, 0.1),
-    ];
+    if let Ok(mut transform) = gizmo_transforms.single_mut() {
+        // Update existing gizmo's transform
+        transform.translation = center;
+        transform.scale = Vec3::new(size.x, size.y, 1.0);
+    } else {
+        // Spawn new gizmo with unit rect (1x1), scaled by Transform
+        let mut gizmo = GizmoAsset::new();
+        gizmo.rect(Isometry3d::IDENTITY, Vec2::ONE, BOX_SELECT_COLOR);
 
-    for i in 0..4 {
-        painter.line(corners[i], corners[(i + 1) % 4]);
+        commands.spawn((
+            Gizmo {
+                handle: gizmo_assets.add(gizmo),
+                depth_bias: -0.1, // Draw on top
+                ..default()
+            },
+            BoxSelectionGizmo,
+            Transform::from_translation(center).with_scale(Vec3::new(size.x, size.y, 1.0)),
+        ));
     }
 }
 
