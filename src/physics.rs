@@ -10,13 +10,17 @@
 //! - `position_to_transform`: writes via `.f32()` losing precision at planetary distances
 //!
 //! Custom sync systems in this module preserve f64 precision via CellCoord:
-//! - `cell_transform_to_position`: CellCoord + Transform → Position (before physics)
-//! - `position_to_cell_transform`: Position → CellCoord + Transform (after physics)
+//! - `big_space_transform_to_position`: CellCoord + Transform → Position (before physics)
+//! - `position_to_big_space_transform`: Position → CellCoord + Transform (after physics)
 
-use avian3d::physics_transform::PhysicsTransformConfig;
+use avian3d::math::AdjustPrecision;
+use avian3d::physics_transform::{PhysicsTransformConfig, PhysicsTransformSystems};
 use avian3d::prelude::*;
+use avian3d::schedule::PhysicsSystems;
+use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
-use big_space::prelude::CellCoord;
+use std::collections::HashMap;
+use big_space::prelude::*;
 
 /// Physics plugin configuration for tactical combat.
 pub struct TacticalPhysicsPlugin;
@@ -31,15 +35,205 @@ impl Plugin for TacticalPhysicsPlugin {
                 position_to_transform: false,
                 propagate_before_physics: false,
                 transform_to_collider_scale: true,
-            });
+            })
+            // Pre-physics: CellCoord + Transform → Position/Rotation
+            .add_systems(
+                FixedPostUpdate,
+                big_space_transform_to_position
+                    .in_set(PhysicsTransformSystems::TransformToPosition)
+                    .in_set(PhysicsSystems::Prepare),
+            )
+            // Post-physics: Position/Rotation → CellCoord + Transform
+            .add_systems(
+                FixedPostUpdate,
+                position_to_big_space_transform
+                    .in_set(PhysicsTransformSystems::PositionToTransform)
+                    .in_set(PhysicsSystems::Writeback),
+            );
     }
 }
 
-/// Copies [`GlobalTransform`] changes to [`Position`] and [`Rotation`].
-/// This allows users to use transforms for moving and positioning bodies and colliders.
+/// Cached world-space transform for hierarchy traversal.
+#[derive(Clone, Copy)]
+struct WorldTransform {
+    position: DVec3,
+    rotation: DQuat,
+}
+
+impl Default for WorldTransform {
+    fn default() -> Self {
+        Self {
+            position: DVec3::ZERO,
+            rotation: DQuat::IDENTITY,
+        }
+    }
+}
+
+/// Pre-physics sync: Walks the big_space hierarchy and writes world-space
+/// Position/Rotation from CellCoord + Transform.
 ///
-/// To account for hierarchies, transform propagation should be run before this system.
-#[allow(clippy::type_complexity)]
+/// For entities with CellCoord: world_pos = grid.grid_position_double(cell, transform)
+/// For entities without CellCoord: world_pos = parent_world + parent_rot * local_translation
+fn big_space_transform_to_position(
+    root_query: Query<(Entity, &Grid, &Children), With<BigSpace>>,
+    children_query: Query<&Children>,
+    transform_query: Query<(&Transform, Option<&CellCoord>)>,
+    mut physics_query: Query<(&mut Position, &mut Rotation)>,
+) {
+    let (root_entity, grid, root_children) = root_query.single().expect("No root found");
+
+    // Cache of entity -> world transform for parent lookups
+    let mut world_cache: HashMap<Entity, WorldTransform> = HashMap::new();
+
+    // Root is at origin
+    world_cache.insert(root_entity, WorldTransform::default());
+
+    // BFS traversal
+    let mut queue: Vec<(Entity, Entity)> = root_children
+        .iter()
+        .map(|child| (root_entity, child))
+        .collect();
+
+    while let Some((parent_entity, entity)) = queue.pop() {
+        let parent_world = world_cache.get(&parent_entity).copied().expect("No parent found");
+
+        // Compute this entity's world transform
+        let world = if let Ok((transform, cell_coord)) = transform_query.get(entity) {
+            if let Some(cell) = cell_coord {
+                // Has CellCoord: use grid to compute world position
+                let grid_pos = grid.grid_position_double(cell, transform);
+                WorldTransform {
+                    position: grid_pos,
+                    rotation: transform.rotation.as_dquat(),
+                }
+            } else {
+                // No CellCoord: accumulate from parent
+                let local_translation = transform.translation.as_dvec3();
+                let rotated_translation = parent_world.rotation * local_translation;
+                WorldTransform {
+                    position: parent_world.position + rotated_translation,
+                    rotation: parent_world.rotation * transform.rotation.as_dquat(),
+                }
+            }
+        } else {
+            // No transform component - inherit parent's world transform
+            parent_world
+        };
+
+        // Cache for children
+        world_cache.insert(entity, world);
+
+        // Write to Position/Rotation if entity has them
+        if let Ok((mut position, mut rotation)) = physics_query.get_mut(entity) {
+            position.0 = world.position;
+            rotation.0 = world.rotation.as_quat().adjust_precision();
+        }
+
+        // Queue children
+        if let Ok(children) = children_query.get(entity) {
+            for child in children.iter() {
+                queue.push((entity, child));
+            }
+        }
+    }
+}
+
+/// Post-physics sync: Walks the big_space hierarchy and writes CellCoord + Transform
+/// from world-space Position/Rotation.
+///
+/// For entities with CellCoord: convert Position → CellCoord + local Transform
+/// For entities without CellCoord: compute local Transform from parent's world position
+fn position_to_big_space_transform(
+    root_query: Query<(Entity, &Grid, &Children), With<BigSpace>>,
+    children_query: Query<&Children>,
+    physics_query: Query<(&Position, &Rotation), Changed<Position>>,
+    physics_read_query: Query<(&Position, &Rotation)>,
+    mut transform_query: Query<(&mut Transform, Option<&mut CellCoord>)>,
+) {
+    let Ok((root_entity, grid, root_children)) = root_query.single() else {
+        return;
+    };
+
+    // Cache of entity -> world transform for parent lookups
+    // We need world positions to compute local transforms for children
+    let mut world_cache: HashMap<Entity, WorldTransform> = HashMap::new();
+
+    // Root is at origin
+    world_cache.insert(root_entity, WorldTransform::default());
+
+    // BFS traversal
+    let mut queue: Vec<(Entity, Entity)> = root_children
+        .iter()
+        .map(|child| (root_entity, child))
+        .collect();
+
+    while let Some((parent_entity, entity)) = queue.pop() {
+        let parent_world = world_cache.get(&parent_entity).copied().unwrap_or_default();
+
+        // Determine this entity's world position
+        // If it has Position, use that (physics is source of truth)
+        // Otherwise, compute from transform (for non-physics entities)
+        let world = if let Ok((position, rotation)) = physics_read_query.get(entity) {
+            // Avian's Rotation wraps Quaternion (which is DQuat in f64 mode)
+            let rot = rotation.0;
+            WorldTransform {
+                position: position.0,
+                rotation: DQuat::from_xyzw(rot.x, rot.y, rot.z, rot.w),
+            }
+        } else if let Ok((transform, cell_coord)) = transform_query.get(entity) {
+            if let Some(cell) = cell_coord {
+                let grid_pos = grid.grid_position_double(&cell, &transform);
+                WorldTransform {
+                    position: grid_pos,
+                    rotation: transform.rotation.as_dquat(),
+                }
+            } else {
+                let local_translation = transform.translation.as_dvec3();
+                let rotated_translation = parent_world.rotation * local_translation;
+                WorldTransform {
+                    position: parent_world.position + rotated_translation,
+                    rotation: parent_world.rotation * transform.rotation.as_dquat(),
+                }
+            }
+        } else {
+            parent_world
+        };
+
+        // Cache for children
+        world_cache.insert(entity, world);
+
+        // Only update transform if Position actually changed (from physics)
+        if physics_query.get(entity).is_ok() {
+            if let Ok((mut transform, cell_coord)) = transform_query.get_mut(entity) {
+                if let Some(mut cell) = cell_coord {
+                    // Has CellCoord: convert world Position → CellCoord + local Transform
+                    let (new_cell, local_pos) = grid.translation_to_grid(world.position);
+                    *cell = new_cell;
+                    transform.translation = local_pos;
+                    transform.rotation = world.rotation.as_quat();
+                } else {
+                    // No CellCoord: compute local transform relative to parent
+                    let inv_parent_rot = parent_world.rotation.inverse();
+                    let local_pos = inv_parent_rot * (world.position - parent_world.position);
+                    let local_rot = inv_parent_rot * world.rotation;
+
+                    transform.translation = local_pos.as_vec3();
+                    transform.rotation = local_rot.as_quat();
+                }
+            }
+        }
+
+        // Queue children
+        if let Ok(children) = children_query.get(entity) {
+            for child in children.iter() {
+                queue.push((entity, child));
+            }
+        }
+    }
+}
+
+// Avian Example System
+/*
 pub fn transform_to_position(
     mut query: Query<(&Transform, &CellCoord, &mut Position, &mut Rotation)>,
     length_unit: Res<PhysicsLengthUnit>,
@@ -90,7 +284,7 @@ pub fn transform_to_position(
             *rotation = transform_rotation;
         }
     }
-}
+}*/
 
 #[cfg(test)]
 mod tests {
