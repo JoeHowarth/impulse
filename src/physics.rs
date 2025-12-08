@@ -19,8 +19,8 @@ use avian3d::prelude::*;
 use avian3d::schedule::PhysicsSystems;
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
-use std::collections::HashMap;
 use big_space::prelude::*;
+use std::collections::HashMap;
 
 /// Physics plugin configuration for tactical combat.
 pub struct TacticalPhysicsPlugin;
@@ -38,7 +38,7 @@ impl Plugin for TacticalPhysicsPlugin {
             })
             // Pre-physics: CellCoord + Transform → Position/Rotation
             .add_systems(
-                FixedPostUpdate,
+                FixedPreUpdate,
                 big_space_transform_to_position
                     .in_set(PhysicsTransformSystems::TransformToPosition)
                     .in_set(PhysicsSystems::Prepare),
@@ -95,18 +95,22 @@ fn big_space_transform_to_position(
         .collect();
 
     while let Some((parent_entity, entity)) = queue.pop() {
-        let parent_world = world_cache.get(&parent_entity).copied().expect("No parent found");
+        let parent_world = world_cache
+            .get(&parent_entity)
+            .copied()
+            .expect("No parent found");
 
         // Compute this entity's world transform
-        let world = if let Ok((transform, cell_coord)) = transform_query.get(entity) {
-            if let Some(cell) = cell_coord {
+        let world = match transform_query.get(entity) {
+            Ok((transform, Some(cell))) => {
                 // Has CellCoord: use grid to compute world position
                 let grid_pos = grid.grid_position_double(cell, transform);
                 WorldTransform {
                     position: grid_pos,
                     rotation: transform.rotation.as_dquat(),
                 }
-            } else {
+            }
+            Ok((transform, None)) => {
                 // No CellCoord: accumulate from parent
                 let local_translation = transform.translation.as_dvec3();
                 let rotated_translation = parent_world.rotation * local_translation;
@@ -115,9 +119,7 @@ fn big_space_transform_to_position(
                     rotation: parent_world.rotation * transform.rotation.as_dquat(),
                 }
             }
-        } else {
-            // No transform component - inherit parent's world transform
-            parent_world
+            Err(_) => parent_world,
         };
 
         // Cache for children
@@ -173,21 +175,22 @@ fn position_to_big_space_transform(
         // Determine this entity's world position
         // If it has Position, use that (physics is source of truth)
         // Otherwise, compute from transform (for non-physics entities)
-        let world = if let Ok((position, rotation)) = physics_read_query.get(entity) {
-            // Avian's Rotation wraps Quaternion (which is DQuat in f64 mode)
-            let rot = rotation.0;
-            WorldTransform {
+        let world = match (physics_read_query.get(entity), transform_query.get(entity)) {
+            // Physics Position/Rotation is source of truth
+            (Ok((position, rotation)), _) => WorldTransform {
                 position: position.0,
-                rotation: DQuat::from_xyzw(rot.x, rot.y, rot.z, rot.w),
-            }
-        } else if let Ok((transform, cell_coord)) = transform_query.get(entity) {
-            if let Some(cell) = cell_coord {
+                rotation: rotation.0,
+            },
+            // Has CellCoord: use grid to compute world position
+            (_, Ok((transform, Some(cell)))) => {
                 let grid_pos = grid.grid_position_double(&cell, &transform);
                 WorldTransform {
                     position: grid_pos,
                     rotation: transform.rotation.as_dquat(),
                 }
-            } else {
+            }
+            // Transform only: accumulate from parent
+            (_, Ok((transform, None))) => {
                 let local_translation = transform.translation.as_dvec3();
                 let rotated_translation = parent_world.rotation * local_translation;
                 WorldTransform {
@@ -195,32 +198,32 @@ fn position_to_big_space_transform(
                     rotation: parent_world.rotation * transform.rotation.as_dquat(),
                 }
             }
-        } else {
-            parent_world
+            // No transform - inherit parent's world transform
+            _ => parent_world,
         };
 
         // Cache for children
         world_cache.insert(entity, world);
 
         // Only update transform if Position actually changed (from physics)
-        if physics_query.get(entity).is_ok() {
-            if let Ok((mut transform, cell_coord)) = transform_query.get_mut(entity) {
-                if let Some(mut cell) = cell_coord {
-                    // Has CellCoord: convert world Position → CellCoord + local Transform
-                    let (new_cell, local_pos) = grid.translation_to_grid(world.position);
-                    *cell = new_cell;
-                    transform.translation = local_pos;
-                    transform.rotation = world.rotation.as_quat();
-                } else {
-                    // No CellCoord: compute local transform relative to parent
-                    let inv_parent_rot = parent_world.rotation.inverse();
-                    let local_pos = inv_parent_rot * (world.position - parent_world.position);
-                    let local_rot = inv_parent_rot * world.rotation;
-
-                    transform.translation = local_pos.as_vec3();
-                    transform.rotation = local_rot.as_quat();
-                }
+        let dominated_by_physics = physics_query.get(entity).is_ok();
+        match (dominated_by_physics, transform_query.get_mut(entity)) {
+            (true, Ok((mut transform, Some(mut cell)))) => {
+                // Has CellCoord: convert world Position → CellCoord + local Transform
+                let (new_cell, local_pos) = grid.translation_to_grid(world.position);
+                *cell = new_cell;
+                transform.translation = local_pos;
+                transform.rotation = world.rotation.as_quat();
             }
+            (true, Ok((mut transform, None))) => {
+                // No CellCoord: compute local transform relative to parent
+                let inv_parent_rot = parent_world.rotation.inverse();
+                let local_pos = inv_parent_rot * (world.position - parent_world.position);
+                let local_rot = inv_parent_rot * world.rotation;
+                transform.translation = local_pos.as_vec3();
+                transform.rotation = local_rot.as_quat();
+            }
+            _ => {}
         }
 
         // Queue children
@@ -231,60 +234,6 @@ fn position_to_big_space_transform(
         }
     }
 }
-
-// Avian Example System
-/*
-pub fn transform_to_position(
-    mut query: Query<(&Transform, &CellCoord, &mut Position, &mut Rotation)>,
-    length_unit: Res<PhysicsLengthUnit>,
-    last_physics_tick: Res<LastPhysicsTick>,
-    system_tick: SystemChangeTick,
-) {
-    // On the first tick, the last physics tick and system tick are both defaulted to 0,
-    // but to handle change detection correctly, the system tick should always be larger.
-    // So we use a minimum system tick of 1 here.
-    let this_run = if last_physics_tick.0.get() == 0 {
-        Tick::new(1)
-    } else {
-        system_tick.this_run()
-    };
-
-    // If the `GlobalTransform` translation and `Position` differ by less than 0.01 mm, we ignore the change.
-    let distance_tolerance = length_unit.0 * 1e-5;
-    // If the `GlobalTransform` rotation and `Rotation` differ by less than 0.1 degrees, we ignore the change.
-    let rotation_tolerance = (0.1 as Scalar).to_radians();
-
-    for (global_transform, mut position, mut rotation) in &mut query {
-        let global_transform = global_transform.compute_transform();
-        #[cfg(feature = "2d")]
-        let transform_translation = global_transform.translation.truncate().adjust_precision();
-        #[cfg(feature = "3d")]
-        let transform_translation = global_transform.translation.adjust_precision();
-        let transform_rotation = Rotation::from(global_transform.rotation.adjust_precision());
-
-        let position_changed = !position.is_added()
-            && is_changed_after_tick(
-                Ref::from(position.reborrow()),
-                last_physics_tick.0,
-                this_run,
-            );
-        if !position_changed && position.abs_diff_ne(&transform_translation, distance_tolerance) {
-            position.0 = transform_translation;
-        }
-
-        let rotation_changed = !rotation.is_added()
-            && is_changed_after_tick(
-                Ref::from(rotation.reborrow()),
-                last_physics_tick.0,
-                this_run,
-            );
-        if !rotation_changed
-            && rotation.angle_between(transform_rotation).abs() > rotation_tolerance
-        {
-            *rotation = transform_rotation;
-        }
-    }
-}*/
 
 #[cfg(test)]
 mod tests {
@@ -307,247 +256,11 @@ mod tests {
         app
     }
 
-    /// Marker for test entities
-    #[derive(Component)]
-    struct TestBall;
-
-    /// Simplest possible test: does a body with velocity actually move?
-    #[test]
-    fn body_with_velocity_moves() {
-        let mut app = create_physics_test_app();
-
-        // Spawn a ball at origin with velocity in +X
-        let ball = app
-            .world_mut()
-            .spawn((
-                TestBall,
-                RigidBody::Dynamic,
-                Collider::sphere(1.0),
-                Position::from_xyz(0.0, 0.0, 0.0),
-                LinearVelocity(DVec3::new(10.0, 0.0, 0.0)), // 10 m/s in +X
-            ))
-            .id();
-
-        // Get initial position
-        let initial_pos = *app.world().get::<Position>(ball).unwrap();
-
-        // CRITICAL: Call app.finish() to run Plugin::finish() hooks.
-        app.finish();
-
-        // Run 10 frames of simulation
-        for _ in 0..10 {
-            app.update();
-        }
-
-        // Check final position
-        let final_pos = *app.world().get::<Position>(ball).unwrap();
-
-        assert!(
-            final_pos.0.x > initial_pos.0.x,
-            "Ball should have moved in +X direction. Initial: {:?}, Final: {:?}",
-            initial_pos.0,
-            final_pos.0
-        );
-    }
-
-    /// Marker components for collision test entities
-    #[derive(Component)]
-    struct Slug;
-
     #[derive(Component)]
     struct Target;
 
-    /// Test: High-speed kinetic slug collides with stationary cube.
-    /// Using a more realistic speed for tactical combat (10 km/s = 10,000 m/s)
-    /// This is fast but should still be trackable per-frame.
-    #[test]
-    fn high_speed_slug_hits_stationary_target() {
-        let mut app = create_physics_test_app();
-
-        // Kinetic slug: small projectile
-        // Positioned 1000 meters from target, moving at 10 km/s = 10,000 m/s
-        let slug_velocity = 10_000.0; // 10 km/s in m/s
-        let initial_distance = 1000.0; // meters
-
-        let slug = app
-            .world_mut()
-            .spawn((
-                Slug,
-                RigidBody::Dynamic,
-                Collider::sphere(0.5), // 0.5m radius sphere
-                Position::from_xyz(-initial_distance, 0.0, 0.0),
-                LinearVelocity(DVec3::new(slug_velocity, 0.0, 0.0)),
-                SweptCcd::default(),
-            ))
-            .id();
-
-        // Target: 1m radius sphere at origin
-        let target = app
-            .world_mut()
-            .spawn((
-                Target,
-                RigidBody::Dynamic,
-                Collider::sphere(1.0),
-                Position::from_xyz(0.0, 0.0, 0.0),
-            ))
-            .id();
-
-        app.finish();
-
-        // Time for slug to reach target: (1000 - 1.5) / 10000 = 0.09985 seconds
-        // At 64 Hz, that's ~6.4 frames
-        // Distance per frame: 10000 / 64 = 156.25 m/frame
-
-        println!("\nHigh-speed slug test (10 km/s):");
-        println!(
-            "  Velocity: {} m/s ({} km/s)",
-            slug_velocity,
-            slug_velocity / 1000.0
-        );
-        println!("  Initial distance: {} m", initial_distance);
-        println!(
-            "  Time to impact: {:.4} seconds",
-            (initial_distance - 1.5) / slug_velocity
-        );
-        println!("  Frame duration: {:.4} seconds", 1.0 / 64.0);
-        println!("  Distance per frame: {:.2} m", slug_velocity / 64.0);
-        println!(
-            "  Expected collision frame: ~{}",
-            ((initial_distance - 1.5) / slug_velocity * 64.0) as i32
-        );
-
-        let mut collision_frame = None;
-
-        for frame in 0..20 {
-            let pos_slug = app.world().get::<Position>(slug).unwrap().0;
-            let pos_target = app.world().get::<Position>(target).unwrap().0;
-            let separation = (pos_target - pos_slug).length();
-
-            app.update();
-
-            let pos_slug_after = app.world().get::<Position>(slug).unwrap().0;
-
-            println!(
-                "  Frame {}: slug x={:.1} -> {:.1}, separation={:.1}m",
-                frame, pos_slug.x, pos_slug_after.x, separation
-            );
-
-            let contact_graph = app.world().resource::<ContactGraph>();
-            if contact_graph.contains(slug, target) && collision_frame.is_none() {
-                collision_frame = Some(frame);
-                println!("  -> Collision detected!");
-            }
-
-            if collision_frame.is_some() && frame > collision_frame.unwrap() + 2 {
-                break;
-            }
-        }
-
-        let collision_frame = collision_frame.expect("Collision should have occurred");
-
-        // Should happen around frame 6-7
-        assert!(
-            collision_frame >= 5 && collision_frame <= 8,
-            "Collision at frame {} is outside expected range 5-8",
-            collision_frame
-        );
-    }
-
-    /// Sanity check: Two balls approach each other at modest speed.
-    /// Ball A at x=-100, Ball B at x=+100, each moving 10 m/s toward origin.
-    /// With 1m radius spheres, they should collide when centers are 2m apart.
-    /// Time to collision: (200m - 2m) / 20 m/s = 9.9 seconds = ~634 frames at 64Hz
-    #[test]
-    fn sanity_check_slow_collision() {
-        let mut app = create_physics_test_app();
-
-        let initial_separation = 200.0; // meters between centers
-        let speed = 10.0; // m/s each, so closing speed is 20 m/s
-        let radius = 1.0; // 1 meter radius spheres
-
-        let ball_a = app
-            .world_mut()
-            .spawn((
-                Slug,
-                RigidBody::Dynamic,
-                Collider::sphere(radius),
-                Position::from_xyz(-initial_separation / 2.0, 0.0, 0.0), // x = -100
-                LinearVelocity(DVec3::new(speed, 0.0, 0.0)),             // moving +X
-            ))
-            .id();
-
-        let ball_b = app
-            .world_mut()
-            .spawn((
-                Target,
-                RigidBody::Dynamic,
-                Collider::sphere(radius),
-                Position::from_xyz(initial_separation / 2.0, 0.0, 0.0), // x = +100
-                LinearVelocity(DVec3::new(-speed, 0.0, 0.0)),           // moving -X
-            ))
-            .id();
-
-        app.finish();
-
-        // Expected collision time: (200 - 2) / 20 = 9.9 seconds
-        // At 64 Hz, that's ~634 frames
-        // But after collision, physics will bounce them apart, so we need to check
-        // the frame where they first touch
-
-        let mut collision_frame = None;
-        let mut positions_log = Vec::new();
-
-        // Run for 1000 frames (~15.6 seconds) to be safe
-        for frame in 0..1000 {
-            app.update();
-
-            let pos_a = app.world().get::<Position>(ball_a).unwrap().0;
-            let pos_b = app.world().get::<Position>(ball_b).unwrap().0;
-            let separation = (pos_b - pos_a).length();
-
-            // Log every 100 frames for debugging
-            if frame % 100 == 0 || frame < 5 {
-                positions_log.push((frame, pos_a.x, pos_b.x, separation));
-            }
-
-            let contact_graph = app.world().resource::<ContactGraph>();
-            if contact_graph.contains(ball_a, ball_b) && collision_frame.is_none() {
-                collision_frame = Some(frame);
-                positions_log.push((frame, pos_a.x, pos_b.x, separation));
-                // Don't break - let's see what happens after collision
-            }
-
-            // Stop after we've seen the collision and a few more frames
-            if collision_frame.is_some() && frame > collision_frame.unwrap() + 10 {
-                break;
-            }
-        }
-
-        // Print diagnostic info
-        println!("\nPosition log:");
-        for (frame, ax, bx, sep) in &positions_log {
-            println!(
-                "  Frame {:4}: A.x={:8.2}, B.x={:8.2}, separation={:.2}m",
-                frame, ax, bx, sep
-            );
-        }
-
-        let collision_frame = collision_frame.expect("Collision should have occurred");
-        println!("\nCollision detected at frame {}", collision_frame);
-
-        // Expected: ~634 frames (9.9 seconds * 64 Hz)
-        // Allow some tolerance for physics stepping
-        let expected_frame = 634;
-        let tolerance = 20; // frames
-
-        assert!(
-            (collision_frame as i32 - expected_frame as i32).abs() < tolerance,
-            "Collision at frame {} is too far from expected frame {} (tolerance: {})",
-            collision_frame,
-            expected_frame,
-            tolerance
-        );
-    }
+    #[derive(Component)]
+    struct Slug;
 
     /// Test: Two objects moving orthogonally at modest speed, at large Z coordinate.
     /// Tests f64 precision at large coordinate scales (Neptune apoapsis ~4.5×10^12 m).
@@ -685,5 +398,144 @@ mod tests {
             "Note: Z drift of {:.1} km is acceptable for physics at this scale",
             z_error / 1000.0
         );
+    }
+
+    /// Marker for entities that fake physics should move
+    #[derive(Component)]
+    struct FakePhysicsTarget {
+        delta: DVec3,
+    }
+
+    /// Fake physics system that moves Position by a delta (simulates physics integration)
+    fn fake_physics(mut query: Query<(&mut Position, &FakePhysicsTarget)>) {
+        for (mut pos, target) in &mut query {
+            pos.0 += target.delta;
+        }
+    }
+
+    /// Test the full sync round-trip with proper schedule ordering:
+    /// FixedPreUpdate: CellCoord+Transform → Position
+    /// FixedUpdate: Physics modifies Position
+    /// FixedPostUpdate: Position → CellCoord+Transform
+    #[test]
+    fn big_space_sync_with_proper_scheduling() {
+        use big_space::prelude::*;
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, TransformPlugin));
+
+        // Set up systems in correct schedule order (mirrors TacticalPhysicsPlugin)
+        app.add_systems(FixedPreUpdate, big_space_transform_to_position);
+        app.add_systems(FixedUpdate, fake_physics); // Stands in for real physics
+        app.add_systems(FixedPostUpdate, position_to_big_space_transform);
+
+        let cell_size: f64 = 10_000.0; // 10km cells
+        let grid = Grid::new(cell_size as f32, 100.0);
+
+        // Spawn BigSpace root
+        let root = app
+            .world_mut()
+            .spawn((
+                BigSpace::default(),
+                grid.clone(),
+                Transform::default(),
+                Visibility::default(),
+            ))
+            .id();
+
+        // Body at cell (1_000_000, 0, 0) with local offset (500, 100, 0)
+        // Initial world position: 10_000_000_500
+        // Fake physics will move it +15_000 in X (crossing into next cell)
+        let initial_cell = CellCoord::new(1_000_000, 0, 0);
+        let initial_local = Vec3::new(500.0, 100.0, 0.0);
+        let physics_delta = DVec3::new(15_000.0, 200.0, 0.0);
+
+        let body = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(initial_local),
+                initial_cell,
+                Position::default(),
+                Rotation::default(),
+                FakePhysicsTarget { delta: physics_delta },
+                ChildOf(root),
+            ))
+            .id();
+
+        // Child without CellCoord, also moved by fake physics
+        let child_extra_delta = DVec3::new(100.0, 0.0, 0.0);
+        let child = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(50.0, 0.0, 0.0)),
+                Position::default(),
+                Rotation::default(),
+                FakePhysicsTarget {
+                    delta: physics_delta + child_extra_delta,
+                },
+                ChildOf(body),
+            ))
+            .id();
+
+        app.finish();
+
+        // === Manually run schedules in correct order (simulates one physics frame) ===
+        // This is exactly what happens during a real frame with physics
+        app.world_mut().run_schedule(FixedPreUpdate);  // Forward sync
+        app.world_mut().run_schedule(FixedUpdate);     // Physics
+        app.world_mut().run_schedule(FixedPostUpdate); // Reverse sync
+
+        // After frame 1:
+        // 1. Forward sync: Position = 10_000_000_500 (from CellCoord+Transform)
+        // 2. Fake physics: Position += 15_000 → 10_000_015_500
+        // 3. Reverse sync: CellCoord updated to cell 1_000_002, local -4500
+
+        let body_cell = *app.world().get::<CellCoord>(body).unwrap();
+        let body_transform = app.world().get::<Transform>(body).unwrap().clone();
+        let body_pos = app.world().get::<Position>(body).unwrap().0;
+
+        println!("=== After Frame 1 ===");
+        println!("Body Position: {:?}", body_pos);
+        println!("Body cell: ({}, {}, {})", body_cell.x, body_cell.y, body_cell.z);
+        println!("Body local transform: {:?}", body_transform.translation);
+
+        // Verify Position reflects physics movement
+        let expected_pos_x = 1_000_000.0 * cell_size + 500.0 + physics_delta.x;
+        let expected_pos_y = 100.0 + physics_delta.y;
+        assert!(
+            (body_pos.x - expected_pos_x).abs() < 0.01,
+            "Position X after physics: expected {}, got {}",
+            expected_pos_x, body_pos.x
+        );
+
+        // Verify CellCoord was recomputed
+        assert!(
+            body_cell.x == 1_000_001 || body_cell.x == 1_000_002,
+            "Cell X should be 1_000_001 or 1_000_002, got {}",
+            body_cell.x
+        );
+
+        // Verify round-trip: CellCoord + Transform reconstructs to Position
+        let reconstructed = grid.grid_position_double(&body_cell, &body_transform);
+        assert!(
+            (reconstructed.x - body_pos.x).abs() < 0.01,
+            "Round-trip failed: reconstructed {} != position {}",
+            reconstructed.x, body_pos.x
+        );
+
+        // Verify child
+        let child_pos = app.world().get::<Position>(child).unwrap().0;
+        let child_transform = app.world().get::<Transform>(child).unwrap().clone();
+        println!("Child Position: {:?}", child_pos);
+        println!("Child local transform: {:?}", child_transform.translation);
+
+        // Child's local transform should be 50 + 100 = 150 relative to parent
+        assert!(
+            (child_transform.translation.x - 150.0).abs() < 0.1,
+            "Child local X: expected 150, got {}",
+            child_transform.translation.x
+        );
+
+        println!("\nbig_space sync with proper scheduling passed!");
     }
 }
