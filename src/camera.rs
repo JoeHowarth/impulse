@@ -110,16 +110,19 @@ pub struct BigSpaceRoot(pub Entity);
 /// Updates the CameraScale resource from the current camera projection.
 /// Run this before any rendering systems that need screen-space sizing.
 pub fn update_camera_scale(
-    camera: Query<&Projection, With<Camera>>,
+    camera: Query<(&Projection, &Transform), With<Camera>>,
     mut scale: ResMut<CameraScale>,
 ) {
-    scale.0 = camera
-        .iter()
-        .find_map(|p| match p {
-            Projection::Orthographic(o) => Some(o.scale),
-            _ => None,
-        })
-        .unwrap_or(DEFAULT_CAMERA_SCALE);
+    let mut next_scale = DEFAULT_CAMERA_SCALE;
+    for (projection, transform) in camera.iter() {
+        if let Projection::Orthographic(ortho) = projection {
+            dbg!(ortho.scale, transform.scale);
+            next_scale = ortho.scale;
+            break;
+        }
+    }
+    dbg!(next_scale);
+    scale.0 = next_scale;
 }
 
 /// Component attached to a camera to smoothly animate it toward a target.
@@ -190,8 +193,8 @@ pub fn animate_camera(
             let threshold = (target_pos.length() * 0.001).max(1.0);
             if current_2.distance(target_pos) < threshold {
                 // Snap to exact target position to eliminate any remaining error
-            let (target_cell, target_transform) =
-                grid.translation_to_grid(DVec3::new(target_pos.x, target_pos.y, current_3.z));
+                let (target_cell, target_transform) =
+                    grid.translation_to_grid(DVec3::new(target_pos.x, target_pos.y, current_3.z));
 
                 *cell = target_cell;
                 transform.translation = target_transform;

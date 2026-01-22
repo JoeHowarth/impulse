@@ -4,7 +4,7 @@
 //! and VisualShip entities for each LogicalShip in the involved fleets.
 
 use avian3d::prelude::*;
-use bevy::gizmos::GizmoAsset;
+use bevy::math::primitives::Triangle3d;
 use bevy::math::{DVec2, DVec3, Isometry3d};
 use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
@@ -19,30 +19,7 @@ use crate::simulation::SimulationTime;
 // Constants
 // ============================================================================
 
-// TEMPORARY SCALING WORKAROUND (remove after big_space integration)
-// =================================================================
-// Ship movement exhibits f32 precision issues at planetary distances.
-// Avian3D uses f64 internally but syncs Position → Transform (f32).
-// At Mercury (~50 billion meters), f32 can only represent changes of ~5,000m.
-// At Venus (~100 billion meters), precision drops to ~10,000m.
-//
-// Symptoms observed:
-// - Transform.x stays constant while Avian Position.x changes correctly
-// - Small velocity components get "eaten" by f32 precision loss
-// - Ships appear to move only in the dominant direction
-//
-// Workaround: Scale ships/speeds 100,000x larger so movements exceed f32 precision.
-// Real values → Test values:
-// - Ship size: 100m → 10,000 km (SHIP_PHYSICAL_SIZE)
-// - Ship spacing: 1km → 100,000 km (SHIP_SPACING)
-// - Acceleration: 10 m/s² (1g) → 1,000,000 m/s² (SHIP_STATS)
-// - Max speed: 50 km/s → 5,000,000 km/s (SHIP_STATS)
-// - Arrival distance: 1km → 10,000 km (ARRIVAL_DISTANCE)
-// - Arrival velocity: 10 m/s → 100 km/s (ARRIVAL_VELOCITY)
-//
-// Fix: Integrate big_space for camera-relative GlobalTransforms.
-// See plans/big_space_migration.md for implementation details.
-// =================================================================
+// Tactical scale uses real-world meters (no precision scaling hack).
 
 /// Arena size in meters (400,000 km)
 pub const ARENA_SIZE: f64 = 400_000_000.0;
@@ -53,30 +30,36 @@ pub const ARENA_HALF: f64 = 200_000_000.0;
 /// Tactical time scale: 60 sim seconds per real second (1 min/s)
 pub const TACTICAL_TIME_SCALE: f64 = 60.0;
 
-/// Offset from arena center for fleet spawns (50,000 km in meters)
-const FLEET_SPAWN_OFFSET: f64 = 50_000_000.0;
+/// Offset from arena center for fleet spawns (3 km in meters)
+const FLEET_SPAWN_OFFSET: f64 = 3_000.0;
 
-/// Horizontal spacing between ships (100,000 km - temporary 100,000x for testing without big_space)
-const SHIP_SPACING: f64 = 100_000_000.0;
+/// Horizontal spacing between ships (1 km)
+const SHIP_SPACING: f64 = 1_000.0;
 
-/// Physical ship size in meters (10,000 km - temporary 100,000x for testing without big_space)
-const SHIP_PHYSICAL_SIZE: f32 = 10_000_000.0;
+/// Physical ship size in meters (100 m)
+const SHIP_PHYSICAL_SIZE: f32 = 100.0;
 
-/// Minimum screen size for ships in pixels (below this they fade out)
-const SHIP_FADE_SCREEN_SIZE: f32 = 2.0;
+/// Target screen-size range for ships in pixels (LOD).
+const SHIP_TARGET_PIXELS_SCALE: f32 = 30.0; // 10x larger than previous 3px baseline
+const SHIP_TARGET_PIXELS_MAX: f32 = 80.0;
+
+/// Screen-size fade range for ships in pixels.
+/// Fade starts at this size and reaches 0 below the end size.
+const SHIP_FADE_START_PX: f32 = 1.0;
+const SHIP_FADE_END_PX: f32 = 0.2;
 
 /// Camera scale for tactical view
-/// scale = world units per pixel. 400,000 km / 1000 pixels ≈ 4e5
-const TACTICAL_CAMERA_SCALE: f32 = 4.0e5;
+/// scale = world units per pixel. 10 km / 1000 pixels ≈ 10 m/px
+const TACTICAL_CAMERA_SCALE: f32 = 10.0;
 
 /// Arena center offset from body (150,000 km to put body on right side)
 const ARENA_CENTER_OFFSET: f64 = 150_000_000.0;
 
-/// Arrival distance threshold in meters (10,000 km - scaled for testing)
-const ARRIVAL_DISTANCE: f64 = 10_000_000.0;
+/// Arrival distance threshold in meters (1 km)
+const ARRIVAL_DISTANCE: f64 = 1_000.0;
 
-/// Arrival velocity threshold in m/s (100 km/s - scaled for testing)
-const ARRIVAL_VELOCITY: f64 = 100_000.0;
+/// Arrival velocity threshold in m/s (10 m/s)
+const ARRIVAL_VELOCITY: f64 = 10.0;
 
 // ============================================================================
 // Components
@@ -119,9 +102,9 @@ pub struct MoveOrder {
     pub destination: DVec3,
 }
 
-/// Marker for the ship triangle gizmo (child of VisualShip).
+/// Marker for the ship mesh (child of VisualShip).
 #[derive(Component)]
-pub struct ShipGizmo;
+pub struct ShipMesh;
 
 /// Marker for the selection ring gizmo (child of VisualShip, only when selected).
 #[derive(Component)]
@@ -139,8 +122,8 @@ pub struct ShipStats {
 impl Default for ShipStats {
     fn default() -> Self {
         Self {
-            max_acceleration: 1_000_000.0, // 100,000g - temporary 100,000x scale for testing
-            max_speed: 5_000_000_000.0,    // 5,000,000 km/s - temporary 100,000x scale for testing
+            max_acceleration: 10.0, // ~1g
+            max_speed: 50_000.0,    // 50 km/s
         }
     }
 }
@@ -153,7 +136,8 @@ impl Default for ShipStats {
 /// Spawns TacticalArena and VisualShips, animates camera, adjusts time scale.
 pub fn enter_tactical_mode(
     mut commands: Commands,
-    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut combat: ResMut<CombatState>,
     mut sim_time: ResMut<SimulationTime>,
     mut camera_query: Query<&mut CameraTarget>,
@@ -221,10 +205,23 @@ pub fn enter_tactical_mode(
         .map(|&e| ship_count(e, &children_query, &ships))
         .sum();
 
+    let ship_mesh = meshes.add(create_ship_triangle_mesh());
+    let player_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.4, 1.0, 0.4),
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+    let enemy_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.3, 0.3),
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+
     // Spawn player ships (bottom center, y = -50,000 km)
     let player_spawned = spawn_fleet_ships(
         &mut commands,
-        &mut gizmo_assets,
         arena,
         &combat.player_fleets,
         Faction::Player,
@@ -232,12 +229,13 @@ pub fn enter_tactical_mode(
         player_ship_count as usize,
         &children_query,
         &ships,
+        &ship_mesh,
+        &player_material,
     );
 
     // Spawn enemy ships (top center, y = +50,000 km)
     let enemy_spawned = spawn_fleet_ships(
         &mut commands,
-        &mut gizmo_assets,
         arena,
         &combat.enemy_fleets,
         Faction::Enemy,
@@ -245,6 +243,8 @@ pub fn enter_tactical_mode(
         enemy_ship_count as usize,
         &children_query,
         &ships,
+        &ship_mesh,
+        &enemy_material,
     );
 
     info!(
@@ -266,7 +266,6 @@ pub fn enter_tactical_mode(
 /// Returns the number of ships spawned.
 fn spawn_fleet_ships(
     commands: &mut Commands,
-    gizmo_assets: &mut Assets<GizmoAsset>,
     arena: Entity,
     fleets: &[Entity],
     faction: Faction,
@@ -274,26 +273,10 @@ fn spawn_fleet_ships(
     total_ships: usize,
     children_query: &Query<&Children>,
     ships: &Query<&LogicalShip>,
+    ship_mesh: &Handle<Mesh>,
+    ship_material: &Handle<StandardMaterial>,
 ) -> usize {
     let mut index = 0;
-
-    // Create triangle gizmo asset (unit size, will be scaled by Transform)
-    let color = match faction {
-        Faction::Player => Color::srgb(0.4, 1.0, 0.4),
-        Faction::Enemy => Color::srgb(1.0, 0.3, 0.3),
-    };
-    let mut gizmo = GizmoAsset::new();
-    // Draw unit triangle pointing up (will be scaled by parent)
-    gizmo.linestrip(
-        [
-            Vec3::new(0.0, 0.5, 0.0),   // top
-            Vec3::new(-0.5, -0.5, 0.0), // bottom left
-            Vec3::new(0.5, -0.5, 0.0),  // bottom right
-            Vec3::new(0.0, 0.5, 0.0),   // back to top
-        ],
-        color,
-    );
-    let gizmo_handle = gizmo_assets.add(gizmo);
 
     for &fleet_entity in fleets {
         let Ok(children) = children_query.get(fleet_entity) else {
@@ -321,7 +304,7 @@ fn spawn_fleet_ships(
                         Visibility::default(),
                         // Physics components
                         RigidBody::Dynamic,
-                        Collider::sphere(500.0), // 500m radius collider
+                        Collider::sphere(50.0), // 50m radius collider
                         LinearVelocity::default(),
                         SweptCcd::default(), // Prevent tunneling at high speeds
                         // Movement stats
@@ -330,14 +313,11 @@ fn spawn_fleet_ships(
                     ))
                     .id();
 
-                // Spawn triangle gizmo as child of VisualShip
+                // Spawn triangle mesh as child of VisualShip
                 commands.spawn((
-                    Gizmo {
-                        handle: gizmo_handle.clone(),
-                        depth_bias: 0.0,
-                        ..default()
-                    },
-                    ShipGizmo,
+                    Mesh3d(ship_mesh.clone()),
+                    MeshMaterial3d(ship_material.clone()),
+                    ShipMesh,
                     Transform::from_scale(Vec3::splat(SHIP_PHYSICAL_SIZE)),
                     ChildOf(visual_ship),
                 ));
@@ -368,7 +348,11 @@ pub fn update_arena_position(
     bodies: Query<&ComputedBody>,
     grid_query: Query<&Grid, With<BigSpace>>,
     mut camera_query: Query<
-        (&mut Transform, &mut CellCoord, &mut crate::camera::CameraTarget),
+        (
+            &mut Transform,
+            &mut CellCoord,
+            &mut crate::camera::CameraTarget,
+        ),
         With<Camera3d>,
     >,
 ) {
@@ -376,8 +360,7 @@ pub fn update_arena_position(
         return;
     };
 
-    let Ok((mut cam_transform, mut cam_cell, mut camera_target)) = camera_query.single_mut()
-    else {
+    let Ok((mut cam_transform, mut cam_cell, mut camera_target)) = camera_query.single_mut() else {
         return;
     };
 
@@ -419,10 +402,12 @@ fn compute_ship_display(cam_scale: f32) -> (f32, f32) {
     // But that's tiny, so we use a slightly different formula for ships
 
     let log_radius = SHIP_PHYSICAL_SIZE.log10();
-    // Ships get a bit more screen presence than bodies of same size
-    // Target ~4-6 pixels when zoomed out
-    let screen_pixels = ((log_radius - 1.0).max(1.0) * 3.0).min(8.0);
+    // Ships get more screen presence than bodies of same size
+    // Target ~30-80 pixels when zoomed out
+    let screen_pixels =
+        ((log_radius - 1.0).max(1.0) * SHIP_TARGET_PIXELS_SCALE).min(SHIP_TARGET_PIXELS_MAX);
     let log_scaled_size = screen_pixels * cam_scale;
+    dbg!(log_scaled_size, screen_pixels, cam_scale);
 
     // Take max of log-scaled size vs physical size (like bodies do)
     let display_size = log_scaled_size.max(SHIP_PHYSICAL_SIZE);
@@ -430,14 +415,42 @@ fn compute_ship_display(cam_scale: f32) -> (f32, f32) {
     // Compute what the screen size actually is
     let actual_screen_size = display_size / cam_scale;
 
-    // Fade out when scaled marker would be less than 2 pixels
-    let visibility = if actual_screen_size < SHIP_FADE_SCREEN_SIZE {
-        (actual_screen_size / SHIP_FADE_SCREEN_SIZE).clamp(0.0, 1.0)
+    // Fade out only when ships are very small on screen.
+    let visibility = if actual_screen_size < SHIP_FADE_START_PX {
+        ((actual_screen_size - SHIP_FADE_END_PX) / (SHIP_FADE_START_PX - SHIP_FADE_END_PX))
+            .clamp(0.0, 1.0)
     } else {
         1.0
     };
 
     (display_size, visibility)
+}
+
+fn create_ship_triangle_mesh() -> Mesh {
+    Mesh::from(Triangle3d::new(
+        Vec3::new(0.0, 0.5, 0.0),
+        Vec3::new(-0.5, -0.5, 0.0),
+        Vec3::new(0.5, -0.5, 0.0),
+    ))
+}
+
+/// Updates ship mesh scale based on camera zoom.
+pub fn update_ship_mesh_scale(
+    cam_scale: Res<CameraScale>,
+    mut meshes: Query<(&mut Transform, &mut Visibility), With<ShipMesh>>,
+) {
+    let (display_size, visibility) = compute_ship_display(cam_scale.0);
+    let visible = visibility > 0.01;
+    dbg!(cam_scale.0, display_size, visibility);
+
+    for (mut transform, mut vis) in &mut meshes {
+        transform.scale = Vec3::splat(display_size);
+        *vis = if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
 }
 
 /// Renders VisualShips as triangles during tactical combat.

@@ -11,25 +11,6 @@ Make the strategic/tactical split explicit while keeping a single shared univers
 
 ---
 
-## Phase 0 — Safety + Prep
-**Intent:** Reduce migration risk and add visibility.
-
-**Concrete Tasks**
-- Inventory and categorize systems into Strategic / Tactical / Shared.
-  - Produce a simple mapping list in this doc (or inline comments near system registration).
-- Add temporary mode flags/resources to keep behavior stable during transition.
-- Add a minimal smoke path (build + quick startup) and note it in the plan.
-- Add debug asserts or logs where ordering is fragile (e.g., transfer execution before expiration).
-
-**Implementation Notes**
-- Avoid changing behavior; this is scaffolding only.
-
-**Validation**
-- Build succeeds.
-- Current behavior unchanged.
-
----
-
 ## Phase 1 — Architecture Split (Plugins + States + SystemSets)
 **Intent:** Make mode boundaries explicit and shrink coupling.
 
@@ -160,12 +141,11 @@ Make the strategic/tactical split explicit while keeping a single shared univers
 ---
 
 ## Recommended Migration Order
-1. Phase 0 (inventory + safety)
-2. Phase 1 (state/plugin split + SystemSets)
-3. Phase 2 (precision unification + remove scaling hack)
-4. Phase 3 (tactical runtime boundaries + tactical event pipeline)
-5. Phase 4 (strategic event pipeline)
-6. Phase 5 (handoff integrity + cleanup)
+1. Phase 1 (state/plugin split + SystemSets)
+2. Phase 2 (precision unification + remove scaling hack)
+3. Phase 3 (tactical runtime boundaries + tactical event pipeline)
+4. Phase 4 (strategic event pipeline)
+5. Phase 5 (handoff integrity + cleanup)
 
 ---
 
@@ -187,6 +167,17 @@ Make the strategic/tactical split explicit while keeping a single shared univers
 - UI hide/show logic for transfer panel was added earlier than Phase 3 to reduce tactical clutter and avoid input conflicts.
 
 ### Not Yet Done
-- Phase 0 system mapping list and smoke path documentation.
 - Phase 2 precision unification (ComputedPosition + Avian sync), removal of 100,000x tactical scaling.
 - Phase 3 explicit tactical enter/exit teardown flow and event pipeline.
+
+---
+
+## Progress Update (2026-01-22, Phase 2 started)
+
+### Completed
+- Removed tactical scaling hack: ships/spacing/accel/speeds reverted to real values.
+- Ship gizmo scale now updates from camera zoom for visibility at tactical scale.
+- In-transit fleet selection positions now derive from FleetShape GlobalTransform instead of f32 heliocentric positions.
+
+### Notes
+- Tactical rendering now uses LOD-style scaling (display size), decoupled from physics size.

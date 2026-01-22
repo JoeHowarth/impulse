@@ -10,14 +10,14 @@ use bevy::{platform::collections::HashMap, prelude::*};
 use std::f64::consts::PI;
 
 // --- Physical Constants (SI Units: m, s, kg) ---
-pub const AU: f64 = 1.495_978_707e11; 
+pub const AU: f64 = 1.495_978_707e11;
 pub const MU_SUN: f64 = 1.327_124_400_18e20;
 
 /// Advance a bound (elliptic) Keplerian orbit by dt seconds.
 pub fn propagate_elliptic(
     el: OrbitalElements,
     mu: f64, // CRITICAL: This must be the MU of the PARENT body
-    dt: f64, 
+    dt: f64,
 ) -> PoliastroResult<OrbitalElements> {
     // 1. true anomaly -> mean anomaly at t0
     let m0 = true_to_mean_anomaly(el.nu, el.e)?;

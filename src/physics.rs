@@ -457,7 +457,9 @@ mod tests {
                 initial_cell,
                 Position::default(),
                 Rotation::default(),
-                FakePhysicsTarget { delta: physics_delta },
+                FakePhysicsTarget {
+                    delta: physics_delta,
+                },
                 ChildOf(root),
             ))
             .id();
@@ -481,8 +483,8 @@ mod tests {
 
         // === Manually run schedules in correct order (simulates one physics frame) ===
         // This is exactly what happens during a real frame with physics
-        app.world_mut().run_schedule(FixedPreUpdate);  // Forward sync
-        app.world_mut().run_schedule(FixedUpdate);     // Physics
+        app.world_mut().run_schedule(FixedPreUpdate); // Forward sync
+        app.world_mut().run_schedule(FixedUpdate); // Physics
         app.world_mut().run_schedule(FixedPostUpdate); // Reverse sync
 
         // After frame 1:
@@ -496,7 +498,10 @@ mod tests {
 
         println!("=== After Frame 1 ===");
         println!("Body Position: {:?}", body_pos);
-        println!("Body cell: ({}, {}, {})", body_cell.x, body_cell.y, body_cell.z);
+        println!(
+            "Body cell: ({}, {}, {})",
+            body_cell.x, body_cell.y, body_cell.z
+        );
         println!("Body local transform: {:?}", body_transform.translation);
 
         // Verify Position reflects physics movement
@@ -505,7 +510,8 @@ mod tests {
         assert!(
             (body_pos.x - expected_pos_x).abs() < 0.01,
             "Position X after physics: expected {}, got {}",
-            expected_pos_x, body_pos.x
+            expected_pos_x,
+            body_pos.x
         );
 
         // Verify CellCoord was recomputed
@@ -520,7 +526,8 @@ mod tests {
         assert!(
             (reconstructed.x - body_pos.x).abs() < 0.01,
             "Round-trip failed: reconstructed {} != position {}",
-            reconstructed.x, body_pos.x
+            reconstructed.x,
+            body_pos.x
         );
 
         // Verify child

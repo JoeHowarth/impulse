@@ -4,9 +4,12 @@
 //! between two points in space using Lambert's problem solver.
 
 use astrora_core::{
-    core::{Vector3, elements::{rv_to_coe, OrbitalElements}},
-    maneuvers::{Lambert, TransferKind},
     PoliastroError,
+    core::{
+        Vector3,
+        elements::{OrbitalElements, rv_to_coe},
+    },
+    maneuvers::{Lambert, TransferKind},
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +59,12 @@ impl std::error::Error for TransferError {}
 
 /// Propagate a state (position, velocity) forward in time using universal variables.
 /// Returns the (position, velocity) after propagating for time dt.
-pub fn propagate_kepler_full(r0: Vector3, v0: Vector3, mu: f64, dt: f64) -> Option<(Vector3, Vector3)> {
+pub fn propagate_kepler_full(
+    r0: Vector3,
+    v0: Vector3,
+    mu: f64,
+    dt: f64,
+) -> Option<(Vector3, Vector3)> {
     let r0_mag = r0.norm();
     let v0_mag = v0.norm();
 
@@ -85,9 +93,14 @@ pub fn propagate_kepler_full(r0: Vector3, v0: Vector3, mu: f64, dt: f64) -> Opti
         let psi = chi2 * alpha;
         let (c2, c3) = stumpff_c(psi);
 
-        let _r = chi2 * c2 + r0_dot_v0 / sqrt_mu * chi * (1.0 - psi * c3) + r0_mag * (1.0 - psi * c2);
-        let f_chi = r0_dot_v0 / sqrt_mu * chi2 * c2 + (1.0 - r0_mag * alpha) * chi2 * chi * c3 + r0_mag * chi - sqrt_mu * dt;
-        let f_prime = chi2 * c2 + r0_dot_v0 / sqrt_mu * chi * (1.0 - psi * c3) + r0_mag * (1.0 - psi * c2);
+        let _r =
+            chi2 * c2 + r0_dot_v0 / sqrt_mu * chi * (1.0 - psi * c3) + r0_mag * (1.0 - psi * c2);
+        let f_chi = r0_dot_v0 / sqrt_mu * chi2 * c2
+            + (1.0 - r0_mag * alpha) * chi2 * chi * c3
+            + r0_mag * chi
+            - sqrt_mu * dt;
+        let f_prime =
+            chi2 * c2 + r0_dot_v0 / sqrt_mu * chi * (1.0 - psi * c3) + r0_mag * (1.0 - psi * c2);
 
         let delta = f_chi / f_prime;
         chi -= delta;
@@ -186,11 +199,12 @@ pub fn compute_transfer(
         };
 
         // Verify propagation reaches the target
-        let propagation_error = if let Some(propagated_pos) = propagate_kepler(lambert.r1, lambert.v1, mu, tof) {
-            (propagated_pos - target_pos).norm()
-        } else {
-            f64::MAX // Propagation failed
-        };
+        let propagation_error =
+            if let Some(propagated_pos) = propagate_kepler(lambert.r1, lambert.v1, mu, tof) {
+                (propagated_pos - target_pos).norm()
+            } else {
+                f64::MAX // Propagation failed
+            };
 
         // Calculate delta-v
         let departure_dv = lambert.v1 - ship_vel;
@@ -327,7 +341,10 @@ mod tests {
         println!("  Departure Δv: {:.1} m/s", solution.departure_dv.norm());
         println!("  Arrival Δv: {:.1} m/s", solution.arrival_dv.norm());
         println!("  Total Δv: {:.1} m/s", solution.total_dv);
-        println!("  Transfer orbit a: {:.0} km", solution.transfer_orbit.a / 1000.0);
+        println!(
+            "  Transfer orbit a: {:.0} km",
+            solution.transfer_orbit.a / 1000.0
+        );
         println!("  Transfer orbit e: {:.4}", solution.transfer_orbit.e);
         println!("  Time of flight: {:.1} hours", tof / 3600.0);
     }
@@ -384,11 +401,15 @@ mod tests {
         println!("  Departure Δv: {:.1} m/s", solution.departure_dv.norm());
         println!("  Arrival Δv: {:.1} m/s", solution.arrival_dv.norm());
         println!("  Total Δv: {:.1} m/s", solution.total_dv);
-        println!("  Transfer orbit a: {:.0} km", solution.transfer_orbit.a / 1000.0);
+        println!(
+            "  Transfer orbit a: {:.0} km",
+            solution.transfer_orbit.a / 1000.0
+        );
         println!("  Transfer orbit e: {:.4}", solution.transfer_orbit.e);
         println!("  TOF: {:.1} hours", tof / 3600.0);
         println!("\nDifference from theoretical Hohmann:");
-        println!("  Δv difference: {:.1} m/s ({:.1}%)",
+        println!(
+            "  Δv difference: {:.1} m/s ({:.1}%)",
             solution.total_dv - hohmann_total_dv,
             100.0 * (solution.total_dv - hohmann_total_dv) / hohmann_total_dv
         );
@@ -432,8 +453,13 @@ mod tests {
             );
             let tof = hohmann_tof * (angle_deg / 180.0);
             match compute_transfer(ship_pos, ship_vel, target_pos, target_vel, tof, MU_EARTH) {
-                Ok(sol) => println!("{:>5.0}°: ✓ Δv = {:>5.0} m/s (TOF={:.1}h)", angle_deg, sol.total_dv, tof/3600.0),
-                Err(_) => println!("{:>5.0}°: ✗ FAILED (TOF={:.1}h)", angle_deg, tof/3600.0),
+                Ok(sol) => println!(
+                    "{:>5.0}°: ✓ Δv = {:>5.0} m/s (TOF={:.1}h)",
+                    angle_deg,
+                    sol.total_dv,
+                    tof / 3600.0
+                ),
+                Err(_) => println!("{:>5.0}°: ✗ FAILED (TOF={:.1}h)", angle_deg, tof / 3600.0),
             }
         }
 
@@ -448,7 +474,14 @@ mod tests {
                 v_circular_geo * angle.cos(),
                 0.0,
             );
-            match compute_transfer(ship_pos, ship_vel, target_pos, target_vel, hohmann_tof, MU_EARTH) {
+            match compute_transfer(
+                ship_pos,
+                ship_vel,
+                target_pos,
+                target_vel,
+                hohmann_tof,
+                MU_EARTH,
+            ) {
                 Ok(sol) => println!("{:>5.0}°: ✓ Δv = {:>5.0} m/s", angle_deg, sol.total_dv),
                 Err(_) => println!("{:>5.0}°: ✗ FAILED", angle_deg),
             }
@@ -462,7 +495,14 @@ mod tests {
             let ship_pos = Vector3::new(r_leo, 0.0, 0.0);
             let target_pos = Vector3::new(r_geo * angle.cos(), r_geo * angle.sin(), 0.0);
 
-            match Lambert::solve(ship_pos, target_pos, long_tof, MU_EARTH, TransferKind::Auto, 1) {
+            match Lambert::solve(
+                ship_pos,
+                target_pos,
+                long_tof,
+                MU_EARTH,
+                TransferKind::Auto,
+                1,
+            ) {
                 Ok(sol) => println!("{:>5.0}°: ✓ converged (revs=1)", angle_deg),
                 Err(e) => println!("{:>5.0}°: ✗ {}", angle_deg, e),
             }
@@ -491,7 +531,10 @@ mod tests {
             .expect("Transfer should succeed");
 
         // Orbital elements should be valid
-        assert!(solution.transfer_orbit.a > 0.0, "Semi-major axis should be positive");
+        assert!(
+            solution.transfer_orbit.a > 0.0,
+            "Semi-major axis should be positive"
+        );
         assert!(
             solution.transfer_orbit.e >= 0.0 && solution.transfer_orbit.e < 1.0,
             "Eccentricity should be valid for elliptic orbit"
@@ -506,8 +549,8 @@ mod tests {
     fn test_earth_mars_at_j2000_epoch() {
         // This test replicates the exact starting conditions in the app
         // Earth and Mars orbital elements from orbital_data.rs at t=0 (J2000)
-        use astrora_core::core::elements::OrbitalElements;
         use crate::orbital_data::propagate_elliptic;
+        use astrora_core::core::elements::OrbitalElements;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
 
@@ -546,8 +589,8 @@ mod tests {
             let dep_time = dep_offset * 86400.0;
 
             // Propagate Earth to departure time
-            let earth_at_dep = propagate_elliptic(earth_elements, MU_SUN, dep_time)
-                .unwrap_or(earth_elements);
+            let earth_at_dep =
+                propagate_elliptic(earth_elements, MU_SUN, dep_time).unwrap_or(earth_elements);
             let (earth_pos, earth_vel) = coe_to_rv(&earth_at_dep, MU_SUN);
 
             for &tof_days in &tof_candidates {
@@ -562,7 +605,8 @@ mod tests {
                 let (mars_pos, mars_vel) = coe_to_rv(&mars_at_arr, MU_SUN);
 
                 // Calculate transfer angle
-                let dot = earth_pos.x * mars_pos.x + earth_pos.y * mars_pos.y + earth_pos.z * mars_pos.z;
+                let dot =
+                    earth_pos.x * mars_pos.x + earth_pos.y * mars_pos.y + earth_pos.z * mars_pos.z;
                 let transfer_angle = (dot / (earth_pos.norm() * mars_pos.norm())).acos();
 
                 match compute_transfer(earth_pos, earth_vel, mars_pos, mars_vel, tof, MU_SUN) {
@@ -571,13 +615,20 @@ mod tests {
                         if sol.total_dv < 20000.0 {
                             println!(
                                 "dep=+{:.0}d TOF={:.0}d: ✓ angle={:.1}° Δv={:.0} m/s (dep={:.0}, arr={:.0}) **GOOD**",
-                                dep_offset, tof_days, transfer_angle.to_degrees(), sol.total_dv,
-                                sol.departure_dv.norm(), sol.arrival_dv.norm()
+                                dep_offset,
+                                tof_days,
+                                transfer_angle.to_degrees(),
+                                sol.total_dv,
+                                sol.departure_dv.norm(),
+                                sol.arrival_dv.norm()
                             );
                         } else if sol.total_dv < 50000.0 {
                             println!(
                                 "dep=+{:.0}d TOF={:.0}d: ✓ angle={:.1}° Δv={:.0} m/s (high but usable)",
-                                dep_offset, tof_days, transfer_angle.to_degrees(), sol.total_dv
+                                dep_offset,
+                                tof_days,
+                                transfer_angle.to_degrees(),
+                                sol.total_dv
                             );
                         }
                         any_success = true;
@@ -587,7 +638,9 @@ mod tests {
                         if dep_offset == 0.0 {
                             println!(
                                 "dep=+{:.0}d TOF={:.0}d: ✗ angle={:.1}°",
-                                dep_offset, tof_days, transfer_angle.to_degrees()
+                                dep_offset,
+                                tof_days,
+                                transfer_angle.to_degrees()
                             );
                         }
                     }
@@ -614,7 +667,10 @@ mod tests {
         let v_earth = (MU_SUN / r_earth).sqrt();
         let earth_vel = Vector3::new(0.0, v_earth, 0.0);
 
-        println!("Earth: pos=({:.2e}, 0, 0), vel=(0, {:.0}, 0)", r_earth, v_earth);
+        println!(
+            "Earth: pos=({:.2e}, 0, 0), vel=(0, {:.0}, 0)",
+            r_earth, v_earth
+        );
 
         // For Hohmann transfer, Mars should be ~135-180° ahead
         // Let's put Mars at 150° (reasonable for near-Hohmann)
@@ -623,8 +679,10 @@ mod tests {
         let v_mars = (MU_SUN / r_mars).sqrt();
         let mars_vel = Vector3::new(-v_mars * angle.sin(), v_mars * angle.cos(), 0.0);
 
-        println!("Mars: pos=({:.2e}, {:.2e}, 0), vel=({:.0}, {:.0}, 0)",
-            mars_pos.x, mars_pos.y, mars_vel.x, mars_vel.y);
+        println!(
+            "Mars: pos=({:.2e}, {:.2e}, 0), vel=({:.0}, {:.0}, 0)",
+            mars_pos.x, mars_pos.y, mars_vel.x, mars_vel.y
+        );
 
         // Hohmann TOF = π * sqrt(a³/μ) where a = (r1 + r2) / 2
         let a_transfer = (r_earth + r_mars) / 2.0;
@@ -668,7 +726,7 @@ mod tests {
         const MU_SUN: f64 = 1.327_124_400_18e20;
 
         // Simple test: Earth position to a point 90° ahead on Mars orbit
-        let r1 = Vector3::new(1.5e11, 0.0, 0.0);  // ~1 AU on +x axis
+        let r1 = Vector3::new(1.5e11, 0.0, 0.0); // ~1 AU on +x axis
         let r2 = Vector3::new(0.0, 2.28e11, 0.0); // ~1.52 AU on +y axis (90° transfer)
 
         let tof = 200.0 * 24.0 * 3600.0; // 200 days
@@ -713,7 +771,11 @@ mod tests {
 
         // Try short-way vs long-way
         println!("\nTrying different transfer kinds:");
-        for kind in [TransferKind::Auto, TransferKind::ShortWay, TransferKind::LongWay] {
+        for kind in [
+            TransferKind::Auto,
+            TransferKind::ShortWay,
+            TransferKind::LongWay,
+        ] {
             match Lambert::solve(earth_pos, mars_pos, 250.0 * 86400.0, MU_SUN, kind, 0) {
                 Ok(_) => println!("  {:?}: ✓", kind),
                 Err(e) => println!("  {:?}: ✗ {}", kind, e),
@@ -735,7 +797,12 @@ mod tests {
         let v0 = Vector3::new(0.0, v_circ, 0.0);
 
         println!("=== Circular Orbit Propagation Test ===");
-        println!("r = {:.0} km, v_circ = {:.1} m/s, period = {:.1} min", r/1000.0, v_circ, period/60.0);
+        println!(
+            "r = {:.0} km, v_circ = {:.1} m/s, period = {:.1} min",
+            r / 1000.0,
+            v_circ,
+            period / 60.0
+        );
 
         // Propagate quarter period
         let dt = period / 4.0;
@@ -747,10 +814,20 @@ mod tests {
                 let error = (r_final - expected).norm();
                 let error_pct = 100.0 * error / r;
                 println!("After T/4:");
-                println!("  Expected: ({:.0}, {:.0}, {:.0})", expected.x, expected.y, expected.z);
-                println!("  Got:      ({:.0}, {:.0}, {:.0})", r_final.x, r_final.y, r_final.z);
+                println!(
+                    "  Expected: ({:.0}, {:.0}, {:.0})",
+                    expected.x, expected.y, expected.z
+                );
+                println!(
+                    "  Got:      ({:.0}, {:.0}, {:.0})",
+                    r_final.x, r_final.y, r_final.z
+                );
                 println!("  Error: {:.2e} m ({:.6}%)", error, error_pct);
-                assert!(error_pct < 0.001, "Quarter-period propagation error too large: {}%", error_pct);
+                assert!(
+                    error_pct < 0.001,
+                    "Quarter-period propagation error too large: {}%",
+                    error_pct
+                );
             }
             None => panic!("Propagation failed to converge"),
         }
@@ -765,10 +842,20 @@ mod tests {
                 let error = (r_final - expected).norm();
                 let error_pct = 100.0 * error / r;
                 println!("After T/2:");
-                println!("  Expected: ({:.0}, {:.0}, {:.0})", expected.x, expected.y, expected.z);
-                println!("  Got:      ({:.0}, {:.0}, {:.0})", r_final.x, r_final.y, r_final.z);
+                println!(
+                    "  Expected: ({:.0}, {:.0}, {:.0})",
+                    expected.x, expected.y, expected.z
+                );
+                println!(
+                    "  Got:      ({:.0}, {:.0}, {:.0})",
+                    r_final.x, r_final.y, r_final.z
+                );
                 println!("  Error: {:.2e} m ({:.6}%)", error, error_pct);
-                assert!(error_pct < 0.001, "Half-period propagation error too large: {}%", error_pct);
+                assert!(
+                    error_pct < 0.001,
+                    "Half-period propagation error too large: {}%",
+                    error_pct
+                );
             }
             None => panic!("Propagation failed to converge"),
         }
@@ -781,34 +868,42 @@ mod tests {
 
         let r = 10000e3;
         let r1 = Vector3::new(r, 0.0, 0.0);
-        let r2 = Vector3::new(0.0, r, 0.0);  // 90° transfer
+        let r2 = Vector3::new(0.0, r, 0.0); // 90° transfer
 
         // TOF for roughly quarter period of a transfer orbit
-        let a_transfer = r;  // Circular transfer
+        let a_transfer = r; // Circular transfer
         let tof = PI / 2.0 * (a_transfer.powi(3) / MU_EARTH).sqrt();
 
         println!("\n=== Lambert + Propagation Consistency Test ===");
-        println!("r1 = ({:.0}, 0, 0) km", r1.x/1000.0);
-        println!("r2 = (0, {:.0}, 0) km", r2.y/1000.0);
-        println!("TOF = {:.1} min", tof/60.0);
+        println!("r1 = ({:.0}, 0, 0) km", r1.x / 1000.0);
+        println!("r2 = (0, {:.0}, 0) km", r2.y / 1000.0);
+        println!("TOF = {:.1} min", tof / 60.0);
 
         for kind in [TransferKind::ShortWay, TransferKind::LongWay] {
             println!("\nTransferKind::{:?}:", kind);
 
             match Lambert::solve(r1, r2, tof, MU_EARTH, kind, 0) {
                 Ok(lambert) => {
-                    println!("  Lambert v1 = ({:.1}, {:.1}, {:.1}) m/s",
-                             lambert.v1.x, lambert.v1.y, lambert.v1.z);
-                    println!("  Lambert v2 = ({:.1}, {:.1}, {:.1}) m/s",
-                             lambert.v2.x, lambert.v2.y, lambert.v2.z);
+                    println!(
+                        "  Lambert v1 = ({:.1}, {:.1}, {:.1}) m/s",
+                        lambert.v1.x, lambert.v1.y, lambert.v1.z
+                    );
+                    println!(
+                        "  Lambert v2 = ({:.1}, {:.1}, {:.1}) m/s",
+                        lambert.v2.x, lambert.v2.y, lambert.v2.z
+                    );
 
                     // Now propagate (r1, v1) for tof and see if we get r2
                     match propagate_kepler(lambert.r1, lambert.v1, MU_EARTH, tof) {
                         Some(r_prop) => {
                             let error = (r_prop - r2).norm();
                             let error_pct = 100.0 * error / r2.norm();
-                            println!("  Propagated to: ({:.0}, {:.0}, {:.0}) km",
-                                     r_prop.x/1000.0, r_prop.y/1000.0, r_prop.z/1000.0);
+                            println!(
+                                "  Propagated to: ({:.0}, {:.0}, {:.0}) km",
+                                r_prop.x / 1000.0,
+                                r_prop.y / 1000.0,
+                                r_prop.z / 1000.0
+                            );
                             println!("  Error: {:.2e} m ({:.4}%)", error, error_pct);
                         }
                         None => println!("  Propagation FAILED"),
@@ -822,19 +917,27 @@ mod tests {
     #[test]
     fn test_day350_scenario() {
         // Test 3: Replicate the exact failing scenario from day 350
-        use astrora_core::core::elements::OrbitalElements;
         use crate::orbital_data::propagate_elliptic;
+        use astrora_core::core::elements::OrbitalElements;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
 
         // Earth and Mars orbital elements (from orbital_data.rs)
         let earth_elements = OrbitalElements {
-            a: 1.49598e11, e: 0.016708, i: 0.00005,
-            raan: 0.0, argp: 1.7967, nu: 6.2383,
+            a: 1.49598e11,
+            e: 0.016708,
+            i: 0.00005,
+            raan: 0.0,
+            argp: 1.7967,
+            nu: 6.2383,
         };
         let mars_elements = OrbitalElements {
-            a: 2.27939e11, e: 0.09340, i: 0.03229,
-            raan: 0.8653, argp: 4.9997, nu: 0.3404,
+            a: 2.27939e11,
+            e: 0.09340,
+            i: 0.03229,
+            raan: 0.8653,
+            argp: 4.9997,
+            nu: 0.3404,
         };
 
         let departure_day = 350;
@@ -860,18 +963,32 @@ mod tests {
         let dot = earth_pos.dot(&mars_pos);
         let transfer_angle = (dot / (earth_pos.norm() * mars_pos.norm())).acos();
         println!("Transfer angle: {:.1}°", transfer_angle.to_degrees());
-        println!("Earth pos: ({:.2e}, {:.2e}, {:.2e})", earth_pos.x, earth_pos.y, earth_pos.z);
-        println!("Mars pos:  ({:.2e}, {:.2e}, {:.2e})", mars_pos.x, mars_pos.y, mars_pos.z);
+        println!(
+            "Earth pos: ({:.2e}, {:.2e}, {:.2e})",
+            earth_pos.x, earth_pos.y, earth_pos.z
+        );
+        println!(
+            "Mars pos:  ({:.2e}, {:.2e}, {:.2e})",
+            mars_pos.x, mars_pos.y, mars_pos.z
+        );
 
-        for kind in [TransferKind::Auto, TransferKind::ShortWay, TransferKind::LongWay] {
+        for kind in [
+            TransferKind::Auto,
+            TransferKind::ShortWay,
+            TransferKind::LongWay,
+        ] {
             println!("\nTransferKind::{:?}:", kind);
 
             match Lambert::solve(earth_pos, mars_pos, tof, MU_SUN, kind, 0) {
                 Ok(lambert) => {
-                    println!("  v1 = ({:.1}, {:.1}, {:.1}) m/s",
-                             lambert.v1.x, lambert.v1.y, lambert.v1.z);
-                    println!("  v2 = ({:.1}, {:.1}, {:.1}) m/s",
-                             lambert.v2.x, lambert.v2.y, lambert.v2.z);
+                    println!(
+                        "  v1 = ({:.1}, {:.1}, {:.1}) m/s",
+                        lambert.v1.x, lambert.v1.y, lambert.v1.z
+                    );
+                    println!(
+                        "  v2 = ({:.1}, {:.1}, {:.1}) m/s",
+                        lambert.v2.x, lambert.v2.y, lambert.v2.z
+                    );
 
                     // Debug: compute orbit parameters
                     let r0_mag = lambert.r1.norm();
@@ -879,8 +996,12 @@ mod tests {
                     let energy = v0_mag * v0_mag / 2.0 - MU_SUN / r0_mag;
                     let a = -MU_SUN / (2.0 * energy);
                     let period = 2.0 * PI * (a.powi(3) / MU_SUN).sqrt();
-                    println!("  Transfer orbit: a={:.2e} m, period={:.1} days, energy={:.2e}",
-                             a, period/86400.0, energy);
+                    println!(
+                        "  Transfer orbit: a={:.2e} m, period={:.1} days, energy={:.2e}",
+                        a,
+                        period / 86400.0,
+                        energy
+                    );
 
                     // Propagate and check both position AND velocity
                     match propagate_kepler_full(lambert.r1, lambert.v1, MU_SUN, tof) {
@@ -891,12 +1012,19 @@ mod tests {
                             let v_error = (v_prop - lambert.v2).norm();
                             let v_error_pct = 100.0 * v_error / lambert.v2.norm();
 
-                            println!("  Propagated r: ({:.2e}, {:.2e}, {:.2e})",
-                                     r_prop.x, r_prop.y, r_prop.z);
-                            println!("  Propagated v: ({:.1}, {:.1}, {:.1}) m/s",
-                                     v_prop.x, v_prop.y, v_prop.z);
+                            println!(
+                                "  Propagated r: ({:.2e}, {:.2e}, {:.2e})",
+                                r_prop.x, r_prop.y, r_prop.z
+                            );
+                            println!(
+                                "  Propagated v: ({:.1}, {:.1}, {:.1}) m/s",
+                                v_prop.x, v_prop.y, v_prop.z
+                            );
                             println!("  Position error: {:.2e} m ({:.2}%)", r_error, r_error_pct);
-                            println!("  Velocity error: {:.2e} m/s ({:.2}%)", v_error, v_error_pct);
+                            println!(
+                                "  Velocity error: {:.2e} m/s ({:.2}%)",
+                                v_error, v_error_pct
+                            );
 
                             if r_error_pct > 1.0 {
                                 println!("  ** POSITION MISMATCH **");
@@ -916,18 +1044,26 @@ mod tests {
     #[test]
     fn test_propagator_inverse() {
         // Verify propagation by checking forward and backward consistency
-        use astrora_core::core::elements::OrbitalElements;
         use crate::orbital_data::propagate_elliptic;
+        use astrora_core::core::elements::OrbitalElements;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
 
         let earth_elements = OrbitalElements {
-            a: 1.49598e11, e: 0.016708, i: 0.00005,
-            raan: 0.0, argp: 1.7967, nu: 6.2383,
+            a: 1.49598e11,
+            e: 0.016708,
+            i: 0.00005,
+            raan: 0.0,
+            argp: 1.7967,
+            nu: 6.2383,
         };
         let mars_elements = OrbitalElements {
-            a: 2.27939e11, e: 0.09340, i: 0.03229,
-            raan: 0.8653, argp: 4.9997, nu: 0.3404,
+            a: 2.27939e11,
+            e: 0.09340,
+            i: 0.03229,
+            raan: 0.8653,
+            argp: 4.9997,
+            nu: 0.3404,
         };
 
         let departure_time = 350.0 * 86400.0;
@@ -947,8 +1083,14 @@ mod tests {
         println!("\n=== Propagator Inverse Test ===");
         println!("r1 = ({:.6e}, {:.6e}, {:.6e})", r1.x, r1.y, r1.z);
         println!("r2 = ({:.6e}, {:.6e}, {:.6e})", r2.x, r2.y, r2.z);
-        println!("v1 = ({:.6e}, {:.6e}, {:.6e})", lambert.v1.x, lambert.v1.y, lambert.v1.z);
-        println!("v2 = ({:.6e}, {:.6e}, {:.6e})", lambert.v2.x, lambert.v2.y, lambert.v2.z);
+        println!(
+            "v1 = ({:.6e}, {:.6e}, {:.6e})",
+            lambert.v1.x, lambert.v1.y, lambert.v1.z
+        );
+        println!(
+            "v2 = ({:.6e}, {:.6e}, {:.6e})",
+            lambert.v2.x, lambert.v2.y, lambert.v2.z
+        );
 
         // Forward: propagate (r1, v1) for tof
         let (r_fwd, v_fwd) = propagate_kepler_full(r1, lambert.v1, MU_SUN, tof).unwrap();
@@ -968,31 +1110,49 @@ mod tests {
                 println!("  r_err = {:.4}%, v_err = {:.4}%", bwd_r_err, bwd_v_err);
             }
             None => {
-                println!("\nBackward propagation failed to converge (expected for some orbit types)");
+                println!(
+                    "\nBackward propagation failed to converge (expected for some orbit types)"
+                );
             }
         }
 
         // The key assertion is forward propagation - if that works, the Lambert solution is correct
-        assert!(fwd_r_err < 0.1, "Forward propagation position error should be < 0.1%, got {}%", fwd_r_err);
-        assert!(fwd_v_err < 0.1, "Forward propagation velocity error should be < 0.1%, got {}%", fwd_v_err);
+        assert!(
+            fwd_r_err < 0.1,
+            "Forward propagation position error should be < 0.1%, got {}%",
+            fwd_r_err
+        );
+        assert!(
+            fwd_v_err < 0.1,
+            "Forward propagation velocity error should be < 0.1%, got {}%",
+            fwd_v_err
+        );
     }
 
     #[test]
     fn test_lambert_orbit_consistency() {
         // Check if Lambert's v1 and v2 are actually on the same orbit
         // by verifying orbital energy and angular momentum match
-        use astrora_core::core::elements::OrbitalElements;
         use crate::orbital_data::propagate_elliptic;
+        use astrora_core::core::elements::OrbitalElements;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
 
         let earth_elements = OrbitalElements {
-            a: 1.49598e11, e: 0.016708, i: 0.00005,
-            raan: 0.0, argp: 1.7967, nu: 6.2383,
+            a: 1.49598e11,
+            e: 0.016708,
+            i: 0.00005,
+            raan: 0.0,
+            argp: 1.7967,
+            nu: 6.2383,
         };
         let mars_elements = OrbitalElements {
-            a: 2.27939e11, e: 0.09340, i: 0.03229,
-            raan: 0.8653, argp: 4.9997, nu: 0.3404,
+            a: 2.27939e11,
+            e: 0.09340,
+            i: 0.03229,
+            raan: 0.8653,
+            argp: 4.9997,
+            nu: 0.3404,
         };
 
         let departure_time = 350.0 * 86400.0;
@@ -1071,19 +1231,27 @@ mod tests {
     #[test]
     fn test_astrora_propagator() {
         // Use astrora's own propagator to verify the Lambert solution
+        use crate::orbital_data::propagate_elliptic;
         use astrora_core::core::elements::OrbitalElements;
         use astrora_core::propagators::keplerian::propagate_state_keplerian;
-        use crate::orbital_data::propagate_elliptic;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
 
         let earth_elements = OrbitalElements {
-            a: 1.49598e11, e: 0.016708, i: 0.00005,
-            raan: 0.0, argp: 1.7967, nu: 6.2383,
+            a: 1.49598e11,
+            e: 0.016708,
+            i: 0.00005,
+            raan: 0.0,
+            argp: 1.7967,
+            nu: 6.2383,
         };
         let mars_elements = OrbitalElements {
-            a: 2.27939e11, e: 0.09340, i: 0.03229,
-            raan: 0.8653, argp: 4.9997, nu: 0.3404,
+            a: 2.27939e11,
+            e: 0.09340,
+            i: 0.03229,
+            raan: 0.8653,
+            argp: 4.9997,
+            nu: 0.3404,
         };
 
         // Original Day 350 scenario - tests the Izzo solver (angle > 167°)
@@ -1104,15 +1272,24 @@ mod tests {
         println!("\n=== Astrora Propagator Test ===");
         println!("r1 = ({:.6e}, {:.6e}, {:.6e})", r1.x, r1.y, r1.z);
         println!("r2 = ({:.6e}, {:.6e}, {:.6e})", r2.x, r2.y, r2.z);
-        println!("v1 = ({:.6e}, {:.6e}, {:.6e})", lambert.v1.x, lambert.v1.y, lambert.v1.z);
-        println!("v2 = ({:.6e}, {:.6e}, {:.6e})", lambert.v2.x, lambert.v2.y, lambert.v2.z);
+        println!(
+            "v1 = ({:.6e}, {:.6e}, {:.6e})",
+            lambert.v1.x, lambert.v1.y, lambert.v1.z
+        );
+        println!(
+            "v2 = ({:.6e}, {:.6e}, {:.6e})",
+            lambert.v2.x, lambert.v2.y, lambert.v2.z
+        );
 
         // Use our propagator
         println!("\nOur propagator:");
         let (r_ours, v_ours) = propagate_kepler_full(r1, lambert.v1, MU_SUN, tof).unwrap();
         let r_err_ours = (r_ours - r2).norm() / r2.norm() * 100.0;
         let v_err_ours = (v_ours - lambert.v2).norm() / lambert.v2.norm() * 100.0;
-        println!("  r_prop = ({:.6e}, {:.6e}, {:.6e})", r_ours.x, r_ours.y, r_ours.z);
+        println!(
+            "  r_prop = ({:.6e}, {:.6e}, {:.6e})",
+            r_ours.x, r_ours.y, r_ours.z
+        );
         println!("  r_err = {:.4}%, v_err = {:.4}%", r_err_ours, v_err_ours);
 
         // Use astrora's propagator
@@ -1121,7 +1298,10 @@ mod tests {
             Ok((r_astrora, v_astrora)) => {
                 let r_err = (r_astrora - r2).norm() / r2.norm() * 100.0;
                 let v_err = (v_astrora - lambert.v2).norm() / lambert.v2.norm() * 100.0;
-                println!("  r_prop = ({:.6e}, {:.6e}, {:.6e})", r_astrora.x, r_astrora.y, r_astrora.z);
+                println!(
+                    "  r_prop = ({:.6e}, {:.6e}, {:.6e})",
+                    r_astrora.x, r_astrora.y, r_astrora.z
+                );
                 println!("  r_err = {:.4}%, v_err = {:.4}%", r_err, v_err);
             }
             Err(e) => println!("  FAILED: {}", e),
@@ -1134,7 +1314,10 @@ mod tests {
             Ok((r_lag, v_lag)) => {
                 let r_err = (r_lag - r2).norm() / r2.norm() * 100.0;
                 let v_err = (v_lag - lambert.v2).norm() / lambert.v2.norm() * 100.0;
-                println!("  r_prop = ({:.6e}, {:.6e}, {:.6e})", r_lag.x, r_lag.y, r_lag.z);
+                println!(
+                    "  r_prop = ({:.6e}, {:.6e}, {:.6e})",
+                    r_lag.x, r_lag.y, r_lag.z
+                );
                 println!("  r_err = {:.4}%, v_err = {:.4}%", r_err, v_err);
             }
             Err(e) => println!("  FAILED: {}", e),
@@ -1156,11 +1339,16 @@ mod tests {
             }
         }
         let best_err_pct = best_err / r2.norm() * 100.0;
-        println!("  Best matching TOF: {:.2} days (requested: {:.2} days)",
-                 best_tof / 86400.0, tof / 86400.0);
-        println!("  TOF difference: {:.2} days ({:.2}%)",
-                 (best_tof - tof) / 86400.0,
-                 100.0 * (best_tof - tof) / tof);
+        println!(
+            "  Best matching TOF: {:.2} days (requested: {:.2} days)",
+            best_tof / 86400.0,
+            tof / 86400.0
+        );
+        println!(
+            "  TOF difference: {:.2} days ({:.2}%)",
+            (best_tof - tof) / 86400.0,
+            100.0 * (best_tof - tof) / tof
+        );
         println!("  Position error at best TOF: {:.6}%", best_err_pct);
 
         // Also compute TOF from orbital mechanics
@@ -1168,11 +1356,16 @@ mod tests {
         let a = lambert.a;
         let e = lambert.e;
         let period = 2.0 * PI * (a.powi(3) / MU_SUN).sqrt();
-        println!("  a = {:.6e} m, e = {:.6}, period = {:.2} days", a, e, period / 86400.0);
+        println!(
+            "  a = {:.6e} m, e = {:.6}, period = {:.2} days",
+            a,
+            e,
+            period / 86400.0
+        );
 
         // Compute true anomalies at r1 and r2
         // From r = a(1-e²)/(1+e·cos(ν)), solve for cos(ν)
-        let p = a * (1.0 - e * e);  // semi-latus rectum
+        let p = a * (1.0 - e * e); // semi-latus rectum
         let r1_mag = r1.norm();
         let r2_mag = r2.norm();
         let cos_nu1 = (p / r1_mag - 1.0) / e;
@@ -1191,7 +1384,7 @@ mod tests {
         println!("  True anomaly at r2: {:.2}°", nu2.to_degrees());
 
         // Compute eccentric anomalies
-        use astrora_core::core::anomaly::{true_to_eccentric_anomaly, eccentric_to_mean_anomaly};
+        use astrora_core::core::anomaly::{eccentric_to_mean_anomaly, true_to_eccentric_anomaly};
         let E1 = true_to_eccentric_anomaly(nu1, e).unwrap();
         let E2 = true_to_eccentric_anomaly(nu2, e).unwrap();
         let M1 = eccentric_to_mean_anomaly(E1, e).unwrap();
@@ -1209,8 +1402,10 @@ mod tests {
         let computed_tof = delta_M / n;
         println!("  Computed TOF from ΔM: {:.2} days", computed_tof / 86400.0);
         println!("  Requested TOF: {:.2} days", tof / 86400.0);
-        println!("  Difference: {:.2} days ({:.2}%)",
-                 (computed_tof - tof) / 86400.0,
-                 100.0 * (computed_tof - tof) / tof);
+        println!(
+            "  Difference: {:.2} days ({:.2}%)",
+            (computed_tof - tof) / 86400.0,
+            100.0 * (computed_tof - tof) / tof
+        );
     }
 }

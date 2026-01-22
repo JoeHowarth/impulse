@@ -15,13 +15,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use astrora_core::core::elements::{coe_to_rv, OrbitalElements};
+use astrora_core::core::elements::{OrbitalElements, coe_to_rv};
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::orbital_data::{propagate_elliptic, Body, MU_SUN};
+use crate::orbital_data::{Body, MU_SUN, propagate_elliptic};
 use crate::transfer::{TransferSolution, compute_transfer};
 
 // ============================================================================
@@ -39,12 +39,18 @@ const LUT_PATH: &str = "assets/transfer_lut.bin";
 const LUT_VERSION: u32 = 1;
 
 // TOF candidates by distance category
-const TOF_INNER: &[i32] = &[60, 80, 100, 120, 150, 180, 200, 220, 250, 280, 300, 350, 400, 450, 500];
+const TOF_INNER: &[i32] = &[
+    60, 80, 100, 120, 150, 180, 200, 220, 250, 280, 300, 350, 400, 450, 500,
+];
 const TOF_BELT: &[i32] = &[150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800];
 const TOF_JUPITER: &[i32] = &[400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1400, 1600];
-const TOF_SATURN: &[i32] = &[1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000];
+const TOF_SATURN: &[i32] = &[
+    1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000,
+];
 const TOF_URANUS: &[i32] = &[1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000];
-const TOF_NEPTUNE: &[i32] = &[3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000];
+const TOF_NEPTUNE: &[i32] = &[
+    3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000,
+];
 
 // ============================================================================
 // Types
@@ -148,7 +154,13 @@ impl TransferLut {
         tof_idx: usize,
         solution: TransferSolution,
     ) {
-        let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
+        let key = Self::make_entry_key(
+            source_idx,
+            target_idx,
+            nu_src_bucket,
+            nu_tgt_bucket,
+            tof_idx,
+        );
         self.entries.insert(key, solution);
     }
 
@@ -165,7 +177,11 @@ impl TransferLut {
     }
 
     /// Get TOF candidates for a body pair by entity
-    pub fn get_tof_candidates_by_entity(&self, source: Entity, target: Entity) -> Option<&Vec<i32>> {
+    pub fn get_tof_candidates_by_entity(
+        &self,
+        source: Entity,
+        target: Entity,
+    ) -> Option<&Vec<i32>> {
         let source_idx = *self.entity_to_idx.get(&source)?;
         let target_idx = *self.entity_to_idx.get(&target)?;
         let source_name = &self.body_names[source_idx];
@@ -200,9 +216,17 @@ impl TransferLut {
                 let nu_tgt = true_anomaly_at_day(target_elements, arrival_day);
                 let nu_tgt_bucket = anomaly_to_bucket(nu_tgt);
 
-                let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
+                let key = Self::make_entry_key(
+                    source_idx,
+                    target_idx,
+                    nu_src_bucket,
+                    nu_tgt_bucket,
+                    tof_idx,
+                );
                 if let Some(solution) = self.entries.get(&key) {
-                    let dominated = best.as_ref().map_or(false, |(_, _, b)| solution.total_dv >= b.total_dv);
+                    let dominated = best
+                        .as_ref()
+                        .map_or(false, |(_, _, b)| solution.total_dv >= b.total_dv);
                     if !dominated {
                         best = Some((day, tof_days, solution.clone()));
                     }
@@ -237,7 +261,13 @@ impl TransferLut {
         let nu_tgt = true_anomaly_at_day(target_elements, arrival_day);
         let nu_tgt_bucket = anomaly_to_bucket(nu_tgt);
 
-        let key = Self::make_entry_key(source_idx, target_idx, nu_src_bucket, nu_tgt_bucket, tof_idx);
+        let key = Self::make_entry_key(
+            source_idx,
+            target_idx,
+            nu_src_bucket,
+            nu_tgt_bucket,
+            tof_idx,
+        );
         self.entries.get(&key).cloned()
     }
 
@@ -248,15 +278,26 @@ impl TransferLut {
             return false;
         }
         if self.anomaly_buckets != ANOMALY_BUCKETS {
-            info!("LUT bucket count mismatch: {} != {}", self.anomaly_buckets, ANOMALY_BUCKETS);
+            info!(
+                "LUT bucket count mismatch: {} != {}",
+                self.anomaly_buckets, ANOMALY_BUCKETS
+            );
             return false;
         }
         // Check body list matches (order-independent)
         if self.body_names.len() != expected_bodies.len() {
-            info!("LUT body count mismatch: {} != {}", self.body_names.len(), expected_bodies.len());
+            info!(
+                "LUT body count mismatch: {} != {}",
+                self.body_names.len(),
+                expected_bodies.len()
+            );
             return false;
         }
-        if !self.body_names.iter().all(|name| expected_bodies.contains(name)) {
+        if !self
+            .body_names
+            .iter()
+            .all(|name| expected_bodies.contains(name))
+        {
             info!("LUT body list mismatch");
             return false;
         }
@@ -381,7 +422,10 @@ pub fn get_tof_candidates_for_pair(source: &str, target: &str) -> &'static [i32]
 // ============================================================================
 
 /// Get orbital state (position, velocity) for a body at a given true anomaly
-fn state_at_anomaly(elements: &OrbitalElements, nu: f64) -> (astrora_core::core::Vector3, astrora_core::core::Vector3) {
+fn state_at_anomaly(
+    elements: &OrbitalElements,
+    nu: f64,
+) -> (astrora_core::core::Vector3, astrora_core::core::Vector3) {
     let elem_at_nu = OrbitalElements {
         a: elements.a,
         e: elements.e,
@@ -444,7 +488,10 @@ pub fn init_transfer_lut(mut commands: Commands, bodies: Query<(Entity, &Body)>)
     // Try to load from disk, generate if needed
     let mut lut = match TransferLut::load_from_disk() {
         Some(loaded) if loaded.validate(&expected_bodies) => {
-            info!("Loaded valid LUT from disk ({} entries)", loaded.entries.len());
+            info!(
+                "Loaded valid LUT from disk ({} entries)",
+                loaded.entries.len()
+            );
             loaded
         }
         Some(_) => {
@@ -466,7 +513,10 @@ pub fn init_transfer_lut(mut commands: Commands, bodies: Query<(Entity, &Body)>)
 
 /// Generate LUT from a query (used by init_transfer_lut)
 fn generate_lut_from_query(bodies: &Query<(Entity, &Body)>) -> TransferLut {
-    info!("Generating transfer LUT (using {} threads)...", rayon::current_num_threads());
+    info!(
+        "Generating transfer LUT (using {} threads)...",
+        rayon::current_num_threads()
+    );
     let start = Instant::now();
 
     // Collect heliocentric bodies
@@ -525,32 +575,48 @@ fn generate_lut_from_query(bodies: &Query<(Entity, &Body)>) -> TransferLut {
     // Compute transfers in parallel
     let results: Vec<_> = work_items
         .par_iter()
-        .filter_map(|&(src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, tof_seconds)| {
-            let source = &body_defs[src_idx];
-            let target = &body_defs[tgt_idx];
+        .filter_map(
+            |&(src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, tof_seconds)| {
+                let source = &body_defs[src_idx];
+                let target = &body_defs[tgt_idx];
 
-            let nu_src = bucket_center_anomaly(nu_src_bucket);
-            let (r1, v1) = state_at_anomaly(&source.orbital_elements, nu_src);
+                let nu_src = bucket_center_anomaly(nu_src_bucket);
+                let (r1, v1) = state_at_anomaly(&source.orbital_elements, nu_src);
 
-            let nu_tgt = bucket_center_anomaly(nu_tgt_bucket);
-            let (r2, v2) = state_at_anomaly(&target.orbital_elements, nu_tgt);
+                let nu_tgt = bucket_center_anomaly(nu_tgt_bucket);
+                let (r2, v2) = state_at_anomaly(&target.orbital_elements, nu_tgt);
 
-            match compute_transfer_solution(r1, v1, r2, v2, tof_seconds) {
-                Some(solution) => {
-                    computed.fetch_add(1, Ordering::Relaxed);
-                    Some((src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, solution))
+                match compute_transfer_solution(r1, v1, r2, v2, tof_seconds) {
+                    Some(solution) => {
+                        computed.fetch_add(1, Ordering::Relaxed);
+                        Some((
+                            src_idx,
+                            tgt_idx,
+                            nu_src_bucket,
+                            nu_tgt_bucket,
+                            tof_idx,
+                            solution,
+                        ))
+                    }
+                    None => {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
                 }
-                None => {
-                    failed.fetch_add(1, Ordering::Relaxed);
-                    None
-                }
-            }
-        })
+            },
+        )
         .collect();
 
     // Insert results into LUT (single-threaded, but fast)
     for (src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, solution) in results {
-        lut.insert(src_idx, tgt_idx, nu_src_bucket, nu_tgt_bucket, tof_idx, solution);
+        lut.insert(
+            src_idx,
+            tgt_idx,
+            nu_src_bucket,
+            nu_tgt_bucket,
+            tof_idx,
+            solution,
+        );
     }
 
     let elapsed = start.elapsed();
@@ -558,7 +624,10 @@ fn generate_lut_from_query(bodies: &Query<(Entity, &Body)>) -> TransferLut {
     let failed_count = failed.load(Ordering::Relaxed);
     info!(
         "Generated LUT: {} entries ({} failed) in {:.1}s ({} work items)",
-        computed_count, failed_count, elapsed.as_secs_f64(), total_items
+        computed_count,
+        failed_count,
+        elapsed.as_secs_f64(),
+        total_items
     );
 
     // Save to disk

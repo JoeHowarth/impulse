@@ -916,7 +916,6 @@ const FLEET_OFFSET_PIXELS: f32 = 10.0;
 pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
     ships: &Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction), F>,
     bodies: &Query<&GlobalTransform, With<Body>>,
-    sim_time: &SimulationTime,
     cam_scale: f32,
 ) -> bevy::platform::collections::HashMap<Entity, (Vec3, Vec3)> {
     use bevy::platform::collections::HashMap;
@@ -970,29 +969,8 @@ pub fn compute_fleet_positions<F: bevy::ecs::query::QueryFilter>(
 
                 (body_pos + offset, Vec3::new(0.0, 1.0, 0.0))
             }
-            FleetLocation::InTransit {
-                solution,
-                departure_time,
-                ..
-            } => {
-                let elapsed = sim_time.sim_time - departure_time;
-                if elapsed < 0.0 {
-                    continue;
-                }
-
-                if let Some((r_vec, v_vec)) = propagate_kepler_full(
-                    solution.departure_pos,
-                    solution.departure_vel,
-                    MU_SUN,
-                    elapsed,
-                ) {
-                    let pos = phys_vec_to_vec3(r_vec);
-                    let vel_dir =
-                        Vec3::new(v_vec.x as f32, v_vec.y as f32, 0.0).normalize_or_zero();
-                    (pos, vel_dir)
-                } else {
-                    continue;
-                }
+            FleetLocation::InTransit { .. } => {
+                continue;
             }
         };
 
@@ -1008,10 +986,20 @@ pub fn update_fleet_positions(
     mut commands: Commands,
     fleets: Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction)>,
     bodies: Query<&GlobalTransform, With<Body>>,
-    sim_time: Res<SimulationTime>,
     cam_scale: Res<CameraScale>,
+    shapes: Query<(&FleetShape, &GlobalTransform)>,
 ) {
-    let positions = compute_fleet_positions(&fleets, &bodies, &sim_time, cam_scale.0);
+    let positions = compute_fleet_positions(&fleets, &bodies, cam_scale.0);
+    let mut positions = positions;
+
+    for (fleet_shape, transform) in &shapes {
+        if !fleet_shape.is_transit_shape {
+            continue;
+        }
+        let position = transform.translation();
+        let velocity_dir = transform.rotation() * Vec3::Y;
+        positions.insert(fleet_shape.fleet_entity, (position, velocity_dir));
+    }
 
     for (fleet_entity, _, _, _, _) in &fleets {
         if let Some((position, velocity_dir)) = positions.get(&fleet_entity) {
@@ -1419,7 +1407,6 @@ pub fn sync_objective_rings(
         ));
     }
 }
-
 
 /// Queue waypoint marker color (cyan, dimmed)
 const QUEUE_MARKER_COLOR: Color = Color::srgba(0.3, 0.8, 0.8, 0.7);

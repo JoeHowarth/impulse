@@ -120,8 +120,7 @@ pub fn handle_tactical_click(
         return;
     };
 
-    let shift =
-        keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
 
     // Count player ships for debug
     let player_ships: Vec<_> = visual_ships
@@ -150,9 +149,7 @@ pub fn handle_tactical_click(
     }
 
     // Find clicked ship (player faction only)
-    let candidates = player_ships
-        .iter()
-        .map(|(e, gt, _)| (*e, gt.translation()));
+    let candidates = player_ships.iter().map(|(e, gt, _)| (*e, gt.translation()));
 
     if let Some((entity, dist)) = find_closest_pickable(
         cursor_pos,
@@ -234,7 +231,10 @@ pub fn update_box_selection(
     if mouse_button.just_released(MouseButton::Left) {
         if let (Some(start), Some(end)) = (box_sel.start, box_sel.current) {
             let drag_dist = start.distance(end);
-            info!("Box select: drag ended, distance={:.1}px (threshold={})", drag_dist, BOX_SELECT_THRESHOLD);
+            info!(
+                "Box select: drag ended, distance={:.1}px (threshold={})",
+                drag_dist, BOX_SELECT_THRESHOLD
+            );
 
             // Only trigger box select if dragged far enough
             if drag_dist > BOX_SELECT_THRESHOLD {
@@ -246,8 +246,8 @@ pub fn update_box_selection(
                     return;
                 };
 
-                let shift = keyboard.pressed(KeyCode::ShiftLeft)
-                    || keyboard.pressed(KeyCode::ShiftRight);
+                let shift =
+                    keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
 
                 // Clear selection if not shift-dragging
                 if !shift {
@@ -262,7 +262,10 @@ pub fn update_box_selection(
                 let min_y = start.y.min(end.y);
                 let max_y = start.y.max(end.y);
 
-                info!("Box select: rect x=[{:.0}, {:.0}] y=[{:.0}, {:.0}]", min_x, max_x, min_y, max_y);
+                info!(
+                    "Box select: rect x=[{:.0}, {:.0}] y=[{:.0}, {:.0}]",
+                    min_x, max_x, min_y, max_y
+                );
 
                 // Select all player ships inside the rectangle
                 let mut selected_count = 0;
@@ -388,7 +391,9 @@ fn screen_to_world(
 ) -> Option<Vec2> {
     // viewport_to_world returns a Ray3d for perspective cameras,
     // but for orthographic we can use the ray origin directly
-    let ray = camera.viewport_to_world(camera_transform, screen_pos).ok()?;
+    let ray = camera
+        .viewport_to_world(camera_transform, screen_pos)
+        .ok()?;
     Some(Vec2::new(ray.origin.x, ray.origin.y))
 }
 
@@ -399,7 +404,9 @@ fn screen_to_arena_local(
     camera_transform: &GlobalTransform,
     arena_transform: &GlobalTransform,
 ) -> Option<DVec3> {
-    let ray = camera.viewport_to_world(camera_transform, screen_pos).ok()?;
+    let ray = camera
+        .viewport_to_world(camera_transform, screen_pos)
+        .ok()?;
     let arena_pos = arena_transform.translation();
     Some(DVec3::new(
         (ray.origin.x - arena_pos.x) as f64,
@@ -442,7 +449,9 @@ pub fn handle_tactical_move_order(
     };
 
     // Convert screen → world → arena-local
-    let Some(arena_local) = screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform) else {
+    let Some(arena_local) =
+        screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform)
+    else {
         return;
     };
 

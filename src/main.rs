@@ -20,9 +20,9 @@ use bevy_pancam::{PanCam, PanCamPlugin};
 use bevy_vector_shapes::{prelude as shape_prelude, prelude::*};
 use big_space::prelude::*;
 
-mod camera;
 mod app_sets;
 mod app_state;
+mod camera;
 mod orbital_data;
 mod physics;
 mod picking;
@@ -38,11 +38,12 @@ mod ui;
 use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
 use simulation::SimulationTime;
 
-use crate::camera::spawn_camera;
 use crate::app_sets::AppSet;
 use crate::app_state::AppState;
+use crate::camera::spawn_camera;
 use crate::plugins::{
-    AppCameraPlugin, AppUiPlugin, PhysicsSyncPlugin, StrategicPlugin, TacticalPlugin, TransferPlugin,
+    AppCameraPlugin, AppUiPlugin, PhysicsSyncPlugin, StrategicPlugin, TacticalPlugin,
+    TransferPlugin,
 };
 
 // ============================================================================
@@ -133,7 +134,13 @@ fn main() {
         )
         .configure_sets(
             Update,
-            (AppSet::Input, AppSet::Simulation, AppSet::Render, AppSet::Ui).chain(),
+            (
+                AppSet::Input,
+                AppSet::Simulation,
+                AppSet::Render,
+                AppSet::Ui,
+            )
+                .chain(),
         )
         .add_plugins((
             AppCameraPlugin,
@@ -375,6 +382,9 @@ pub(crate) fn update_body_positions(
         computed.visibility =
             calculate_visibility_f64(body, helio_pos, &helio_positions, cam_scale);
         computed.display_size = compute_display_size(body, cam_scale);
+        if body.name == "Earth" {
+            dbg!(cam_scale, computed.display_size, computed.visibility);
+        }
     }
 }
 

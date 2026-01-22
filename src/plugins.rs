@@ -3,16 +3,8 @@ use bevy::prelude::*;
 use crate::app_sets::AppSet;
 use crate::app_state::AppState;
 use crate::{
-    camera,
-    handle_body_click,
-    picking,
-    ship,
-    simulation,
-    tactical,
-    transfer_vis,
-    ui,
-    update_body_positions,
-    update_body_shape_scale,
+    camera, handle_body_click, picking, ship, simulation, tactical, transfer_vis, ui,
+    update_body_positions, update_body_shape_scale,
 };
 
 pub struct AppCameraPlugin;
@@ -87,11 +79,7 @@ impl Plugin for StrategicPlugin {
         // Rendering systems (shared)
         app.add_systems(
             Update,
-            (
-                update_body_shape_scale,
-            )
-                .chain()
-                .in_set(AppSet::Render),
+            (update_body_shape_scale,).chain().in_set(AppSet::Render),
         );
 
         // Rendering systems (strategic only)
@@ -173,6 +161,7 @@ impl Plugin for TacticalPlugin {
             Update,
             (
                 tactical::render_move_markers,
+                tactical::update_ship_mesh_scale,
                 picking::sync_box_selection,
             )
                 .chain()

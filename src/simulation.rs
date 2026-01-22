@@ -5,8 +5,8 @@ use bevy::prelude::*;
 /// Seconds per day
 pub const SECONDS_PER_DAY: f64 = 60.0 * 60.0 * 24.0;
 
-/// Default strategic time scale: 10 days per real second
-pub const STRATEGIC_TIME_SCALE: f64 = SECONDS_PER_DAY * 10.0;
+/// Default strategic time scale: 2.5 days per real second
+pub const STRATEGIC_TIME_SCALE: f64 = SECONDS_PER_DAY * 2.5;
 
 /// Simulation time state, decoupled from wall clock.
 #[derive(Resource)]
