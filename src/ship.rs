@@ -20,6 +20,7 @@ use bevy_vector_shapes::prelude::*; // TODO: Remove once retained shapes migrate
 use big_space::prelude::*;
 
 use crate::ComputedBody;
+use crate::app_state::AppState;
 use crate::camera::{BigSpaceRoot, CameraScale};
 use crate::orbital_data::{Body, MU_SUN};
 use crate::simulation::SimulationTime;
@@ -107,6 +108,29 @@ pub struct CombatState {
 /// These are spawned as children of Body entities.
 #[derive(Component)]
 pub struct ObjectiveRing;
+
+/// Clears combat state when returning to strategic mode.
+pub fn reset_combat_state(mut combat: ResMut<CombatState>) {
+    combat.active = false;
+    combat.arena = None;
+    combat.body = None;
+    combat.player_fleets.clear();
+    combat.enemy_fleets.clear();
+}
+
+/// Despawn strategic-only marker entities when entering tactical mode.
+pub fn despawn_strategic_markers(
+    mut commands: Commands,
+    fleet_shapes: Query<Entity, With<FleetShape>>,
+    rings: Query<Entity, With<ObjectiveRing>>,
+) {
+    for entity in &fleet_shapes {
+        commands.entity(entity).despawn();
+    }
+    for entity in &rings {
+        commands.entity(entity).despawn();
+    }
+}
 
 /// Marker for fleet visual entities (retained shape for strategic map).
 /// Links the shape to its logical fleet entity.
@@ -375,6 +399,7 @@ pub fn detect_combat(
     fleets: Query<(Entity, &Fleet, &FleetLocation, &Faction)>,
     bodies: Query<&Body>,
     mut combat: ResMut<CombatState>,
+    mut next_state: ResMut<NextState<AppState>>,
 ) {
     // Skip if combat is already active
     if combat.active {
@@ -413,6 +438,7 @@ pub fn detect_combat(
             combat.enemy_fleets = enemy_fleets.clone();
             // arena will be set by tactical mode entry (Step 2.5)
             combat.arena = None;
+            next_state.set(AppState::Tactical);
 
             return; // Only one combat at a time
         }

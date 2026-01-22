@@ -263,6 +263,27 @@ pub struct FleetStatusText;
 #[derive(Component)]
 pub struct FlightPlanText;
 
+/// Hide transfer UI when entering tactical mode.
+pub fn hide_transfer_ui(
+    mut commands: Commands,
+    mut popup: ResMut<TransferPopup>,
+    mut panels: Query<&mut Node, With<TransferInfoPanel>>,
+) {
+    // Close any open popup
+    despawn_transfer_popup(&mut commands, &mut popup);
+
+    for mut node in &mut panels {
+        node.display = Display::None;
+    }
+}
+
+/// Show transfer UI when returning to strategic mode.
+pub fn show_transfer_ui(mut panels: Query<&mut Node, With<TransferInfoPanel>>) {
+    for mut node in &mut panels {
+        node.display = Display::Flex;
+    }
+}
+
 /// Spawns the transfer info UI panel in the bottom-right corner.
 pub fn spawn_transfer_panel(commands: &mut Commands) {
     commands

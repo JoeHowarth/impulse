@@ -21,9 +21,12 @@ use bevy_vector_shapes::{prelude as shape_prelude, prelude::*};
 use big_space::prelude::*;
 
 mod camera;
+mod app_sets;
+mod app_state;
 mod orbital_data;
 mod physics;
 mod picking;
+mod plugins;
 mod ship;
 mod simulation;
 mod tactical;
@@ -36,6 +39,11 @@ use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
 use simulation::SimulationTime;
 
 use crate::camera::spawn_camera;
+use crate::app_sets::AppSet;
+use crate::app_state::AppState;
+use crate::plugins::{
+    AppCameraPlugin, AppUiPlugin, PhysicsSyncPlugin, StrategicPlugin, TacticalPlugin, TransferPlugin,
+};
 
 // ============================================================================
 // Constants
@@ -93,7 +101,7 @@ fn main() {
         .add_plugins(BigSpaceDefaultPlugins)
         .add_plugins(PanCamPlugin)
         .add_plugins(ShapePlugin::default())
-        .add_plugins(physics::TacticalPhysicsPlugin)
+        .add_plugins(PhysicsSyncPlugin)
         .add_plugins((
             // Performance diagnostics - logs to console every X seconds
             FrameTimeDiagnosticsPlugin::default(),
@@ -108,6 +116,7 @@ fn main() {
         .init_resource::<ship::VictoryState>()
         .init_resource::<ship::CombatState>()
         .init_resource::<picking::BoxSelection>()
+        .init_state::<AppState>()
         .add_systems(
             Startup,
             (
@@ -122,85 +131,17 @@ fn main() {
             )
                 .chain(),
         )
-        // Fleet and simulation systems (run first)
-        .add_systems(
+        .configure_sets(
             Update,
-            (
-                (
-                    camera::update_camera_scale,
-                    simulation::handle_time_controls,
-                    update_body_positions,
-                    // Flight plan modifications
-                    ship::commit_plan,
-                    ship::cancel_last_leg,
-                    // Fleet management
-                    ship::split_fleet,
-                    ship::merge_fleets,
-                    // Objective tracking
-                    ship::check_objectives,
-                    // Transfer execution (runs before expire so committed legs depart first)
-                    ship::execute_departure,
-                    ship::check_arrival,
-                    // Combat detection (after arrival)
-                    ship::detect_combat,
-                    // Tactical mode entry (after combat detection)
-                    tactical::enter_tactical_mode,
-                    // Keep tactical arena synced with body position
-                    tactical::update_arena_position,
-                    // Expire uncommitted legs whose departure_day passed
-                    ship::expire_stale_uncommitted_legs,
-                    // Sync Transfer entities to FleetLocation + committed legs
-                    ship::sync_transfer_entities,
-                    transfer_vis::check_transfer_expiration,
-                )
-                    .chain(),
-                // UI interaction systems
-                (
-                    handle_body_click,
-                    // Tactical picking (box selection must run before click to set drag state)
-                    picking::update_box_selection,
-                    picking::handle_tactical_click,
-                    picking::handle_tactical_move_order,
-                    ui::handle_fleet_number_keys,
-                    ui::handle_popup_spawn,
-                    ui::update_popup_options,
-                    ui::update_popup_position,
-                    ui::handle_close_button,
-                    ui::handle_escape_key,
-                    ui::handle_option_hover,
-                    transfer_vis::update_hovered_arc,
-                    ui::handle_option_selection,
-                )
-                    .chain(),
-                // Rendering systems (run last)
-                (
-                    camera::animate_camera,
-                    // update_orbit_positions,
-                    // transfer_vis::update_transfer_arc_positions,
-                    // render_system,
-                    update_body_shape_scale,
-                    ship::update_fleet_positions,
-                    ship::sync_fleet_shapes,
-                    // ship::render_fleets, // TODO: Remove after verifying sync_fleet_shapes works
-                    tactical::update_ship_movement,
-                    // tactical::render_visual_ships, // Now using retained gizmos spawned with VisualShip
-                    tactical::render_move_markers,
-                    picking::sync_box_selection,
-                    ship::sync_objective_rings,
-                    ship::sync_plan_markers,
-                    // ship::render_plan_arcs,
-                    // TODO: remove me - now handled by spawn_transfer_visualization in sync_transfer_entities system
-                    // transfer_vis::render_burn_arrows,
-                    ui::update_labels,
-                    ui::update_time_ui,
-                    ui::update_transfer_panel,
-                    ui::update_fleet_tabs,
-                    ui::update_victory_overlay,
-                )
-                    .chain(),
-            )
-                .chain(),
+            (AppSet::Input, AppSet::Simulation, AppSet::Render, AppSet::Ui).chain(),
         )
+        .add_plugins((
+            AppCameraPlugin,
+            StrategicPlugin,
+            TacticalPlugin,
+            TransferPlugin,
+            AppUiPlugin,
+        ))
         .run();
 }
 
@@ -370,7 +311,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 /// Computes positions, visibility, and display sizes for all bodies.
 /// Updates CellCoord + Transform for big_space integration.
 /// Runs once per frame before orbit updates and rendering.
-fn update_body_positions(
+pub(crate) fn update_body_positions(
     body_query: Query<(Entity, &Body)>,
     mut spatial_query: Query<(&mut ComputedBody, &mut CellCoord, &mut Transform)>,
     camera_query: Query<&Projection, With<Camera3d>>,
@@ -567,7 +508,7 @@ fn create_orbit_gizmo_asset(body: &Body, parent_body: &Body) -> GizmoAsset {
     gizmo
 }
 
-fn update_body_shape_scale(
+pub(crate) fn update_body_shape_scale(
     mut body_shapes: Query<(&mut Transform, &ChildOf), With<BodyShape>>,
     computed_bodies: Query<&ComputedBody>,
 ) {
@@ -602,7 +543,7 @@ fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
 /// Detects clicks on fleets or bodies (strategic mode only).
 /// - Click: select fleet if one is at click location
 /// - Shift+click: open transfer popup for selected fleet
-fn handle_body_click(
+pub(crate) fn handle_body_click(
     mut commands: Commands,
     mouse_button: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,

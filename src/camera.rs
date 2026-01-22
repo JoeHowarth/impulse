@@ -200,15 +200,16 @@ pub fn animate_camera(
         }
 
         // Animate zoom
-        // if let Some(target_scale) = target.scale { if let Projection::Orthographic(ref mut ortho) = *projection {
-        //         let new_scale = ortho.scale + (target_scale - ortho.scale) * lerp_factor as f32;
-        //         ortho.scale = new_scale;
+        if let Some(target_scale) = target.scale {
+            if let Projection::Orthographic(ref mut ortho) = *projection {
+                let new_scale = ortho.scale + (target_scale - ortho.scale) * lerp_factor as f32;
+                ortho.scale = new_scale;
 
-        //         // Clear target if close enough (1% of target scale)
-        //         if (ortho.scale - target_scale).abs() < target_scale * 0.01 {
-        //             target.scale = None;
-        //         }
-        //     }
-        // }
+                // Clear target if close enough (1% of target scale)
+                if (ortho.scale - target_scale).abs() < target_scale * 0.01 {
+                    target.scale = None;
+                }
+            }
+        }
     }
 }

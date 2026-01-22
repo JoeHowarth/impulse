@@ -8,6 +8,7 @@ use bevy::gizmos::GizmoAsset;
 use bevy::math::{DVec2, DVec3, Isometry3d};
 use bevy::prelude::*;
 use bevy_vector_shapes::prelude::*;
+use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use crate::ComputedBody;
 use crate::camera::{CameraScale, CameraTarget};
@@ -87,6 +88,8 @@ const ARRIVAL_VELOCITY: f64 = 100_000.0;
 pub struct TacticalArena {
     /// The body where this battle is occurring
     pub body: Entity,
+    /// Last known heliocentric position for arena center
+    pub last_helio_pos: DVec3,
     // /// Arena center in heliocentric coordinates (Vec3 visual units)
     // pub heliocentric_pos: Vec3,
     // /// Previous camera position for restoration
@@ -189,11 +192,12 @@ pub fn enter_tactical_mode(
         combat.enemy_fleets.len()
     );
 
-    // Spawn TacticalArena
+    // Spawn TacticalArena (Transform needed so VisualShips inherit a spatial parent)
     let arena = commands
         .spawn((
             TacticalArena {
                 body: body_entity,
+                last_helio_pos: arena_helio,
                 // heliocentric_pos: arena_pos,
                 // previous_camera_pos: current_pos,
                 // previous_camera_scale: current_scale,
@@ -360,41 +364,50 @@ fn compute_ship_x_offset(index: usize, total: usize) -> f64 {
 /// This keeps tactical ships centered on the body as it orbits.
 /// Also moves the camera by the same delta so it tracks the arena.
 pub fn update_arena_position(
-    mut arena_query: Query<(&TacticalArena, &mut Transform)>,
+    mut arena_query: Query<&mut TacticalArena>,
     bodies: Query<&ComputedBody>,
+    grid_query: Query<&Grid, With<BigSpace>>,
     mut camera_query: Query<
-        (&mut Transform, &mut crate::camera::CameraTarget),
-        Without<TacticalArena>,
+        (&mut Transform, &mut CellCoord, &mut crate::camera::CameraTarget),
+        With<Camera3d>,
     >,
 ) {
-    // for (arena, mut arena_transform) in &mut arena_query {
-    //     if let Ok(body) = bodies.get(arena.body) {
-    //         // Apply same offset as spawn to keep body on right side
-    //         // TODO(Phase 5): Use CellCoord + Transform instead of f32 position
-    //         let arena_offset = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
-    //         let new_pos = body.helio_pos.as_vec3() + arena_offset;
+    let Ok(grid) = grid_query.single() else {
+        return;
+    };
 
-    //         // Calculate how much the arena moved this frame
-    //         let delta = new_pos - arena_transform.translation;
+    let Ok((mut cam_transform, mut cam_cell, mut camera_target)) = camera_query.single_mut()
+    else {
+        return;
+    };
 
-    //         // Update arena position
-    //         arena_transform.translation = new_pos;
+    for mut arena in &mut arena_query {
+        let Ok(body) = bodies.get(arena.body) else {
+            continue;
+        };
 
-    //         // Move camera by the same delta to track the arena
-    //         // Always apply delta to camera position so it moves with arena
-    //         if let Ok((mut cam_transform, mut camera_target)) = camera_query.single_mut() {
-    //             // Always move camera position with arena
-    //             cam_transform.translation.x += delta.x;
-    //             cam_transform.translation.y += delta.y;
+        // Arena center tracks body position with fixed offset
+        let arena_helio = body.helio_pos + DVec3::new(-ARENA_CENTER_OFFSET, 0.0, 0.0);
+        let delta = arena_helio - arena.last_helio_pos;
+        if delta.length_squared() <= f64::EPSILON {
+            continue;
+        }
 
-    //             // If animating, also move the target so we animate toward the right place
-    //             if let Some(ref mut target_pos) = camera_target.position {
-    //                 target_pos.x += delta.x;
-    //                 target_pos.y += delta.y;
-    //             }
-    //         }
-    //     }
-    // }
+        arena.last_helio_pos = arena_helio;
+
+        // Move camera by the same delta to keep its relative offset in the arena frame
+        let current_world = grid.grid_position_double(&cam_cell, &cam_transform);
+        let new_world = current_world + delta;
+        let (new_cell, new_local) = grid.translation_to_grid(new_world);
+        *cam_cell = new_cell;
+        cam_transform.translation = new_local;
+
+        // If animating, move the target too so we animate toward the right place
+        if let Some(ref mut target_pos) = camera_target.position {
+            target_pos.x += delta.x;
+            target_pos.y += delta.y;
+        }
+    }
 }
 
 /// Computes ship display size using LOD system similar to bodies.
