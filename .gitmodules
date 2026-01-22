@@ -1,6 +1,0 @@
-[submodule "bevy"]
-	path = bevy
-	url = git@github.com:bevyengine/bevy.git
-[submodule "astrora"]
-	path = astrora
-	url = git@github.com:cachemcclure/astrora.git

@@ -13,9 +13,9 @@ opt-level = 3
 
 
 [dependencies]
-astrora_core = { path = "astrora", features = ["serde"] }
-# bevy = { path = "bevy", features = ["dynamic_linking"] }
-bevy = { path = "bevy", features = [] }
+astrora_core = { git = "https://github.com/JoeHowarth/astrora.git", branch = "main", features = ["serde"] }
+# bevy = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main", features = ["dynamic_linking"] }
+bevy = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main", features = [] }
 avian3d = { version = "0.4", default-features = false, features = [
     "3d",
     "f64",
@@ -35,40 +35,45 @@ log = { version = "*", features = [
 ] }
 
 [patch.crates-io]
-astrora_core = { path = "astrora" }
-bevy = { path = "bevy" }
-bevy_a11y = { path = "bevy/crates/bevy_a11y" }
-bevy_animation = { path = "bevy/crates/bevy_animation" }
-bevy_app = { path = "bevy/crates/bevy_app" }
-bevy_asset = { path = "bevy/crates/bevy_asset" }
-bevy_audio = { path = "bevy/crates/bevy_audio" }
-bevy_color = { path = "bevy/crates/bevy_color" }
-bevy_core_pipeline = { path = "bevy/crates/bevy_core_pipeline" }
-bevy_derive = { path = "bevy/crates/bevy_derive" }
-bevy_diagnostic = { path = "bevy/crates/bevy_diagnostic" }
-bevy_ecs = { path = "bevy/crates/bevy_ecs" }
-bevy_image = { path = "bevy/crates/bevy_image" }
-bevy_input = { path = "bevy/crates/bevy_input" }
-bevy_input_focus = { path = "bevy/crates/bevy_input_focus" }
-bevy_internal = { path = "bevy/crates/bevy_internal" }
-bevy_log = { path = "bevy/crates/bevy_log" }
-bevy_math = { path = "bevy/crates/bevy_math" }
-bevy_mesh = { path = "bevy/crates/bevy_mesh" }
-bevy_pbr = { path = "bevy/crates/bevy_pbr" }
-bevy_picking = { path = "bevy/crates/bevy_picking" }
-bevy_platform = { path = "bevy/crates/bevy_platform" }
-bevy_ptr = { path = "bevy/crates/bevy_ptr" }
-bevy_reflect = { path = "bevy/crates/bevy_reflect" }
-bevy_render = { path = "bevy/crates/bevy_render" }
-bevy_scene = { path = "bevy/crates/bevy_scene" }
-bevy_shader = { path = "bevy/crates/bevy_shader" }
-bevy_sprite = { path = "bevy/crates/bevy_sprite" }
-bevy_state = { path = "bevy/crates/bevy_state" }
-bevy_tasks = { path = "bevy/crates/bevy_tasks" }
-bevy_text = { path = "bevy/crates/bevy_text" }
-bevy_time = { path = "bevy/crates/bevy_time" }
-bevy_transform = { path = "bevy/crates/bevy_transform" }
-bevy_ui = { path = "bevy/crates/bevy_ui" }
-bevy_utils = { path = "bevy/crates/bevy_utils" }
-bevy_window = { path = "bevy/crates/bevy_window" }
-bevy_winit = { path = "bevy/crates/bevy_winit" }
+astrora_core = { git = "https://github.com/JoeHowarth/astrora.git", branch = "main" }
+bevy = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_a11y = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_animation = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_app = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_asset = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_audio = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_color = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_core_pipeline = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_derive = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_diagnostic = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_ecs = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_image = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_input = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_input_focus = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_internal = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_log = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_math = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_mesh = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_pbr = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_picking = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_platform = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_ptr = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_reflect = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_render = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_scene = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_shader = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_sprite = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_state = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_tasks = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_text = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_time = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_transform = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_ui = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_utils = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_window = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_winit = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_ecs_macros = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_reflect_derive = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_macro_utils = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_asset_macros = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
+bevy_gizmos = { git = "https://github.com/JoeHowarth/bevy.git", branch = "main" }
