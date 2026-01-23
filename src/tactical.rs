@@ -7,8 +7,11 @@ use avian3d::prelude::*;
 use bevy::math::primitives::Triangle3d;
 use bevy::math::{DVec2, DVec3, Isometry3d};
 use bevy::prelude::*;
+use bevy::asset::RenderAssetUsages;
+use bevy::render::render_resource::PrimitiveTopology;
 use bevy_vector_shapes::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+use std::collections::{HashMap, HashSet};
 
 use crate::ComputedBody;
 use crate::camera::{CameraScale, CameraTarget};
@@ -40,8 +43,8 @@ const SHIP_SPACING: f64 = 1_000.0;
 const SHIP_PHYSICAL_SIZE: f32 = 100.0;
 
 /// Target screen-size range for ships in pixels (LOD).
-const SHIP_TARGET_PIXELS_SCALE: f32 = 30.0; // 10x larger than previous 3px baseline
-const SHIP_TARGET_PIXELS_MAX: f32 = 80.0;
+const SHIP_TARGET_PIXELS_SCALE: f32 = 5.0;
+const SHIP_TARGET_PIXELS_MAX: f32 = 8.0;
 
 /// Screen-size fade range for ships in pixels.
 /// Fade starts at this size and reaches 0 below the end size.
@@ -60,6 +63,7 @@ const ARRIVAL_DISTANCE: f64 = 1_000.0;
 
 /// Arrival velocity threshold in m/s (10 m/s)
 const ARRIVAL_VELOCITY: f64 = 10.0;
+
 
 // ============================================================================
 // Components
@@ -109,6 +113,12 @@ pub struct ShipMesh;
 /// Marker for the selection ring gizmo (child of VisualShip, only when selected).
 #[derive(Component)]
 pub struct SelectionRingGizmo;
+
+/// Marker for the move target gizmo (child of TacticalArena).
+#[derive(Component)]
+pub struct MoveMarker {
+    pub ship: Entity,
+}
 
 /// Stats for ship movement and combat capabilities.
 #[derive(Component)]
@@ -434,6 +444,54 @@ fn create_ship_triangle_mesh() -> Mesh {
     ))
 }
 
+fn create_move_marker_mesh() -> Mesh {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let half_len = 0.5;
+    let half_thickness = 0.08;
+
+    let quad_for_line = |a: Vec2, b: Vec2, half_t: f32| -> [Vec3; 4] {
+        let dir = (b - a).normalize_or_zero();
+        let perp = Vec2::new(-dir.y, dir.x) * half_t;
+        [
+            (a + perp).extend(0.0),
+            (a - perp).extend(0.0),
+            (b - perp).extend(0.0),
+            (b + perp).extend(0.0),
+        ]
+    };
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+
+    let quads = [
+        quad_for_line(
+            Vec2::new(-half_len, -half_len),
+            Vec2::new(half_len, half_len),
+            half_thickness,
+        ),
+        quad_for_line(
+            Vec2::new(-half_len, half_len),
+            Vec2::new(half_len, -half_len),
+            half_thickness,
+        ),
+    ];
+
+    for quad in quads {
+        let v0 = quad[0];
+        let v1 = quad[1];
+        let v2 = quad[2];
+        let v3 = quad[3];
+        for v in [v0, v1, v2, v0, v2, v3] {
+            positions.push([v.x, v.y, v.z]);
+            normals.push([0.0, 0.0, 1.0]);
+        }
+    }
+
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh
+}
+
 /// Updates ship mesh scale based on camera zoom.
 pub fn update_ship_mesh_scale(
     cam_scale: Res<CameraScale>,
@@ -638,36 +696,73 @@ pub fn update_ship_movement(
 
 /// Renders destination markers for selected ships with move orders.
 pub fn render_move_markers(
+    mut commands: Commands,
     combat: Res<CombatState>,
-    ships: Query<&MoveOrder, (With<VisualShip>, With<Selected>)>,
-    arena_query: Query<&GlobalTransform, With<TacticalArena>>,
+    arena_query: Query<Entity, With<TacticalArena>>,
+    ships: Query<(Entity, &MoveOrder), (With<VisualShip>, With<Selected>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut markers: Query<(Entity, &MoveMarker, &mut Transform)>,
     cam_scale: Res<CameraScale>,
-    mut painter: ShapePainter,
+    mut marker_mesh: Local<Option<Handle<Mesh>>>,
+    mut marker_material: Local<Option<Handle<StandardMaterial>>>,
 ) {
     if !combat.active {
+        for (entity, _, _) in &mut markers {
+            commands.entity(entity).despawn();
+        }
         return;
     }
 
-    let Ok(arena_transform) = arena_query.single() else {
+    let Ok(arena_entity) = arena_query.single() else {
         return;
     };
-    let arena_pos = arena_transform.translation();
 
-    for order in &ships {
-        // Convert arena-local to world
-        let world_pos = Vec3::new(
-            arena_pos.x + order.destination.x as f32,
-            arena_pos.y + order.destination.y as f32,
-            0.1,
+    let mut desired_positions: HashMap<Entity, Vec3> = HashMap::new();
+    for (ship_entity, order) in &ships {
+        desired_positions.insert(
+            ship_entity,
+            Vec3::new(
+                order.destination.x as f32,
+                order.destination.y as f32,
+                0.1,
+            ),
         );
+    }
 
-        // Draw X marker
-        painter.set_translation(world_pos);
-        painter.set_color(Color::srgba(0.5, 1.0, 0.5, 0.6));
-        painter.thickness = cam_scale.0 * 2.0;
+    let mut existing_ships: HashSet<Entity> = HashSet::new();
+    let (display_size, _) = compute_ship_display(cam_scale.0);
+    for (marker_entity, marker, mut transform) in &mut markers {
+        if let Some(pos) = desired_positions.get(&marker.ship) {
+            transform.translation = *pos;
+            transform.scale = Vec3::splat(display_size);
+            existing_ships.insert(marker.ship);
+        } else {
+            commands.entity(marker_entity).despawn();
+        }
+    }
 
-        let size = cam_scale.0 * 15.0; // 15 pixels
-        painter.line(Vec3::new(-size, -size, 0.0), Vec3::new(size, size, 0.0));
-        painter.line(Vec3::new(-size, size, 0.0), Vec3::new(size, -size, 0.0));
+    let mesh_handle = marker_mesh.get_or_insert_with(|| meshes.add(create_move_marker_mesh()));
+    let material_handle = marker_material.get_or_insert_with(|| {
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(0.5, 1.0, 0.5),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })
+    });
+
+    for (ship_entity, pos) in desired_positions {
+        if existing_ships.contains(&ship_entity) {
+            continue;
+        }
+        commands.spawn((
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(material_handle.clone()),
+            MoveMarker { ship: ship_entity },
+            Transform::from_translation(pos).with_scale(Vec3::splat(display_size)),
+            ChildOf(arena_entity),
+        ));
     }
 }

@@ -314,6 +314,7 @@ pub fn sync_box_selection(
     combat: Res<CombatState>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    arena_query: Query<(Entity, &GlobalTransform), With<TacticalArena>>,
     existing_gizmo: Query<Entity, With<BoxSelectionGizmo>>,
     mut gizmo_transforms: Query<&mut Transform, With<BoxSelectionGizmo>>,
 ) {
@@ -340,25 +341,31 @@ pub fn sync_box_selection(
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
-
-    // Convert screen coords to world coords
-    let window_size = Vec2::new(window.width(), window.height());
-    let Some(start_world) = screen_to_world(start, window_size, camera, camera_transform) else {
+    let Ok((arena_entity, arena_transform)) = arena_query.single() else {
         return;
     };
-    let Some(end_world) = screen_to_world(current, window_size, camera, camera_transform) else {
+
+    // Convert screen coords to arena-local coords
+    let Some(start_local) =
+        screen_to_arena_local(start, camera, camera_transform, arena_transform)
+    else {
+        return;
+    };
+    let Some(end_local) =
+        screen_to_arena_local(current, camera, camera_transform, arena_transform)
+    else {
         return;
     };
 
     // Calculate center and size for the rectangle
     let center = Vec3::new(
-        (start_world.x + end_world.x) / 2.0,
-        (start_world.y + end_world.y) / 2.0,
+        ((start_local.x + end_local.x) * 0.5) as f32,
+        ((start_local.y + end_local.y) * 0.5) as f32,
         0.1, // Z offset for visibility
     );
     let size = Vec2::new(
-        (end_world.x - start_world.x).abs(),
-        (end_world.y - start_world.y).abs(),
+        (end_local.x - start_local.x).abs() as f32,
+        (end_local.y - start_local.y).abs() as f32,
     );
 
     if let Ok(mut transform) = gizmo_transforms.single_mut() {
@@ -378,23 +385,9 @@ pub fn sync_box_selection(
             },
             BoxSelectionGizmo,
             Transform::from_translation(center).with_scale(Vec3::new(size.x, size.y, 1.0)),
+            ChildOf(arena_entity),
         ));
     }
-}
-
-/// Convert screen coordinates to world coordinates.
-fn screen_to_world(
-    screen_pos: Vec2,
-    _window_size: Vec2,
-    camera: &Camera,
-    camera_transform: &GlobalTransform,
-) -> Option<Vec2> {
-    // viewport_to_world returns a Ray3d for perspective cameras,
-    // but for orthographic we can use the ray origin directly
-    let ray = camera
-        .viewport_to_world(camera_transform, screen_pos)
-        .ok()?;
-    Some(Vec2::new(ray.origin.x, ray.origin.y))
 }
 
 /// Convert screen coordinates to arena-local coordinates.
