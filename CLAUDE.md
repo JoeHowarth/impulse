@@ -74,6 +74,14 @@ The Bevy game engine is included as a local submodule in this project. When work
 
 These examples demonstrate the current Bevy API patterns and best practices for the version we're using (0.17.3).
 
+## Bevy API Notes
+
+**Events renamed to Messages (Bevy 0.17+):**
+- `EventReader<T>` → `MessageReader<T>` (from `bevy::ecs::message`)
+- `EventWriter<T>` → `MessageWriter<T>`
+- `.send()` → `.write()`
+- Register with `app.add_message::<T>()` instead of `app.add_event::<T>()`
+
 ## Local Development
 
 This project uses a local Bevy dependency via git submodule, allowing us to:

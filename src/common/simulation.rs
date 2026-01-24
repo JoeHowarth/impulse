@@ -1,5 +1,6 @@
 //! Simulation time management.
 
+use avian3d::schedule::{Physics, PhysicsTime};
 use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 
@@ -59,11 +60,12 @@ pub fn parse_start_day() -> i32 {
 }
 
 /// Posts time control commands when keyboard input is detected.
-/// Also advances simulation time if not paused.
+/// Also advances simulation time if not paused, and syncs physics time.
 pub fn handle_time_controls(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut sim_time: ResMut<SimulationTime>,
+    mut physics_time: ResMut<Time<Physics>>,
     mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     // Toggle pause with P
@@ -85,6 +87,14 @@ pub fn handle_time_controls(
     if !sim_time.paused {
         let delta = time.delta_secs_f64();
         sim_time.sim_time += delta * sim_time.time_scale;
+    }
+
+    // Sync physics time with simulation time
+    physics_time.set_relative_speed_f64(sim_time.time_scale);
+    if sim_time.paused {
+        physics_time.pause();
+    } else {
+        physics_time.unpause();
     }
 }
 

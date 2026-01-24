@@ -71,10 +71,15 @@ impl Plugin for StrategicPlugin {
                 strategic::systems::process_cancel_leg,
                 strategic::systems::process_split_fleet,
                 strategic::systems::process_merge_fleets,
-                strategic::systems::process_time_control,
             )
                 .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Strategic)),
+        );
+
+        // Time control runs in all modes (pause/speed work in tactical too)
+        app.add_systems(
+            Update,
+            strategic::systems::process_time_control.in_set(AppSet::Simulation),
         );
 
         // Simulation systems (shared for now)
@@ -147,6 +152,7 @@ impl Plugin for TacticalPlugin {
         app.add_message::<tactical::TacticalCommand>();
         app.init_resource::<tactical::ShowExitDialog>();
         app.init_resource::<tactical::TacticalCameraState>();
+        app.init_resource::<tactical::BoxSelection>();
 
         app.add_systems(
             OnEnter(AppState::Tactical),
@@ -166,17 +172,26 @@ impl Plugin for TacticalPlugin {
             ),
         );
 
-        // Input systems (tactical only)
+        // Input systems (tactical only) - unified input handler
         app.add_systems(
             Update,
             (
                 tactical::handle_tactical_escape,
-                tactical::update_box_selection,
-                tactical::handle_tactical_click,
-                tactical::handle_tactical_move_order,
+                tactical::handle_tactical_input,
             )
                 .chain()
                 .in_set(AppSet::Input)
+                .run_if(in_state(AppState::Tactical)),
+        );
+
+        // Command handlers (selection, movement) - process input commands
+        app.add_systems(
+            Update,
+            (
+                tactical::apply_selection_commands,
+                tactical::apply_move_commands,
+            )
+                .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Tactical)),
         );
 
@@ -190,16 +205,39 @@ impl Plugin for TacticalPlugin {
         );
         app.add_systems(
             Update,
+            tactical::apply_attack_target
+                .in_set(AppSet::Simulation)
+                .run_if(in_state(AppState::Tactical)),
+        );
+        app.add_systems(
+            Update,
             tactical::update_ship_movement
                 .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Tactical)),
         );
         app.add_systems(
             Update,
-            (tactical::check_ship_bounds, tactical::detect_combat_end)
+            (
+                tactical::update_missile_firing,
+                tactical::update_missile_guidance,
+            )
                 .chain()
                 .in_set(AppSet::Simulation)
                 .after(tactical::update_ship_movement)
+                .run_if(in_state(AppState::Tactical)),
+        );
+        app.add_systems(
+            Update,
+            (
+                tactical::handle_missile_collisions,
+                tactical::clear_dead_targets,
+                tactical::process_despawn_at,
+                tactical::check_ship_bounds,
+                tactical::detect_combat_end,
+            )
+                .chain()
+                .in_set(AppSet::Simulation)
+                .after(tactical::update_missile_guidance)
                 .run_if(in_state(AppState::Tactical)),
         );
 
@@ -208,7 +246,10 @@ impl Plugin for TacticalPlugin {
             Update,
             (
                 tactical::render_move_markers,
+                tactical::sync_target_rings,
+                tactical::render_targeting_lines,
                 tactical::update_ship_mesh_scale,
+                tactical::update_missile_mesh_scale,
                 tactical::sync_box_selection,
             )
                 .chain()

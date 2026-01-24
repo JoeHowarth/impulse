@@ -1,8 +1,9 @@
-//! Unified picking/selection system for both strategic and tactical modes.
+//! Tactical mode input handling.
 //!
-//! Strategic mode: Single fleet selection via click
-//! Tactical mode: Multi-ship selection via click, Shift+click, and box select
+//! Single unified input system that interprets mouse/keyboard and emits TacticalCommands.
+//! Separate systems consume commands to modify world state.
 
+use bevy::ecs::message::MessageWriter;
 use bevy::gizmos::GizmoAsset;
 use bevy::math::{DVec3, Isometry3d};
 use bevy::prelude::*;
@@ -10,7 +11,8 @@ use bevy::window::PrimaryWindow;
 
 use crate::model::{CombatState, Faction, Selected};
 
-use super::{MoveOrder, TacticalArena, VisualShip};
+use super::commands::TacticalCommand;
+use super::{TacticalArena, VisualShip};
 
 /// Marker for the box selection rectangle gizmo entity.
 #[derive(Component)]
@@ -26,19 +28,20 @@ const CLICK_RADIUS: f32 = 20.0;
 /// Minimum drag distance to trigger box selection (pixels)
 const BOX_SELECT_THRESHOLD: f32 = 5.0;
 
+/// Box selection rectangle color
+const BOX_SELECT_COLOR: Color = Color::srgba(0.5, 0.8, 1.0, 0.5);
+
 // ============================================================================
 // Resources
 // ============================================================================
 
-/// Tracks box selection drag state (tactical mode only).
+/// Tracks box selection drag state.
 #[derive(Resource, Default)]
 pub struct BoxSelection {
     /// Screen position where drag started
     pub start: Option<Vec2>,
     /// Current drag position
     pub current: Option<Vec2>,
-    /// Set to true when a box select just occurred (so click handler skips)
-    pub did_box_select: bool,
 }
 
 // ============================================================================
@@ -47,7 +50,7 @@ pub struct BoxSelection {
 
 /// Finds the closest entity within click radius.
 /// Returns (Entity, distance) for the closest match, or None if nothing is close enough.
-pub fn find_closest_pickable(
+fn find_closest_pickable(
     cursor_pos: Vec2,
     camera: &Camera,
     camera_transform: &GlobalTransform,
@@ -76,243 +79,277 @@ pub fn find_closest_pickable(
     best_match
 }
 
-// ============================================================================
-// Tactical Mode Systems
-// ============================================================================
-
-/// Handles click and shift+click selection in tactical mode.
-pub fn handle_tactical_click(
-    mut commands: Commands,
-    mouse_button: Res<ButtonInput<MouseButton>>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    combat: Res<CombatState>,
-    visual_ships: Query<(Entity, &GlobalTransform, &VisualShip)>,
-    selected: Query<Entity, With<Selected>>,
-    box_sel: Res<BoxSelection>,
-) {
-    // Only run in tactical mode
-    if !combat.active {
-        return;
-    }
-
-    // Don't process click if it was a box selection drag
-    if box_sel.did_box_select {
-        info!("Tactical click: skipping, was box select");
-        return;
-    }
-
-    if !mouse_button.just_released(MouseButton::Left) {
-        return;
-    }
-
-    let Ok(window) = windows.single() else {
-        info!("Tactical click: no window");
-        return;
-    };
-    let Some(cursor_pos) = window.cursor_position() else {
-        info!("Tactical click: no cursor position");
-        return;
-    };
-    let Ok((camera, camera_transform)) = camera_query.single() else {
-        info!("Tactical click: no camera");
-        return;
-    };
-
-    let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
-
-    // Count player ships for debug
-    let player_ships: Vec<_> = visual_ships
-        .iter()
-        .filter(|(_, _, vs)| vs.faction == Faction::Player)
-        .collect();
-
-    info!(
-        "Tactical click at {:?}, {} player ships in scene",
-        cursor_pos,
-        player_ships.len()
-    );
-
-    // Debug: show screen positions of ships
-    for (entity, gt, _) in &player_ships {
-        let world_pos = gt.translation();
-        if let Ok(screen_pos) = camera.world_to_viewport(camera_transform, world_pos) {
-            let dist = cursor_pos.distance(screen_pos);
-            info!(
-                "  Ship {:?}: world={:?}, screen={:?}, dist={:.1}px",
-                entity, world_pos, screen_pos, dist
-            );
-        } else {
-            info!("  Ship {:?}: world={:?}, NOT ON SCREEN", entity, world_pos);
-        }
-    }
-
-    // Find clicked ship (player faction only)
-    let candidates = player_ships.iter().map(|(e, gt, _)| (*e, gt.translation()));
-
-    if let Some((entity, dist)) = find_closest_pickable(
-        cursor_pos,
-        camera,
-        camera_transform,
-        candidates,
-        CLICK_RADIUS,
-    ) {
-        info!("Selected ship {:?} at distance {:.1}px", entity, dist);
-        if shift {
-            // Toggle selection
-            if selected.get(entity).is_ok() {
-                commands.entity(entity).remove::<Selected>();
-            } else {
-                commands.entity(entity).insert(Selected);
-            }
-        } else {
-            // Single select (clear others)
-            for old in selected.iter() {
-                commands.entity(old).remove::<Selected>();
-            }
-            commands.entity(entity).insert(Selected);
-        }
-    } else {
-        info!("No ship within {}px of click", CLICK_RADIUS);
-        if !shift {
-            // Clicked empty space - deselect all
-            for old in selected.iter() {
-                commands.entity(old).remove::<Selected>();
-            }
-        }
-    }
+/// Convert screen coordinates to arena-local coordinates.
+fn screen_to_arena_local(
+    screen_pos: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    arena_transform: &GlobalTransform,
+) -> Option<DVec3> {
+    let ray = camera
+        .viewport_to_world(camera_transform, screen_pos)
+        .ok()?;
+    let arena_pos = arena_transform.translation();
+    Some(DVec3::new(
+        (ray.origin.x - arena_pos.x) as f64,
+        (ray.origin.y - arena_pos.y) as f64,
+        0.0,
+    ))
 }
 
-/// Tracks box selection drag and selects ships on release.
-/// Returns true if a box selection occurred (so click handler can skip).
-pub fn update_box_selection(
-    mut commands: Commands,
-    mouse_button: Res<ButtonInput<MouseButton>>,
+/// Find ships inside a screen-space rectangle.
+fn find_ships_in_rect(
+    min: Vec2,
+    max: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    ships: impl Iterator<Item = (Entity, Vec3)>,
+) -> Vec<Entity> {
+    let mut result = Vec::new();
+    for (entity, world_pos) in ships {
+        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, world_pos) else {
+            continue;
+        };
+        if screen_pos.x >= min.x
+            && screen_pos.x <= max.x
+            && screen_pos.y >= min.y
+            && screen_pos.y <= max.y
+        {
+            result.push(entity);
+        }
+    }
+    result
+}
+
+// ============================================================================
+// Unified Input System
+// ============================================================================
+
+/// Single input handler for tactical mode.
+/// Interprets mouse/keyboard state and emits TacticalCommands.
+pub fn handle_tactical_input(
+    mut cmd_writer: MessageWriter<TacticalCommand>,
+    mouse: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    arena_query: Query<&GlobalTransform, With<TacticalArena>>,
     combat: Res<CombatState>,
     mut box_sel: ResMut<BoxSelection>,
     visual_ships: Query<(Entity, &GlobalTransform, &VisualShip)>,
-    selected: Query<Entity, With<Selected>>,
+    selected_ships: Query<Entity, (With<VisualShip>, With<Selected>)>,
+    ui_interaction: Query<&Interaction>,
 ) {
-    // Only run in tactical mode
+    // Only in tactical mode
     if !combat.active {
         box_sel.start = None;
         box_sel.current = None;
-        box_sel.did_box_select = false;
         return;
     }
 
-    // Reset the flag at start of each frame
-    box_sel.did_box_select = false;
-
+    // Get window and cursor
     let Ok(window) = windows.single() else {
         return;
     };
     let Some(cursor_pos) = window.cursor_position() else {
         return;
     };
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
 
-    // Start drag
-    if mouse_button.just_pressed(MouseButton::Left) {
-        box_sel.start = Some(cursor_pos);
-        box_sel.current = Some(cursor_pos);
-        info!("Box select: drag started at {:?}", cursor_pos);
+    // Check if UI is blocking input (only at action start, not during drag)
+    let ui_blocking = ui_interaction
+        .iter()
+        .any(|i| *i != Interaction::None);
+
+    // Modifier keys
+    let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    let e_held = keyboard.pressed(KeyCode::KeyE);
+
+    // Collect ship data for picking
+    let player_ships: Vec<_> = visual_ships
+        .iter()
+        .filter(|(_, _, vs)| vs.faction == Faction::Player)
+        .map(|(e, gt, _)| (e, gt.translation()))
+        .collect();
+
+    let enemy_ships: Vec<_> = visual_ships
+        .iter()
+        .filter(|(_, _, vs)| vs.faction == Faction::Enemy)
+        .map(|(e, gt, _)| (e, gt.translation()))
+        .collect();
+
+    // ========== LEFT CLICK PRESS: Start drag ==========
+    if mouse.just_pressed(MouseButton::Left) {
+        if !ui_blocking {
+            box_sel.start = Some(cursor_pos);
+            box_sel.current = Some(cursor_pos);
+        }
     }
 
-    // Update drag position
-    if mouse_button.pressed(MouseButton::Left) {
+    // ========== LEFT CLICK HELD: Update drag position ==========
+    if mouse.pressed(MouseButton::Left) && box_sel.start.is_some() {
         box_sel.current = Some(cursor_pos);
     }
 
-    // End drag - check if it was a box select
-    if mouse_button.just_released(MouseButton::Left) {
-        if let (Some(start), Some(end)) = (box_sel.start, box_sel.current) {
-            let drag_dist = start.distance(end);
-            info!(
-                "Box select: drag ended, distance={:.1}px (threshold={})",
-                drag_dist, BOX_SELECT_THRESHOLD
-            );
+    // ========== LEFT CLICK RELEASE: Determine action ==========
+    if mouse.just_released(MouseButton::Left) {
+        if let Some(start) = box_sel.start {
+            let drag_dist = start.distance(cursor_pos);
+            let is_box_select = drag_dist > BOX_SELECT_THRESHOLD;
 
-            // Only trigger box select if dragged far enough
-            if drag_dist > BOX_SELECT_THRESHOLD {
-                box_sel.did_box_select = true;
-
-                let Ok((camera, camera_transform)) = camera_query.single() else {
-                    box_sel.start = None;
-                    box_sel.current = None;
-                    return;
-                };
-
-                let shift =
-                    keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
-
-                // Clear selection if not shift-dragging
-                if !shift {
-                    for old in selected.iter() {
-                        commands.entity(old).remove::<Selected>();
+            if e_held {
+                // E+click: Attack targeting
+                let selected: Vec<Entity> = selected_ships.iter().collect();
+                if !selected.is_empty() {
+                    if let Some((target, _)) = find_closest_pickable(
+                        cursor_pos,
+                        camera,
+                        camera_transform,
+                        enemy_ships.into_iter(),
+                        CLICK_RADIUS,
+                    ) {
+                        cmd_writer.write(TacticalCommand::AttackTarget {
+                            ships: selected,
+                            target,
+                        });
+                    } else {
+                        // E+click on empty = clear target
+                        cmd_writer.write(TacticalCommand::ClearAttackTarget { ships: selected });
                     }
                 }
+            } else if is_box_select {
+                // Box selection
+                let min = Vec2::new(start.x.min(cursor_pos.x), start.y.min(cursor_pos.y));
+                let max = Vec2::new(start.x.max(cursor_pos.x), start.y.max(cursor_pos.y));
 
-                // Calculate selection rectangle
-                let min_x = start.x.min(end.x);
-                let max_x = start.x.max(end.x);
-                let min_y = start.y.min(end.y);
-                let max_y = start.y.max(end.y);
-
-                info!(
-                    "Box select: rect x=[{:.0}, {:.0}] y=[{:.0}, {:.0}]",
-                    min_x, max_x, min_y, max_y
+                let ships_in_box = find_ships_in_rect(
+                    min,
+                    max,
+                    camera,
+                    camera_transform,
+                    player_ships.into_iter(),
                 );
 
-                // Select all player ships inside the rectangle
-                let mut selected_count = 0;
-                for (entity, global_transform, visual_ship) in &visual_ships {
-                    if visual_ship.faction != Faction::Player {
-                        continue;
+                if shift {
+                    // Shift+box: Add to selection
+                    if !ships_in_box.is_empty() {
+                        cmd_writer.write(TacticalCommand::AddToSelection(ships_in_box));
                     }
-
-                    let Ok(screen_pos) =
-                        camera.world_to_viewport(camera_transform, global_transform.translation())
-                    else {
-                        continue;
-                    };
-
-                    let inside = screen_pos.x >= min_x
-                        && screen_pos.x <= max_x
-                        && screen_pos.y >= min_y
-                        && screen_pos.y <= max_y;
-
-                    info!("  Ship at screen {:?}: inside={}", screen_pos, inside);
-
-                    if inside {
-                        commands.entity(entity).insert(Selected);
-                        selected_count += 1;
-                    }
+                } else {
+                    // Box: Replace selection
+                    cmd_writer.write(TacticalCommand::SelectShips(ships_in_box));
                 }
-
-                info!("Box select: selected {} ships", selected_count);
+            } else {
+                // Single click
+                if let Some((entity, _)) = find_closest_pickable(
+                    cursor_pos,
+                    camera,
+                    camera_transform,
+                    player_ships.into_iter(),
+                    CLICK_RADIUS,
+                ) {
+                    if shift {
+                        // Shift+click: Toggle (add single ship)
+                        cmd_writer.write(TacticalCommand::AddToSelection(vec![entity]));
+                    } else {
+                        // Click: Select single
+                        cmd_writer.write(TacticalCommand::SelectShips(vec![entity]));
+                    }
+                } else if !shift {
+                    // Click on empty: Clear selection
+                    cmd_writer.write(TacticalCommand::ClearSelection);
+                }
             }
         }
 
+        // Reset drag state
         box_sel.start = None;
         box_sel.current = None;
     }
+
+    // ========== RIGHT CLICK: Move order ==========
+    if mouse.just_pressed(MouseButton::Right) && !ui_blocking {
+        let selected: Vec<Entity> = selected_ships.iter().collect();
+        if !selected.is_empty() {
+            if let Ok(arena_transform) = arena_query.single() {
+                if let Some(destination) =
+                    screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform)
+                {
+                    cmd_writer.write(TacticalCommand::MoveShips {
+                        ships: selected,
+                        destination,
+                    });
+                }
+            }
+        }
+    }
 }
 
-/// Box selection rectangle color
-const BOX_SELECT_COLOR: Color = Color::srgba(0.5, 0.8, 1.0, 0.5);
+// ============================================================================
+// Command Handlers
+// ============================================================================
+
+/// Handles selection commands.
+pub fn apply_selection_commands(
+    mut commands: Commands,
+    mut cmd_reader: bevy::ecs::message::MessageReader<TacticalCommand>,
+    selected_query: Query<Entity, With<Selected>>,
+) {
+    for cmd in cmd_reader.read() {
+        match cmd {
+            TacticalCommand::SelectShips(ships) => {
+                // Clear existing selection
+                for entity in selected_query.iter() {
+                    commands.entity(entity).remove::<Selected>();
+                }
+                // Select new ships
+                for &entity in ships {
+                    commands.entity(entity).insert(Selected);
+                }
+            }
+            TacticalCommand::AddToSelection(ships) => {
+                for &entity in ships {
+                    commands.entity(entity).insert(Selected);
+                }
+            }
+            TacticalCommand::ClearSelection => {
+                for entity in selected_query.iter() {
+                    commands.entity(entity).remove::<Selected>();
+                }
+            }
+            _ => {} // Other commands handled elsewhere
+        }
+    }
+}
+
+/// Handles move commands.
+pub fn apply_move_commands(
+    mut commands: Commands,
+    mut cmd_reader: bevy::ecs::message::MessageReader<TacticalCommand>,
+) {
+    for cmd in cmd_reader.read() {
+        if let TacticalCommand::MoveShips { ships, destination } = cmd {
+            for &entity in ships {
+                commands.entity(entity).insert(super::MoveOrder {
+                    destination: *destination,
+                });
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Rendering (Box Selection Gizmo)
+// ============================================================================
 
 /// Syncs the box selection rectangle gizmo with drag state.
-/// Spawns gizmo when dragging starts, updates position/scale during drag, despawns when done.
 pub fn sync_box_selection(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     box_sel: Res<BoxSelection>,
     combat: Res<CombatState>,
-    windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     arena_query: Query<(Entity, &GlobalTransform), With<TacticalArena>>,
     existing_gizmo: Query<Entity, With<BoxSelectionGizmo>>,
@@ -335,9 +372,6 @@ pub fn sync_box_selection(
     let start = box_sel.start.unwrap();
     let current = box_sel.current.unwrap();
 
-    let Ok(window) = windows.single() else {
-        return;
-    };
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
@@ -385,84 +419,5 @@ pub fn sync_box_selection(
             Transform::from_translation(center).with_scale(Vec3::new(size.x, size.y, 1.0)),
             ChildOf(arena_entity),
         ));
-    }
-}
-
-/// Convert screen coordinates to arena-local coordinates.
-fn screen_to_arena_local(
-    screen_pos: Vec2,
-    camera: &Camera,
-    camera_transform: &GlobalTransform,
-    arena_transform: &GlobalTransform,
-) -> Option<DVec3> {
-    let ray = camera
-        .viewport_to_world(camera_transform, screen_pos)
-        .ok()?;
-    let arena_pos = arena_transform.translation();
-    Some(DVec3::new(
-        (ray.origin.x - arena_pos.x) as f64,
-        (ray.origin.y - arena_pos.y) as f64,
-        0.0,
-    ))
-}
-
-/// Handles right-click to set movement orders for selected ships.
-pub fn handle_tactical_move_order(
-    mut commands: Commands,
-    mouse_button: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    combat: Res<CombatState>,
-    arena_query: Query<&GlobalTransform, With<TacticalArena>>,
-    selected_ships: Query<Entity, (With<VisualShip>, With<Selected>)>,
-) {
-    // Only in tactical mode
-    if !combat.active {
-        return;
-    }
-
-    // Right-click just pressed
-    if !mouse_button.just_pressed(MouseButton::Right) {
-        return;
-    }
-
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Some(cursor_pos) = window.cursor_position() else {
-        return;
-    };
-    let Ok((camera, camera_transform)) = camera_query.single() else {
-        return;
-    };
-    let Ok(arena_transform) = arena_query.single() else {
-        return;
-    };
-
-    // Convert screen → world → arena-local
-    let Some(arena_local) =
-        screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform)
-    else {
-        return;
-    };
-
-    // Count selected ships
-    let count = selected_ships.iter().count();
-    if count == 0 {
-        return;
-    }
-
-    info!(
-        "Move order: {} ship(s) to arena-local ({:.0} km, {:.0} km)",
-        count,
-        arena_local.x / 1000.0,
-        arena_local.y / 1000.0
-    );
-
-    // Issue move order to all selected ships
-    for entity in &selected_ships {
-        commands.entity(entity).insert(MoveOrder {
-            destination: arena_local,
-        });
     }
 }

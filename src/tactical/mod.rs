@@ -7,10 +7,12 @@ pub mod commands;
 pub mod input;
 
 use avian3d::prelude::*;
+use bevy::ecs::message::MessageReader;
 use bevy::asset::RenderAssetUsages;
 use bevy::math::primitives::Triangle3d;
 use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
+use bevy::mesh::Indices;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy_vector_shapes::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
@@ -25,8 +27,8 @@ use crate::spatial::{BigSpaceHierarchy, GridLeaf, GridNode, TrackedWorldPosition
 // Re-export commonly used types
 pub use commands::TacticalCommand;
 pub use input::{
-    BoxSelection, handle_tactical_click, handle_tactical_move_order, sync_box_selection,
-    update_box_selection,
+    BoxSelection, apply_move_commands, apply_selection_commands, handle_tactical_input,
+    sync_box_selection,
 };
 
 // ============================================================================
@@ -74,6 +76,46 @@ const ARRIVAL_DISTANCE: f64 = 1_000.0;
 
 /// Arrival velocity threshold in m/s (10 m/s)
 const ARRIVAL_VELOCITY: f64 = 10.0;
+
+// Missile constants
+/// Maximum range for missile firing (50 km)
+const MISSILE_RANGE: f64 = 50_000.0;
+
+/// Missile acceleration in m/s² (~5G)
+const MISSILE_ACCELERATION: f64 = 50.0;
+
+/// Missile maximum speed in m/s (100 km/s)
+const MISSILE_MAX_SPEED: f64 = 100_000.0;
+
+/// Cooldown between missile shots in seconds
+const MISSILE_COOLDOWN: f64 = 5.0;
+
+/// Number of missiles per salvo before reload
+const MISSILE_SALVO_SIZE: u32 = 5;
+
+/// Reload time after salvo exhausted in seconds
+const MISSILE_RELOAD_TIME: f64 = 20.0;
+
+/// Missile collider length in meters
+const MISSILE_COLLIDER_LENGTH: f64 = 5.0;
+
+/// Missile collider radius in meters (1m diameter)
+const MISSILE_COLLIDER_RADIUS: f64 = 0.5;
+
+/// Missile physical size in meters
+const MISSILE_PHYSICAL_SIZE: f32 = 5.0;
+
+/// Missile target screen pixels (length)
+const MISSILE_TARGET_PIXELS: f32 = 6.0;
+
+/// Time before missile arms (ignores collisions) in seconds
+const MISSILE_ARM_TIME: f64 = 0.5;
+
+/// Spawn offset from ship center (clears 50m collider)
+const MISSILE_SPAWN_OFFSET: f64 = 60.0;
+
+/// Initial missile velocity on launch (m/s)
+const MISSILE_INITIAL_SPEED: f64 = 100.0;
 
 // ============================================================================
 // Components
@@ -139,6 +181,58 @@ impl Default for ShipStats {
         }
     }
 }
+
+/// Attack target for a ship - fires missiles automatically when in range.
+#[derive(Component)]
+pub struct AttackTarget {
+    pub target: Entity,
+}
+
+/// Tracks missile firing state for a ship.
+#[derive(Component)]
+pub struct MissileState {
+    /// Time until next shot (counts down)
+    pub cooldown_timer: f64,
+    /// Missiles fired in current salvo
+    pub salvo_count: u32,
+    /// True during reload period after salvo exhausted
+    pub reloading: bool,
+}
+
+impl Default for MissileState {
+    fn default() -> Self {
+        Self {
+            cooldown_timer: 0.0,
+            salvo_count: 0,
+            reloading: false,
+        }
+    }
+}
+
+/// Missile entity - tracks toward target and kills on collision.
+#[derive(Component)]
+pub struct Missile {
+    /// Target to track. None if target was destroyed (missile drifts).
+    pub target: Option<Entity>,
+    /// Ship that fired this missile (never collide with it)
+    pub owner: Entity,
+    /// Simulation time when missile was spawned (for arming check)
+    pub spawn_time: f64,
+}
+
+/// Marker for missile mesh (child of Missile entity).
+#[derive(Component)]
+pub struct MissileMesh;
+
+/// Marks an entity for despawn at a specific simulation time.
+/// Generic component - can be used for missiles, debris, effects, etc.
+#[derive(Component)]
+pub struct DespawnAt(pub f64);
+
+/// Marker for target ring mesh around a targeted enemy.
+/// One ring per targeted enemy, not per attacker.
+#[derive(Component)]
+pub struct TargetRing;
 
 // ============================================================================
 // Resources
@@ -354,6 +448,7 @@ fn spawn_fleet_ships(
                         Collider::sphere(50.0), // 50m radius collider
                         LinearVelocity::default(),
                         SweptCcd::default(), // Prevent tunneling at high speeds
+                        CollisionEventsEnabled, // Enable collision events for missiles
                         // Movement stats
                         ShipStats::default(),
                         ChildOf(arena),
@@ -478,6 +573,90 @@ fn create_ship_triangle_mesh() -> Mesh {
     ))
 }
 
+fn create_target_ring_mesh(segments: u32) -> Mesh {
+    // Create a ring (circle outline) mesh
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+
+    let inner_radius = 0.8;
+    let outer_radius = 1.0;
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for i in 0..segments {
+        let angle1 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let angle2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+
+        let (sin1, cos1) = angle1.sin_cos();
+        let (sin2, cos2) = angle2.sin_cos();
+
+        // Inner and outer points for both angles
+        let inner1 = [cos1 * inner_radius, sin1 * inner_radius, 0.0];
+        let outer1 = [cos1 * outer_radius, sin1 * outer_radius, 0.0];
+        let inner2 = [cos2 * inner_radius, sin2 * inner_radius, 0.0];
+        let outer2 = [cos2 * outer_radius, sin2 * outer_radius, 0.0];
+
+        let base_idx = positions.len() as u32;
+
+        positions.extend([inner1, outer1, inner2, outer2]);
+        normals.extend([
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ]);
+
+        // Two triangles for the quad
+        indices.extend([
+            base_idx,
+            base_idx + 1,
+            base_idx + 2,
+            base_idx + 1,
+            base_idx + 3,
+            base_idx + 2,
+        ]);
+    }
+
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn create_missile_mesh() -> Mesh {
+    // Simple elongated quad for missile (5m x 1m visual, will be scaled)
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+
+    let half_length = 0.5;
+    let half_width = 0.1;
+
+    let positions: Vec<[f32; 3]> = vec![
+        [-half_length, -half_width, 0.0],
+        [half_length, -half_width, 0.0],
+        [half_length, half_width, 0.0],
+        [-half_length, half_width, 0.0],
+    ];
+    let normals: Vec<[f32; 3]> = vec![
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
+
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 fn create_move_marker_mesh() -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -547,11 +726,31 @@ pub fn update_ship_mesh_scale(
     }
 }
 
+/// Computes missile display size - similar to ships but smaller target pixels.
+/// Returns display_size (world units).
+fn compute_missile_display(cam_scale: f32) -> f32 {
+    // Target ~6 pixels on screen when zoomed out
+    let screen_size = MISSILE_TARGET_PIXELS * cam_scale;
+    // Never smaller than physical size
+    screen_size.max(MISSILE_PHYSICAL_SIZE)
+}
+
+/// Updates missile mesh scale based on camera zoom.
+pub fn update_missile_mesh_scale(
+    cam_scale: Res<CameraScale>,
+    mut meshes: Query<&mut Transform, With<MissileMesh>>,
+) {
+    let display_size = compute_missile_display(cam_scale.0);
+
+    for mut transform in &mut meshes {
+        transform.scale = Vec3::splat(display_size);
+    }
+}
+
 /// Renders VisualShips as triangles during tactical combat.
 pub fn render_visual_ships(
     combat: Res<CombatState>,
     visual_ships: Query<(&VisualShip, &GlobalTransform, &Transform, Option<&Selected>)>,
-    camera_query: Query<&GlobalTransform, With<Camera3d>>,
     cam_scale: Res<CameraScale>,
     mut painter: ShapePainter,
 ) {
@@ -607,6 +806,343 @@ pub fn render_visual_ships(
             painter.thickness = size * 0.1;
             painter.circle(size * 0.8);
             painter.hollow = false;
+        }
+    }
+}
+
+/// Applies attack target commands to ships.
+pub fn apply_attack_target(
+    mut commands: Commands,
+    mut events: MessageReader<TacticalCommand>,
+    ships: Query<Entity, With<VisualShip>>,
+) {
+    for event in events.read() {
+        match event {
+            TacticalCommand::AttackTarget { ships: ship_list, target } => {
+                for &ship in ship_list {
+                    if ships.contains(ship) {
+                        commands.entity(ship).insert(AttackTarget { target: *target });
+                        // Add MissileState only if not present (preserve cooldown state)
+                        commands.entity(ship).insert_if_new(MissileState::default());
+                    }
+                }
+            }
+            TacticalCommand::ClearAttackTarget { ships: ship_list } => {
+                for &ship in ship_list {
+                    if ships.contains(ship) {
+                        commands.entity(ship).remove::<AttackTarget>();
+                    }
+                }
+            }
+            _ => {} // Other commands handled elsewhere
+        }
+    }
+}
+
+/// Handles missile firing for ships with attack targets.
+/// Manages cooldowns, salvos, and spawns missile entities.
+pub fn update_missile_firing(
+    mut commands: Commands,
+    time: Res<Time>,
+    sim_time: Res<SimulationTime>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    arena_query: Query<(Entity, &Grid), With<TacticalArena>>,
+    mut ships: Query<
+        (
+            Entity,
+            &AttackTarget,
+            &mut MissileState,
+            &VisualShip,
+            &Transform,
+            &CellCoord,
+        ),
+        With<VisualShip>,
+    >,
+    targets: Query<(&Transform, &CellCoord), With<VisualShip>>,
+    mut missile_mesh: Local<Option<Handle<Mesh>>>,
+    mut missile_material: Local<Option<Handle<StandardMaterial>>>,
+) {
+    let dt = time.delta_secs_f64() * sim_time.time_scale;
+    if dt <= 0.0 {
+        return;
+    }
+
+    let Ok((arena_entity, arena_grid)) = arena_query.single() else {
+        return;
+    };
+
+    // Lazily create missile mesh and material
+    let mesh_handle = missile_mesh.get_or_insert_with(|| meshes.add(create_missile_mesh()));
+    let material_handle = missile_material.get_or_insert_with(|| {
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 1.0, 0.2), // Yellow
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })
+    });
+
+    for (ship_entity, attack_target, mut missile_state, visual_ship, transform, cell) in &mut ships
+    {
+        // Update cooldown timer
+        if missile_state.cooldown_timer > 0.0 {
+            missile_state.cooldown_timer -= dt;
+        }
+
+        // Handle reload completion
+        if missile_state.reloading && missile_state.cooldown_timer <= 0.0 {
+            missile_state.reloading = false;
+            missile_state.salvo_count = 0;
+            info!("Ship {:?} reloaded, ready to fire", ship_entity);
+        }
+
+        // Skip if still on cooldown or reloading
+        if missile_state.cooldown_timer > 0.0 || missile_state.reloading {
+            continue;
+        }
+
+        // Get target position
+        let Ok((target_transform, target_cell)) = targets.get(attack_target.target) else {
+            continue; // Target doesn't exist
+        };
+
+        // Compute distance to target
+        let ship_pos = arena_grid.grid_position_double(cell, transform);
+        let target_pos = arena_grid.grid_position_double(target_cell, target_transform);
+        let distance = (target_pos - ship_pos).length();
+
+        // Check if in range
+        if distance > MISSILE_RANGE {
+            continue;
+        }
+
+        // Fire missile!
+        info!(
+            "Ship {:?} firing missile at {:?} (distance: {:.1} km)",
+            ship_entity,
+            attack_target.target,
+            distance / 1000.0
+        );
+
+        // Calculate direction to target
+        let to_target = target_pos - ship_pos;
+        let direction = to_target.normalize();
+
+        // Spawn missile offset from ship (clears collider) with initial velocity
+        let spawn_pos = ship_pos + direction * MISSILE_SPAWN_OFFSET;
+        let initial_velocity = direction * MISSILE_INITIAL_SPEED;
+
+        let (leaf, missile_cell, missile_transform) = GridLeaf::at_position(spawn_pos, arena_grid);
+
+        let missile_entity = commands
+            .spawn((
+                Missile {
+                    target: Some(attack_target.target),
+                    owner: ship_entity,
+                    spawn_time: sim_time.sim_time,
+                },
+                leaf,
+                missile_cell,
+                missile_transform,
+                Visibility::default(),
+                // Physics
+                RigidBody::Dynamic,
+                Collider::capsule(MISSILE_COLLIDER_RADIUS, MISSILE_COLLIDER_LENGTH),
+                LinearVelocity(initial_velocity),
+                SweptCcd::default(),
+                CollisionEventsEnabled, // Enable collision events
+                ChildOf(arena_entity),
+            ))
+            .id();
+
+        // Spawn missile mesh as child
+        commands.spawn((
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(material_handle.clone()),
+            MissileMesh,
+            Transform::from_scale(Vec3::splat(MISSILE_PHYSICAL_SIZE)),
+            ChildOf(missile_entity),
+        ));
+
+        // Update missile state
+        missile_state.cooldown_timer = MISSILE_COOLDOWN;
+        missile_state.salvo_count += 1;
+
+        // Check if salvo exhausted
+        if missile_state.salvo_count >= MISSILE_SALVO_SIZE {
+            missile_state.reloading = true;
+            missile_state.cooldown_timer = MISSILE_RELOAD_TIME;
+            info!(
+                "Ship {:?} salvo exhausted, reloading for {:.0}s",
+                ship_entity, MISSILE_RELOAD_TIME
+            );
+        }
+    }
+}
+
+/// Updates missile guidance - accelerates toward target.
+/// Marks missiles for delayed despawn when their target is destroyed.
+pub fn update_missile_guidance(
+    mut commands: Commands,
+    time: Res<Time>,
+    sim_time: Res<SimulationTime>,
+    arena_query: Query<&Grid, With<TacticalArena>>,
+    mut missiles: Query<
+        (Entity, &mut Missile, &mut LinearVelocity, &Transform, &CellCoord),
+        Without<VisualShip>,
+    >,
+    targets: Query<(&Transform, &CellCoord), With<VisualShip>>,
+) {
+    let dt = time.delta_secs_f64() * sim_time.time_scale;
+    if dt <= 0.0 {
+        return;
+    }
+
+    let Ok(arena_grid) = arena_query.single() else {
+        return;
+    };
+
+    for (entity, mut missile, mut velocity, transform, cell) in &mut missiles {
+        // Skip missiles with no target (drifting)
+        let Some(target) = missile.target else {
+            continue;
+        };
+
+        // Check if target still exists
+        let Ok((target_transform, target_cell)) = targets.get(target) else {
+            // Target is gone - clear target and mark for despawn in 1 hour
+            missile.target = None;
+            commands.entity(entity).insert(DespawnAt(sim_time.sim_time + 3600.0));
+            continue;
+        };
+
+        // Compute direction to target
+        let missile_pos = arena_grid.grid_position_double(cell, transform);
+        let target_pos = arena_grid.grid_position_double(target_cell, target_transform);
+        let to_target = target_pos - missile_pos;
+        let distance = to_target.length();
+
+        if distance < 1.0 {
+            // Very close, don't divide by zero
+            continue;
+        }
+
+        let direction = to_target / distance;
+
+        // Apply acceleration toward target
+        velocity.0 += direction * MISSILE_ACCELERATION * dt;
+
+        // Clamp to max speed
+        let speed = velocity.0.length();
+        if speed > MISSILE_MAX_SPEED {
+            velocity.0 = velocity.0.normalize() * MISSILE_MAX_SPEED;
+        }
+    }
+}
+
+/// Handles missile collisions - destroys both missile and target on impact.
+/// Uses CollisionStart events (requires CollisionEventsEnabled on entities).
+/// Missiles ignore collisions until armed (MISSILE_ARM_TIME after spawn).
+pub fn handle_missile_collisions(
+    mut commands: Commands,
+    mut collision_events: MessageReader<CollisionStart>,
+    sim_time: Res<SimulationTime>,
+    missiles: Query<(Entity, &Missile)>,
+    ships: Query<(Entity, &VisualShip)>,
+) {
+    // Track entities to despawn (avoid double-despawn)
+    let mut to_despawn: HashSet<Entity> = HashSet::new();
+
+    for CollisionStart { collider1, collider2, .. } in collision_events.read() {
+        let entity1 = *collider1;
+        let entity2 = *collider2;
+
+        // Check if either entity is a missile
+        let (missile_entity, missile, other_entity) = if let Ok((e, m)) = missiles.get(entity1) {
+            (e, m, entity2)
+        } else if let Ok((e, m)) = missiles.get(entity2) {
+            (e, m, entity1)
+        } else {
+            continue; // Neither is a missile
+        };
+
+        // Skip if missile not yet armed
+        let age = sim_time.sim_time - missile.spawn_time;
+        if age < MISSILE_ARM_TIME {
+            continue;
+        }
+
+        // Warn if hitting own ship (shouldn't happen with offset spawn)
+        if other_entity == missile.owner {
+            warn!(
+                "Missile {:?} hit its own ship {:?} after {:.3}s - spawn offset may be too small",
+                missile_entity, other_entity, age
+            );
+        }
+
+        // Skip if already marked for despawn
+        if to_despawn.contains(&missile_entity) || to_despawn.contains(&other_entity) {
+            continue;
+        }
+
+        // Check what we hit
+        if let Ok((ship_entity, visual_ship)) = ships.get(other_entity) {
+            // Hit a ship!
+            info!(
+                "Missile {:?} hit ship {:?} (faction: {:?})",
+                missile_entity, ship_entity, visual_ship.faction
+            );
+
+            // Mark both for despawn
+            to_despawn.insert(missile_entity);
+            to_despawn.insert(ship_entity);
+
+            // Also despawn the logical ship (permanent death)
+            to_despawn.insert(visual_ship.logical);
+        } else if missiles.contains(other_entity) {
+            // Hit another missile
+            info!(
+                "Missile {:?} collided with missile {:?}",
+                missile_entity, other_entity
+            );
+            to_despawn.insert(missile_entity);
+            to_despawn.insert(other_entity);
+        }
+    }
+
+    // Despawn all marked entities
+    for entity in to_despawn {
+        commands.entity(entity).despawn();
+    }
+}
+
+/// Despawns entities marked with DespawnAt when simulation time passes their deadline.
+pub fn process_despawn_at(
+    mut commands: Commands,
+    sim_time: Res<SimulationTime>,
+    query: Query<(Entity, &DespawnAt)>,
+) {
+    for (entity, despawn_at) in &query {
+        if sim_time.sim_time >= despawn_at.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Clears AttackTarget from ships whose target no longer exists.
+pub fn clear_dead_targets(
+    mut commands: Commands,
+    ships_with_targets: Query<(Entity, &AttackTarget), With<VisualShip>>,
+    all_ships: Query<Entity, With<VisualShip>>,
+) {
+    for (ship_entity, attack_target) in &ships_with_targets {
+        if !all_ships.contains(attack_target.target) {
+            info!(
+                "Ship {:?}'s target {:?} no longer exists - clearing",
+                ship_entity, attack_target.target
+            );
+            commands.entity(ship_entity).remove::<AttackTarget>();
         }
     }
 }
@@ -795,6 +1331,202 @@ pub fn render_move_markers(
             Transform::from_translation(pos).with_scale(Vec3::splat(display_size)),
             ChildOf(arena_entity),
         ));
+    }
+}
+
+/// Syncs target ring meshes around targeted enemies.
+/// One ring per targeted enemy. Color: red (in range) or orange (out of range).
+/// Brightness: full if any attacker selected, faded otherwise.
+pub fn sync_target_rings(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    combat: Res<CombatState>,
+    arena_query: Query<(Entity, &Grid), With<TacticalArena>>,
+    attackers: Query<(Entity, &AttackTarget, &Transform, &CellCoord, Option<&Selected>), With<VisualShip>>,
+    targets: Query<(Entity, &Transform, &CellCoord), With<VisualShip>>,
+    existing_rings: Query<(Entity, &TargetRing, &ChildOf)>,
+    cam_scale: Res<CameraScale>,
+    mut ring_mesh: Local<Option<Handle<Mesh>>>,
+    mut ring_mat_red_bright: Local<Option<Handle<StandardMaterial>>>,
+    mut ring_mat_red_faded: Local<Option<Handle<StandardMaterial>>>,
+    mut ring_mat_orange_bright: Local<Option<Handle<StandardMaterial>>>,
+    mut ring_mat_orange_faded: Local<Option<Handle<StandardMaterial>>>,
+) {
+    if !combat.active {
+        for (entity, _, _) in &existing_rings {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+
+    let Ok((_arena_entity, arena_grid)) = arena_query.single() else {
+        return;
+    };
+
+    // Lazily create mesh and materials
+    let mesh_handle = ring_mesh.get_or_insert_with(|| meshes.add(create_target_ring_mesh(32)));
+    let mat_red_bright = ring_mat_red_bright.get_or_insert_with(|| {
+        materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.2, 0.2, 0.9),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })
+    });
+    let mat_red_faded = ring_mat_red_faded.get_or_insert_with(|| {
+        materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.2, 0.2, 0.3),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })
+    });
+    let mat_orange_bright = ring_mat_orange_bright.get_or_insert_with(|| {
+        materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.6, 0.1, 0.9),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })
+    });
+    let mat_orange_faded = ring_mat_orange_faded.get_or_insert_with(|| {
+        materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.6, 0.1, 0.3),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })
+    });
+
+    // Collect info about targeted enemies
+    // Map: target_entity -> (min_distance, any_attacker_selected)
+    let mut target_info: HashMap<Entity, (f64, bool)> = HashMap::new();
+
+    for (_attacker_entity, attack_target, attacker_transform, attacker_cell, selected) in &attackers {
+        let target_entity = attack_target.target;
+
+        // Get target position to compute distance
+        let Ok((_, target_transform, target_cell)) = targets.get(target_entity) else {
+            continue;
+        };
+
+        let attacker_pos = arena_grid.grid_position_double(attacker_cell, attacker_transform);
+        let target_pos = arena_grid.grid_position_double(target_cell, target_transform);
+        let distance = (target_pos - attacker_pos).length();
+
+        let is_selected = selected.is_some();
+
+        target_info
+            .entry(target_entity)
+            .and_modify(|(min_dist, any_selected)| {
+                *min_dist = min_dist.min(distance);
+                *any_selected = *any_selected || is_selected;
+            })
+            .or_insert((distance, is_selected));
+    }
+
+    // Compute ring scale based on camera zoom
+    let (display_size, _) = compute_ship_display(cam_scale.0);
+    let ring_scale = display_size * 1.5;
+
+    // Helper to select material based on range and selection state
+    let select_material = |in_range: bool, any_selected: bool| match (in_range, any_selected) {
+        (true, true) => mat_red_bright.clone(),
+        (true, false) => mat_red_faded.clone(),
+        (false, true) => mat_orange_bright.clone(),
+        (false, false) => mat_orange_faded.clone(),
+    };
+
+    // Track which targets have rings
+    let mut targets_with_rings: HashSet<Entity> = HashSet::new();
+
+    // Update existing rings or mark for removal
+    for (ring_entity, _ring, child_of) in &existing_rings {
+        let target_entity = child_of.0; // Ring is child of target
+
+        if let Some(&(min_distance, any_selected)) = target_info.get(&target_entity) {
+            targets_with_rings.insert(target_entity);
+
+            // Update material and scale
+            let in_range = min_distance <= MISSILE_RANGE;
+            let material = select_material(in_range, any_selected);
+
+            commands
+                .entity(ring_entity)
+                .insert(MeshMaterial3d(material))
+                .insert(Transform::from_translation(Vec3::new(0.0, 0.0, 0.05))
+                    .with_scale(Vec3::splat(ring_scale)));
+        } else {
+            // Target no longer being attacked - remove ring
+            commands.entity(ring_entity).despawn();
+        }
+    }
+
+    // Spawn rings for newly targeted enemies
+
+    for (target_entity, &(min_distance, any_selected)) in &target_info {
+        if targets_with_rings.contains(target_entity) {
+            continue;
+        }
+
+        // Determine initial material
+        let in_range = min_distance <= MISSILE_RANGE;
+        let material = select_material(in_range, any_selected);
+
+        commands.spawn((
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(material),
+            TargetRing,
+            Transform::from_translation(Vec3::new(0.0, 0.0, 0.05))
+                .with_scale(Vec3::splat(ring_scale)),
+            ChildOf(*target_entity),
+        ));
+    }
+}
+
+/// Renders targeting lines from selected ships to their targets.
+pub fn render_targeting_lines(
+    combat: Res<CombatState>,
+    arena_query: Query<&Grid, With<TacticalArena>>,
+    attackers: Query<(&AttackTarget, &Transform, &CellCoord), (With<VisualShip>, With<Selected>)>,
+    targets: Query<(&Transform, &CellCoord), With<VisualShip>>,
+    mut painter: ShapePainter,
+) {
+    if !combat.active {
+        return;
+    }
+
+    let Ok(arena_grid) = arena_query.single() else {
+        return;
+    };
+
+    for (attack_target, attacker_transform, attacker_cell) in &attackers {
+        let Ok((target_transform, target_cell)) = targets.get(attack_target.target) else {
+            continue;
+        };
+
+        let attacker_pos = arena_grid.grid_position_double(attacker_cell, attacker_transform);
+        let target_pos = arena_grid.grid_position_double(target_cell, target_transform);
+        let distance = (target_pos - attacker_pos).length();
+
+        // Color based on range
+        let color = if distance <= MISSILE_RANGE {
+            Color::srgba(1.0, 0.2, 0.2, 0.5) // Red, semi-transparent
+        } else {
+            Color::srgba(1.0, 0.6, 0.1, 0.5) // Orange, semi-transparent
+        };
+
+        painter.set_color(color);
+        painter.thickness = 2.0;
+        painter.line(
+            Vec3::new(attacker_pos.x as f32, attacker_pos.y as f32, 0.02),
+            Vec3::new(target_pos.x as f32, target_pos.y as f32, 0.02),
+        );
     }
 }
 

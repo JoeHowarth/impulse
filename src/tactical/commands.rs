@@ -16,6 +16,10 @@ pub enum TacticalCommand {
         ships: Vec<Entity>,
         destination: DVec3,
     },
+    /// Set attack target for ships (auto-fire when in range)
+    AttackTarget { ships: Vec<Entity>, target: Entity },
+    /// Clear attack target from ships
+    ClearAttackTarget { ships: Vec<Entity> },
     /// Select ships (replace current selection)
     SelectShips(Vec<Entity>),
     /// Add ships to current selection
