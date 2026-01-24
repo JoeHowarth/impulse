@@ -4,10 +4,12 @@ use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 
 use crate::ComputedBody;
-use crate::orbital_data::{Body, MU_SUN};
+use crate::model::{
+    Body, Faction, Fleet, FleetLocation, FlightPlan, LogicalShip, MU_SUN, Selected,
+    TransferSolution, VictoryState, leg_base_day, leg_source, propagate_kepler_full, ship_count,
+};
 use crate::phys_vec_to_vec3;
 use crate::simulation::SimulationTime;
-use crate::transfer::{TransferSolution, propagate_kepler_full};
 use crate::transfer_lut::TransferLut;
 
 // ============================================================================
@@ -335,14 +337,14 @@ pub fn update_transfer_panel(
     selected_query: Query<
         (
             Entity,
-            &crate::ship::Fleet,
-            &crate::ship::FleetLocation,
-            &crate::ship::FlightPlan,
+            &Fleet,
+            &FleetLocation,
+            &FlightPlan,
         ),
-        With<crate::ship::Selected>,
+        With<Selected>,
     >,
     children_query: Query<&Children>,
-    logical_ships: Query<&crate::ship::LogicalShip>,
+    logical_ships: Query<&LogicalShip>,
     sim_time: Res<SimulationTime>,
     lut: Res<TransferLut>,
     mut fleet_status_query: Query<&mut Text, (With<FleetStatusText>, Without<FlightPlanText>)>,
@@ -360,15 +362,15 @@ pub fn update_transfer_panel(
     };
 
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-    let ship_count = crate::ship::ship_count(fleet_entity, &children_query, &logical_ships);
+    let ship_count = ship_count(fleet_entity, &children_query, &logical_ships);
 
     // Build header: fleet name, ship count, location, delta-v
     let location_name = match location {
-        crate::ship::FleetLocation::AtBody(body) => bodies
+        FleetLocation::AtBody(body) => bodies
             .get(*body)
             .map(|b| b.name.clone())
             .unwrap_or_else(|_| "???".into()),
-        crate::ship::FleetLocation::InTransit {
+        FleetLocation::InTransit {
             source: _,
             target,
             solution,
@@ -405,7 +407,7 @@ pub fn update_transfer_panel(
                     .get(leg.target)
                     .map(|b| b.name.as_str())
                     .unwrap_or("???");
-                let source = crate::ship::leg_source(location, plan, i);
+                let source = leg_source(location, plan, i);
 
                 // Look up solution to get delta-v
                 let dv = if let (Ok(source_body), Ok(target_body)) =
@@ -722,11 +724,11 @@ pub fn handle_popup_spawn(
     player_query: Query<
         (
             Entity,
-            &crate::ship::Fleet,
-            &crate::ship::FleetLocation,
-            &crate::ship::FlightPlan,
+            &Fleet,
+            &FleetLocation,
+            &FlightPlan,
         ),
-        With<crate::ship::Selected>,
+        With<Selected>,
     >,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
@@ -748,8 +750,8 @@ pub fn handle_popup_spawn(
     // Determine source entity: where we'd depart from for next leg
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
     let next_leg_index = plan.legs.len();
-    let source_entity = crate::ship::leg_source(location, plan, next_leg_index);
-    let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
+    let source_entity = leg_source(location, plan, next_leg_index);
+    let base_day = leg_base_day(location, plan, next_leg_index, current_day);
 
     // Get source body orbital elements
     let Ok((source_body, _, _)) = bodies.get(source_entity) else {
@@ -861,11 +863,11 @@ pub fn update_popup_options(
     player_query: Query<
         (
             Entity,
-            &crate::ship::Fleet,
-            &crate::ship::FleetLocation,
-            &crate::ship::FlightPlan,
+            &Fleet,
+            &FleetLocation,
+            &FlightPlan,
         ),
-        With<crate::ship::Selected>,
+        With<Selected>,
     >,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
@@ -885,8 +887,8 @@ pub fn update_popup_options(
     // Determine source entity and base day using helpers
     let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
     let next_leg_index = plan.legs.len();
-    let source_entity = crate::ship::leg_source(location, plan, next_leg_index);
-    let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
+    let source_entity = leg_source(location, plan, next_leg_index);
+    let base_day = leg_base_day(location, plan, next_leg_index, current_day);
 
     // Check if base day has changed
     if base_day == popup.options_computed_day {
@@ -1010,10 +1012,10 @@ pub fn handle_option_selection(
     player_query: Query<
         (
             Entity,
-            &crate::ship::FleetLocation,
-            &crate::ship::FlightPlan,
+            &FleetLocation,
+            &FlightPlan,
         ),
-        With<crate::ship::Selected>,
+        With<Selected>,
     >,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
@@ -1043,7 +1045,7 @@ pub fn handle_option_selection(
 
         let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
         let next_leg_index = plan.legs.len();
-        let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
+        let base_day = leg_base_day(location, plan, next_leg_index, current_day);
         let departure_day = base_day + option.departure_day;
 
         // Post PlanTransfer event
@@ -1101,12 +1103,12 @@ pub fn update_fleet_tabs(
     mut commands: Commands,
     fleets: Query<(
         Entity,
-        &crate::ship::Fleet,
-        Option<&crate::ship::Selected>,
-        &crate::ship::Faction,
+        &Fleet,
+        Option<&Selected>,
+        &Faction,
     )>,
     children_query: Query<&Children>,
-    logical_ships: Query<&crate::ship::LogicalShip>,
+    logical_ships: Query<&LogicalShip>,
     container_query: Query<Entity, With<FleetTabsContainer>>,
     existing_tabs: Query<(Entity, &FleetTab)>,
 ) {
@@ -1117,7 +1119,7 @@ pub fn update_fleet_tabs(
     // Collect player fleet info sorted for consistent ordering
     let mut fleet_info: Vec<_> = fleets
         .iter()
-        .filter(|(_, _, _, faction)| **faction == crate::ship::Faction::Player)
+        .filter(|(_, _, _, faction)| **faction == Faction::Player)
         .collect();
     fleet_info.sort_by(|a, b| a.1.name.cmp(&b.1.name));
 
@@ -1143,7 +1145,7 @@ pub fn update_fleet_tabs(
             let fleet_entity_copy = *fleet_entity;
             let fleet_name = fleet.name.clone();
             let ship_count =
-                crate::ship::ship_count(*fleet_entity, &children_query, &logical_ships);
+                ship_count(*fleet_entity, &children_query, &logical_ships);
             let delta_v = fleet.delta_v_remaining;
 
             commands.entity(container).with_children(|parent| {
@@ -1269,9 +1271,9 @@ pub fn handle_fleet_number_keys(
     mut key_state: ResMut<FleetKeyState>,
     fleets: Query<(
         Entity,
-        &crate::ship::Fleet,
-        &crate::ship::FleetLocation,
-        &crate::ship::Faction,
+        &Fleet,
+        &FleetLocation,
+        &Faction,
     )>,
     bodies: Query<&GlobalTransform, With<Body>>,
     sim_time: Res<SimulationTime>,
@@ -1296,7 +1298,7 @@ pub fn handle_fleet_number_keys(
             // Get player fleets sorted by name for consistent ordering
             let mut fleet_list: Vec<_> = fleets
                 .iter()
-                .filter(|(_, _, _, faction)| **faction == crate::ship::Faction::Player)
+                .filter(|(_, _, _, faction)| **faction == Faction::Player)
                 .collect();
             fleet_list.sort_by(|a, b| a.1.name.cmp(&b.1.name));
 
@@ -1311,11 +1313,11 @@ pub fn handle_fleet_number_keys(
 
                     // Get fleet position
                     let fleet_pos = match location {
-                        crate::ship::FleetLocation::AtBody(body_entity) => bodies
+                        FleetLocation::AtBody(body_entity) => bodies
                             .get(*body_entity)
                             .map(|gt| gt.translation())
                             .unwrap_or(Vec3::ZERO),
-                        crate::ship::FleetLocation::InTransit {
+                        FleetLocation::InTransit {
                             solution,
                             departure_time,
                             ..
@@ -1373,7 +1375,7 @@ pub struct VictoryOverlay;
 /// Spawns or updates the victory overlay when victory is achieved.
 pub fn update_victory_overlay(
     mut commands: Commands,
-    victory: Res<crate::ship::VictoryState>,
+    victory: Res<VictoryState>,
     existing: Query<Entity, With<VictoryOverlay>>,
 ) {
     // Only show if victory achieved and overlay doesn't exist

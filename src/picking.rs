@@ -8,7 +8,7 @@ use bevy::math::{DVec3, Isometry3d};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::ship::{CombatState, Faction, Selected};
+use crate::model::{CombatState, Faction, Selected};
 
 use crate::tactical::{MoveOrder, TacticalArena, VisualShip};
 

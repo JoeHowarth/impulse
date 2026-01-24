@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ComputedBody;
 use crate::camera::{CameraScale, CameraTarget};
-use crate::ship::{CombatState, Faction, LogicalShip, Selected, ship_count};
+use crate::model::{CombatState, Faction, Fleet, LogicalShip, Selected, ship_count};
 use crate::simulation::SimulationTime;
 use crate::spatial::{BigSpaceHierarchy, GridLeaf, GridNode, TrackedWorldPosition};
 
@@ -868,8 +868,8 @@ pub fn teardown_tactical_arena(
 /// Cleans up empty fleets after combat (fleets with no remaining LogicalShips).
 pub fn cleanup_empty_fleets(
     mut commands: Commands,
-    fleets: Query<(Entity, &Children), With<crate::ship::Fleet>>,
-    ships: Query<&crate::ship::LogicalShip>,
+    fleets: Query<(Entity, &Children), With<Fleet>>,
+    ships: Query<&LogicalShip>,
 ) {
     for (fleet_entity, children) in &fleets {
         let has_ships = children.iter().any(|child| ships.contains(child));

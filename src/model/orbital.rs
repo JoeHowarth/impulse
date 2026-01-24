@@ -1,3 +1,8 @@
+//! Orbital mechanics types and pure computations.
+//!
+//! This module contains celestial body definitions and orbital propagation functions.
+//! No Bevy systems - just types and pure math.
+
 use astrora_core::{
     PoliastroResult,
     core::{
@@ -5,7 +10,6 @@ use astrora_core::{
         elements::OrbitalElements,
     },
 };
-// Note: In newer Bevy versions, HashMap is usually in bevy::utils::HashMap
 use bevy::{platform::collections::HashMap, prelude::*};
 use std::f64::consts::PI;
 

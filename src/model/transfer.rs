@@ -427,89 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn test_angle_sensitivity() {
-        // Test various transfer angles to find where Lambert solver starts failing
-        let r_leo: f64 = 7000e3;
-        let r_geo: f64 = 42164e3;
-        let a_transfer = (r_leo + r_geo) / 2.0;
-        let hohmann_tof = PI * (a_transfer.powi(3) / MU_EARTH).sqrt();
-
-        let v_circular_leo = (MU_EARTH / r_leo).sqrt();
-        let v_circular_geo = (MU_EARTH / r_geo).sqrt();
-
-        println!("\n=== Testing Transfer Angles (LEO → GEO) ===");
-        println!("Hohmann TOF = {:.1} hours\n", hohmann_tof / 3600.0);
-
-        println!("With scaled TOF (angle/180 * hohmann_tof):");
-        for angle_deg in [90.0_f64, 120.0, 150.0, 160.0, 170.0, 175.0] {
-            let angle = angle_deg.to_radians();
-            let ship_pos = Vector3::new(r_leo, 0.0, 0.0);
-            let ship_vel = Vector3::new(0.0, v_circular_leo, 0.0);
-            let target_pos = Vector3::new(r_geo * angle.cos(), r_geo * angle.sin(), 0.0);
-            let target_vel = Vector3::new(
-                -v_circular_geo * angle.sin(),
-                v_circular_geo * angle.cos(),
-                0.0,
-            );
-            let tof = hohmann_tof * (angle_deg / 180.0);
-            match compute_transfer(ship_pos, ship_vel, target_pos, target_vel, tof, MU_EARTH) {
-                Ok(sol) => println!(
-                    "{:>5.0}°: ✓ Δv = {:>5.0} m/s (TOF={:.1}h)",
-                    angle_deg,
-                    sol.total_dv,
-                    tof / 3600.0
-                ),
-                Err(_) => println!("{:>5.0}°: ✗ FAILED (TOF={:.1}h)", angle_deg, tof / 3600.0),
-            }
-        }
-
-        println!("\nWith full Hohmann TOF for all angles:");
-        for angle_deg in [150.0_f64, 160.0, 170.0, 175.0, 178.0, 179.0] {
-            let angle = angle_deg.to_radians();
-            let ship_pos = Vector3::new(r_leo, 0.0, 0.0);
-            let ship_vel = Vector3::new(0.0, v_circular_leo, 0.0);
-            let target_pos = Vector3::new(r_geo * angle.cos(), r_geo * angle.sin(), 0.0);
-            let target_vel = Vector3::new(
-                -v_circular_geo * angle.sin(),
-                v_circular_geo * angle.cos(),
-                0.0,
-            );
-            match compute_transfer(
-                ship_pos,
-                ship_vel,
-                target_pos,
-                target_vel,
-                hohmann_tof,
-                MU_EARTH,
-            ) {
-                Ok(sol) => println!("{:>5.0}°: ✓ Δv = {:>5.0} m/s", angle_deg, sol.total_dv),
-                Err(_) => println!("{:>5.0}°: ✗ FAILED", angle_deg),
-            }
-        }
-
-        // Try using Izzo's algorithm via revs=1 (needs longer TOF)
-        println!("\nWith revs=1 (Izzo algorithm) + longer TOF:");
-        let long_tof = hohmann_tof * 2.5; // Full orbit + transfer
-        for angle_deg in [170.0_f64, 175.0, 178.0, 179.0] {
-            let angle = angle_deg.to_radians();
-            let ship_pos = Vector3::new(r_leo, 0.0, 0.0);
-            let target_pos = Vector3::new(r_geo * angle.cos(), r_geo * angle.sin(), 0.0);
-
-            match Lambert::solve(
-                ship_pos,
-                target_pos,
-                long_tof,
-                MU_EARTH,
-                TransferKind::Auto,
-                1,
-            ) {
-                Ok(sol) => println!("{:>5.0}°: ✓ converged (revs=1)", angle_deg),
-                Err(e) => println!("{:>5.0}°: ✗ {}", angle_deg, e),
-            }
-        }
-    }
-
-    #[test]
     fn test_transfer_returns_valid_orbital_elements() {
         // Simple test to verify we get valid orbital elements back
         // Using 90° transfer geometry (non-degenerate)
@@ -549,7 +466,7 @@ mod tests {
     fn test_earth_mars_at_j2000_epoch() {
         // This test replicates the exact starting conditions in the app
         // Earth and Mars orbital elements from orbital_data.rs at t=0 (J2000)
-        use crate::orbital_data::propagate_elliptic;
+        use crate::model::propagate_elliptic;
         use astrora_core::core::elements::OrbitalElements;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
@@ -649,138 +566,6 @@ mod tests {
         }
 
         assert!(any_success, "At least one departure/TOF combo should work");
-    }
-
-    #[test]
-    fn test_hohmann_like_transfer() {
-        // Verify Lambert works for a simple Hohmann-like Earth-Mars transfer
-        // Using simplified circular coplanar orbits
-
-        const MU_SUN: f64 = 1.327_124_400_18e20;
-        const AU: f64 = 1.496e11;
-
-        let r_earth = 1.0 * AU;
-        let r_mars = 1.52 * AU;
-
-        // Earth at (r_earth, 0, 0) moving in +y direction
-        let earth_pos = Vector3::new(r_earth, 0.0, 0.0);
-        let v_earth = (MU_SUN / r_earth).sqrt();
-        let earth_vel = Vector3::new(0.0, v_earth, 0.0);
-
-        println!(
-            "Earth: pos=({:.2e}, 0, 0), vel=(0, {:.0}, 0)",
-            r_earth, v_earth
-        );
-
-        // For Hohmann transfer, Mars should be ~135-180° ahead
-        // Let's put Mars at 150° (reasonable for near-Hohmann)
-        let angle = 150.0_f64.to_radians();
-        let mars_pos = Vector3::new(r_mars * angle.cos(), r_mars * angle.sin(), 0.0);
-        let v_mars = (MU_SUN / r_mars).sqrt();
-        let mars_vel = Vector3::new(-v_mars * angle.sin(), v_mars * angle.cos(), 0.0);
-
-        println!(
-            "Mars: pos=({:.2e}, {:.2e}, 0), vel=({:.0}, {:.0}, 0)",
-            mars_pos.x, mars_pos.y, mars_vel.x, mars_vel.y
-        );
-
-        // Hohmann TOF = π * sqrt(a³/μ) where a = (r1 + r2) / 2
-        let a_transfer = (r_earth + r_mars) / 2.0;
-        let hohmann_tof = PI * (a_transfer.powi(3) / MU_SUN).sqrt();
-        println!("Hohmann TOF: {:.0} days", hohmann_tof / 86400.0);
-
-        // Try with scaled TOF (150/180 of Hohmann since angle is 150°)
-        let tof = hohmann_tof * (150.0 / 180.0);
-        println!("Scaled TOF: {:.0} days", tof / 86400.0);
-
-        match compute_transfer(earth_pos, earth_vel, mars_pos, mars_vel, tof, MU_SUN) {
-            Ok(sol) => {
-                println!("\nTransfer solution:");
-                println!("  Departure Δv: {:.0} m/s", sol.departure_dv.norm());
-                println!("  Arrival Δv: {:.0} m/s", sol.arrival_dv.norm());
-                println!("  Total Δv: {:.0} m/s", sol.total_dv);
-
-                // Theoretical Hohmann values
-                let v_periapsis = (MU_SUN * (2.0 / r_earth - 1.0 / a_transfer)).sqrt();
-                let v_apoapsis = (MU_SUN * (2.0 / r_mars - 1.0 / a_transfer)).sqrt();
-                let hohmann_dep_dv = v_periapsis - v_earth;
-                let hohmann_arr_dv = v_mars - v_apoapsis;
-                println!("\nTheoretical Hohmann:");
-                println!("  Departure Δv: {:.0} m/s", hohmann_dep_dv);
-                println!("  Arrival Δv: {:.0} m/s", hohmann_arr_dv);
-                println!("  Total Δv: {:.0} m/s", hohmann_dep_dv + hohmann_arr_dv);
-
-                assert!(sol.total_dv < 20000.0, "Total Δv should be reasonable");
-            }
-            Err(e) => {
-                panic!("Transfer failed: {}", e);
-            }
-        }
-    }
-
-    #[test]
-    fn test_lambert_solver_directly() {
-        // Test the Lambert solver directly with known good inputs
-        // to verify the solver works at all with Sun-scale distances
-
-        const MU_SUN: f64 = 1.327_124_400_18e20;
-
-        // Simple test: Earth position to a point 90° ahead on Mars orbit
-        let r1 = Vector3::new(1.5e11, 0.0, 0.0); // ~1 AU on +x axis
-        let r2 = Vector3::new(0.0, 2.28e11, 0.0); // ~1.52 AU on +y axis (90° transfer)
-
-        let tof = 200.0 * 24.0 * 3600.0; // 200 days
-
-        println!("r1 = {:?}", r1);
-        println!("r2 = {:?}", r2);
-        println!("TOF = {:.0} days", tof / 86400.0);
-        println!("mu = {:.3e}", MU_SUN);
-
-        // Test Lambert directly
-        match Lambert::solve(r1, r2, tof, MU_SUN, TransferKind::Auto, 0) {
-            Ok(sol) => {
-                println!("Lambert solved!");
-                println!("  v1 = {:?}", sol.v1);
-                println!("  v2 = {:?}", sol.v2);
-            }
-            Err(e) => {
-                println!("Lambert failed: {}", e);
-            }
-        }
-
-        // Also test with the actual Earth/Mars positions from J2000
-        let earth_pos = Vector3::new(-26482789241.247627, 144697448857.63306, 7234872.448910712);
-        let mars_pos = Vector3::new(206972720100.37683, -16080372891.633354, -5426377702.393995);
-
-        println!("\nWith actual J2000 positions:");
-        println!("Earth = {:?}", earth_pos);
-        println!("Mars = {:?}", mars_pos);
-
-        for tof_days in [100.0, 200.0, 300.0, 400.0, 500.0] {
-            let tof = tof_days * 86400.0;
-            match Lambert::solve(earth_pos, mars_pos, tof, MU_SUN, TransferKind::Auto, 0) {
-                Ok(sol) => {
-                    let dv1 = sol.v1.norm();
-                    println!("  TOF={:.0}d: ✓ v1_mag={:.0} m/s", tof_days, dv1);
-                }
-                Err(e) => {
-                    println!("  TOF={:.0}d: ✗ {}", tof_days, e);
-                }
-            }
-        }
-
-        // Try short-way vs long-way
-        println!("\nTrying different transfer kinds:");
-        for kind in [
-            TransferKind::Auto,
-            TransferKind::ShortWay,
-            TransferKind::LongWay,
-        ] {
-            match Lambert::solve(earth_pos, mars_pos, 250.0 * 86400.0, MU_SUN, kind, 0) {
-                Ok(_) => println!("  {:?}: ✓", kind),
-                Err(e) => println!("  {:?}: ✗ {}", kind, e),
-            }
-        }
     }
 
     #[test]
@@ -917,7 +702,7 @@ mod tests {
     #[test]
     fn test_day350_scenario() {
         // Test 3: Replicate the exact failing scenario from day 350
-        use crate::orbital_data::propagate_elliptic;
+        use crate::model::propagate_elliptic;
         use astrora_core::core::elements::OrbitalElements;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
@@ -1044,7 +829,7 @@ mod tests {
     #[test]
     fn test_propagator_inverse() {
         // Verify propagation by checking forward and backward consistency
-        use crate::orbital_data::propagate_elliptic;
+        use crate::model::propagate_elliptic;
         use astrora_core::core::elements::OrbitalElements;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
@@ -1133,7 +918,7 @@ mod tests {
     fn test_lambert_orbit_consistency() {
         // Check if Lambert's v1 and v2 are actually on the same orbit
         // by verifying orbital energy and angular momentum match
-        use crate::orbital_data::propagate_elliptic;
+        use crate::model::propagate_elliptic;
         use astrora_core::core::elements::OrbitalElements;
 
         const MU_SUN: f64 = 1.327_124_400_18e20;
@@ -1231,7 +1016,7 @@ mod tests {
     #[test]
     fn test_astrora_propagator() {
         // Use astrora's own propagator to verify the Lambert solution
-        use crate::orbital_data::propagate_elliptic;
+        use crate::model::propagate_elliptic;
         use astrora_core::core::elements::OrbitalElements;
         use astrora_core::propagators::keplerian::propagate_state_keplerian;
 

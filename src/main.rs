@@ -24,7 +24,7 @@ use big_space::prelude::*;
 mod app_sets;
 mod app_state;
 mod camera;
-mod orbital_data;
+mod model;
 mod physics;
 mod picking;
 mod plugins;
@@ -32,12 +32,14 @@ mod ship;
 mod simulation;
 mod spatial;
 mod tactical;
-mod transfer;
 mod transfer_lut;
 mod transfer_vis;
 mod ui;
 
-use orbital_data::{Body, PlanetaryElements, propagate_elliptic};
+use model::{
+    Body, CombatState, ComputedFleetPosition, Faction, Fleet, FleetLocation, FlightPlan,
+    LogicalShip, PlanetaryElements, Selected, VictoryState, propagate_elliptic,
+};
 use simulation::SimulationTime;
 
 use crate::app_sets::AppSet;
@@ -56,7 +58,7 @@ use crate::plugins::{
 const ORBIT_SEGMENTS: usize = 10000;
 
 /// Astronomical unit in meters (lazy-loaded from orbital_data)
-const AU: LazyCell<f64> = LazyCell::new(|| orbital_data::AU);
+const AU: LazyCell<f64> = LazyCell::new(|| model::AU);
 
 /// LOD: bodies closer than this screen distance to parent are invisible
 const LOD_MIN_SCREEN_DIST: f32 = 5.0;
@@ -116,8 +118,8 @@ fn main() {
         .insert_resource(SimulationTime::from_start_day(start_day))
         .init_resource::<ui::TransferPopup>()
         .init_resource::<ui::FleetKeyState>()
-        .init_resource::<ship::VictoryState>()
-        .init_resource::<ship::CombatState>()
+        .init_resource::<VictoryState>()
+        .init_resource::<CombatState>()
         .init_resource::<picking::BoxSelection>()
         .init_state::<AppState>()
         .add_systems(
@@ -213,18 +215,18 @@ fn setup(
     if let Some(&venus) = body_entities.get("Venus") {
         commands
             .spawn((
-                ship::Fleet {
+                Fleet {
                     delta_v_remaining: 500_000.0,
                     name: "Alpha".to_string(),
                 },
-                ship::FleetLocation::AtBody(venus),
-                ship::Faction::Player,
-                ship::Selected,
-                ship::FlightPlan::default(),
+                FleetLocation::AtBody(venus),
+                Faction::Player,
+                Selected,
+                FlightPlan::default(),
             ))
             .with_children(|builder| {
                 for _ in 0..10 {
-                    builder.spawn(ship::LogicalShip);
+                    builder.spawn(LogicalShip);
                 }
             });
     }
@@ -233,17 +235,17 @@ fn setup(
     if let Some(&mercury) = body_entities.get("Mercury") {
         commands
             .spawn((
-                ship::Fleet {
+                Fleet {
                     delta_v_remaining: 500_000.0,
                     name: "Mercury Garrison".to_string(),
                 },
-                ship::FleetLocation::AtBody(mercury),
-                ship::Faction::Enemy,
-                ship::FlightPlan::default(),
+                FleetLocation::AtBody(mercury),
+                Faction::Enemy,
+                FlightPlan::default(),
             ))
             .with_children(|builder| {
                 for _ in 0..10 {
-                    builder.spawn(ship::LogicalShip);
+                    builder.spawn(LogicalShip);
                 }
             });
     }
@@ -560,11 +562,11 @@ pub(crate) fn handle_body_click(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     body_query: Query<(Entity, &Body, &ComputedBody, &GlobalTransform)>,
-    fleet_query: Query<(Entity, &ship::Fleet, &ship::FleetLocation, &ship::Faction)>,
-    fleet_positions: Query<(Entity, &ship::ComputedFleetPosition, &ship::Faction)>,
-    selected_query: Query<Entity, With<ship::Selected>>,
+    fleet_query: Query<(Entity, &Fleet, &FleetLocation, &Faction)>,
+    fleet_positions: Query<(Entity, &ComputedFleetPosition, &Faction)>,
+    selected_query: Query<Entity, With<Selected>>,
     mut popup: ResMut<ui::TransferPopup>,
-    combat: Res<ship::CombatState>,
+    combat: Res<CombatState>,
     mut cmd_writer: MessageWriter<ship::StrategicCommand>,
 ) {
     // Skip in tactical mode - picking::handle_tactical_click handles that
@@ -590,7 +592,7 @@ pub(crate) fn handle_body_click(
         // Shift+click: open transfer popup for body
         let selected_fleet = fleet_query
             .iter()
-            .filter(|(_, _, _, faction)| **faction == ship::Faction::Player)
+            .filter(|(_, _, _, faction)| **faction == Faction::Player)
             .find(|(e, _, _, _)| selected_query.get(*e).is_ok());
         let current_entity = selected_fleet.map(|(_, _, loc, _)| loc.effective_body());
 
@@ -635,7 +637,7 @@ pub(crate) fn handle_body_click(
         let mut best_match: Option<(Entity, f32)> = None;
         for (fleet_entity, computed, faction) in fleet_positions.iter() {
             // Only consider player fleets for selection
-            if *faction != ship::Faction::Player {
+            if *faction != Faction::Player {
                 continue;
             }
             let Ok(screen_pos) = camera.world_to_viewport(camera_transform, computed.position)

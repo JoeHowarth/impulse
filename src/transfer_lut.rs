@@ -21,8 +21,7 @@ use bevy::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::orbital_data::{Body, MU_SUN, propagate_elliptic};
-use crate::transfer::{TransferSolution, compute_transfer};
+use crate::model::{Body, MU_SUN, TransferSolution, compute_transfer, propagate_elliptic};
 
 // ============================================================================
 // Configuration
