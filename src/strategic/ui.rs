@@ -11,14 +11,13 @@ use super::transfer_lut::TransferLut;
 use crate::common::{ComputedBody, SimulationTime};
 use crate::model::{
     Body, Faction, Fleet, FleetLocation, FlightPlan, LogicalShip, MU_SUN, Selected,
-    TransferSolution, VictoryState, leg_base_day, leg_source, propagate_kepler_full, ship_count,
+    TransferSolution, leg_base_day, leg_source, propagate_kepler_full, ship_count,
 };
 use crate::phys_vec_to_vec3;
 
 // Re-export common UI components for backward compatibility
 pub use crate::common::ui::{
-    BodyLabel, SimDateText, SimSpeedText, VictoryOverlay, ZoomScaleText, spawn_body_label,
-    spawn_time_panel, update_labels, update_time_ui, update_victory_overlay,
+    spawn_body_label, spawn_time_panel, update_labels, update_time_ui, update_victory_overlay,
 };
 
 // ============================================================================
@@ -1035,7 +1034,7 @@ pub fn handle_fleet_number_keys(
     fleets: Query<(Entity, &Fleet, &FleetLocation, &Faction)>,
     bodies: Query<&GlobalTransform, With<Body>>,
     sim_time: Res<SimulationTime>,
-    mut camera_query: Query<&mut crate::camera::CameraTarget>,
+    camera_query: Query<&mut crate::camera::CameraTarget>,
     mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     // Map digit keys to indices

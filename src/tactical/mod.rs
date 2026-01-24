@@ -23,7 +23,7 @@ use crate::model::{CombatState, Faction, Fleet, LogicalShip, Selected, ship_coun
 use crate::spatial::{BigSpaceHierarchy, GridLeaf, GridNode, TrackedWorldPosition};
 
 // Re-export commonly used types
-pub use commands::{ExitReason, TacticalCommand};
+pub use commands::TacticalCommand;
 pub use input::{
     BoxSelection, handle_tactical_click, handle_tactical_move_order, sync_box_selection,
     update_box_selection,

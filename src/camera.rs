@@ -2,20 +2,13 @@
 
 use astrora_core::core::constants::AU;
 use bevy::{
-    camera::visibility::NoFrustumCulling,
     input::mouse::MouseButton,
     math::{DVec2, DVec3},
     prelude::*,
     window::PrimaryWindow,
 };
 use bevy_pancam::PanCam;
-use bevy_vector_shapes::{
-    prelude::ShapeConfig,
-    shapes::{DiscBundle, ShapeBundle},
-};
 use big_space::prelude::*;
-
-use crate::BodyShape;
 
 // ============================================================================
 // Constants

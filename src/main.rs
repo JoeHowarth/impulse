@@ -27,8 +27,7 @@ mod strategic;
 mod tactical;
 
 use common::{
-    BodyShape, ComputedBody, OrbitGizmo, SimulationTime, create_orbit_gizmo_asset,
-    spawn_body_circles, update_body_positions, update_body_shape_scale,
+    ComputedBody, OrbitGizmo, SimulationTime, create_orbit_gizmo_asset, spawn_body_circles,
 };
 use model::{
     Body, CombatState, Faction, Fleet, FleetLocation, FlightPlan, LogicalShip, PlanetaryElements,

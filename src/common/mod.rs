@@ -11,4 +11,3 @@ pub mod ui;
 
 pub use rendering::*;
 pub use simulation::*;
-pub use ui::*;

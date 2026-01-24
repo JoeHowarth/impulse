@@ -6,7 +6,7 @@ use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::common::{ComputedBody, SimulationTime};
+use crate::common::ComputedBody;
 use crate::model::{
     Body, CombatState, ComputedFleetPosition, Faction, Fleet, FleetLocation, Selected,
 };

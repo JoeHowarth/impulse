@@ -1,6 +1,7 @@
 # Working Style
 
 - Do NOT change approach from what we discussed without talking to me first
+- Use relative paths - we're already in the `impulse` directory (no need for `/Users/jh/personal/impulse/...`)
 - If a fix isn't working as expected, discuss options before pivoting to a different solution
 - When I ask "why isn't X working", I want to understand the problem, not have you silently switch to approach Y
 
