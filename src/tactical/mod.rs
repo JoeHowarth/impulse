@@ -616,6 +616,7 @@ pub fn render_visual_ships(
 pub fn update_ship_movement(
     mut commands: Commands,
     time: Res<Time>,
+    arena_query: Query<&Grid, With<TacticalArena>>,
     mut ships: Query<
         (
             Entity,
@@ -623,7 +624,7 @@ pub fn update_ship_movement(
             &ShipStats,
             &mut LinearVelocity,
             &Transform,
-            &Position,
+            &CellCoord,
         ),
         With<VisualShip>,
     >,
@@ -633,6 +634,10 @@ pub fn update_ship_movement(
     if dt <= 0.0 {
         return;
     }
+
+    let Ok(arena_grid) = arena_query.single() else {
+        return;
+    };
 
     // Throttled logging
     static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -646,13 +651,9 @@ pub fn update_ship_movement(
         LAST_LOG.store(now, std::sync::atomic::Ordering::Relaxed);
     }
 
-    for (entity, order, stats, mut velocity, transform, avian_pos) in &mut ships {
-        // Current position in arena-local coords (from Transform)
-        let current_pos = DVec3::new(
-            transform.translation.x as f64,
-            transform.translation.y as f64,
-            0.0,
-        );
+    for (entity, order, stats, mut velocity, transform, cell) in &mut ships {
+        // Current position in arena-local coords (cell + local transform offset)
+        let current_pos = arena_grid.grid_position_double(cell, transform);
 
         // Vector to destination
         let to_target = order.destination - current_pos;
@@ -678,12 +679,10 @@ pub fn update_ship_movement(
             };
             let direction = to_target.normalize_or_zero();
             info!(
-                "Ship movement: mode={}, transform=({:.0},{:.0})km, avian_pos=({:.0},{:.0})km, dest=({:.0},{:.0})km, dir=({:.2},{:.2}), vel=({:.0},{:.0})km/s",
+                "Ship movement: mode={}, pos=({:.0},{:.0})km, dest=({:.0},{:.0})km, dir=({:.2},{:.2}), vel=({:.0},{:.0})km/s",
                 mode,
-                transform.translation.x as f64 / 1000.0,
-                transform.translation.y as f64 / 1000.0,
-                avian_pos.x / 1000.0,
-                avian_pos.y / 1000.0,
+                current_pos.x / 1000.0,
+                current_pos.y / 1000.0,
                 order.destination.x / 1000.0,
                 order.destination.y / 1000.0,
                 direction.x,
