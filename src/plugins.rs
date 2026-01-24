@@ -129,6 +129,12 @@ impl Plugin for StrategicPlugin {
                 .in_set(AppSet::Ui)
                 .run_if(in_state(AppState::Strategic)),
         );
+
+        // Debug validation (strategic only) - panics if tactical entities leaked
+        app.add_systems(
+            Update,
+            tactical::validate_no_tactical_leaks.run_if(in_state(AppState::Strategic)),
+        );
     }
 }
 

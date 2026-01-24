@@ -1081,3 +1081,29 @@ pub fn detect_combat_end(
         next_state.set(crate::app_state::AppState::Strategic);
     }
 }
+
+// ============================================================================
+// Debug Validation
+// ============================================================================
+
+/// Debug-only system that validates no tactical entities leaked into strategic mode.
+/// Panics in debug builds if VisualShip or TacticalArena entities exist during Strategic state.
+#[cfg(debug_assertions)]
+pub fn validate_no_tactical_leaks(
+    arenas: Query<Entity, With<TacticalArena>>,
+    ships: Query<Entity, With<VisualShip>>,
+) {
+    let arena_count = arenas.iter().count();
+    let ship_count = ships.iter().count();
+
+    if arena_count > 0 || ship_count > 0 {
+        panic!(
+            "TACTICAL LEAK DETECTED: {} TacticalArena(s), {} VisualShip(s) in Strategic mode!",
+            arena_count, ship_count
+        );
+    }
+}
+
+/// No-op in release builds
+#[cfg(not(debug_assertions))]
+pub fn validate_no_tactical_leaks() {}
