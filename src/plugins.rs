@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::app_sets::AppSet;
 use crate::app_state::AppState;
 use crate::{
-    camera, handle_body_click, picking, ship, simulation, spatial, tactical, transfer_vis, ui,
+    camera, common, handle_body_click, picking, ship, spatial, tactical, transfer_vis, ui,
     update_body_positions, update_body_shape_scale,
 };
 
@@ -80,7 +80,7 @@ impl Plugin for StrategicPlugin {
         app.add_systems(
             Update,
             (
-                simulation::handle_time_controls,
+                common::handle_time_controls,
                 update_body_positions,
                 ship::update_fleet_positions,
                 ship::execute_departure,

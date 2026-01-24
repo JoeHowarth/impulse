@@ -8,9 +8,9 @@ use bevy::{asset::Assets, gizmos::GizmoAsset, prelude::*};
 use bevy_vector_shapes::prelude::*;
 
 use crate::{
+    common::SimulationTime,
     model::{Body, MU_SUN, TransferSolution, propagate_kepler},
     phys_vec_to_vec3,
-    simulation::SimulationTime,
 };
 
 // ============================================================================

@@ -20,7 +20,7 @@ use crate::model::{
     LogicalShip, MU_SUN, PlannedLeg, Selected, TransferSolution, VictoryState, leg_source,
     propagate_kepler_full, ship_count,
 };
-use crate::simulation::SimulationTime;
+use crate::common::SimulationTime;
 use crate::transfer_lut::TransferLut;
 use crate::transfer_vis::{HoveredTransferArc, TransferArcType};
 use crate::{phys_vec_to_vec3, transfer_vis};
@@ -157,7 +157,7 @@ pub fn process_plan_transfer(
     mut fleets: Query<(&Fleet, &FleetLocation, &mut FlightPlan)>,
     bodies: Query<&Body>,
     lut: Res<crate::transfer_lut::TransferLut>,
-    sim_time: Res<crate::simulation::SimulationTime>,
+    sim_time: Res<SimulationTime>,
 ) {
     for cmd in reader.read() {
         let StrategicCommand::PlanTransfer {
@@ -457,7 +457,7 @@ pub fn process_split_fleet(
 /// Process time control commands - set paused state and time scale.
 pub fn process_time_control(
     mut reader: MessageReader<StrategicCommand>,
-    mut sim_time: ResMut<crate::simulation::SimulationTime>,
+    mut sim_time: ResMut<SimulationTime>,
 ) {
     for cmd in reader.read() {
         match cmd {
@@ -834,7 +834,7 @@ pub fn check_objectives(
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
     mut victory: ResMut<VictoryState>,
-    sim_time: Res<crate::simulation::SimulationTime>,
+    sim_time: Res<SimulationTime>,
 ) {
     // Don't check if already won
     if victory.victory_achieved {

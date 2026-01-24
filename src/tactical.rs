@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ComputedBody;
 use crate::camera::{CameraScale, CameraTarget};
 use crate::model::{CombatState, Faction, Fleet, LogicalShip, Selected, ship_count};
-use crate::simulation::SimulationTime;
+use crate::common::SimulationTime;
 use crate::spatial::{BigSpaceHierarchy, GridLeaf, GridNode, TrackedWorldPosition};
 
 // ============================================================================
