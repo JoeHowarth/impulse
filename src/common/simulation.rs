@@ -3,7 +3,7 @@
 use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 
-use crate::ship::StrategicCommand;
+use crate::strategic::StrategicCommand;
 
 /// Seconds per day
 pub const SECONDS_PER_DAY: f64 = 60.0 * 60.0 * 24.0;

@@ -3,12 +3,7 @@
 //! Contains body position updates, visibility calculations, and orbit rendering.
 
 use astrora_core::core::{Vector3, elements::coe_to_rv};
-use bevy::{
-    gizmos::GizmoAsset,
-    math::DVec3,
-    platform::collections::HashMap,
-    prelude::*,
-};
+use bevy::{gizmos::GizmoAsset, math::DVec3, platform::collections::HashMap, prelude::*};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use crate::common::simulation::SimulationTime;

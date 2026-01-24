@@ -2,10 +2,8 @@ use bevy::prelude::*;
 
 use crate::app_sets::AppSet;
 use crate::app_state::AppState;
-use crate::{
-    camera, common, handle_body_click, picking, ship, spatial, tactical, transfer_vis, ui,
-    update_body_positions, update_body_shape_scale,
-};
+use crate::common::{update_body_positions, update_body_shape_scale};
+use crate::{camera, common, picking, spatial, strategic, tactical};
 
 pub struct AppCameraPlugin;
 
@@ -32,28 +30,31 @@ pub struct StrategicPlugin;
 impl Plugin for StrategicPlugin {
     fn build(&self, app: &mut App) {
         // Register strategic command message
-        app.add_message::<ship::StrategicCommand>();
+        app.add_message::<strategic::StrategicCommand>();
 
         app.add_systems(
             OnEnter(AppState::Strategic),
-            (ship::reset_combat_state, ui::show_transfer_ui),
+            (
+                strategic::systems::reset_combat_state,
+                strategic::ui::show_transfer_ui,
+            ),
         );
 
         // Input systems (strategic only)
         app.add_systems(
             Update,
             (
-                handle_body_click,
-                ship::commit_plan,
-                ship::cancel_last_leg,
-                ship::split_fleet,
-                ship::merge_fleets,
-                ui::handle_fleet_number_keys,
-                ui::handle_popup_spawn,
-                ui::handle_close_button,
-                ui::handle_escape_key,
-                ui::handle_option_hover,
-                ui::handle_option_selection,
+                strategic::input::handle_body_click,
+                strategic::input::commit_plan,
+                strategic::input::cancel_last_leg,
+                strategic::input::split_fleet,
+                strategic::input::merge_fleets,
+                strategic::ui::handle_fleet_number_keys,
+                strategic::ui::handle_popup_spawn,
+                strategic::ui::handle_close_button,
+                strategic::ui::handle_escape_key,
+                strategic::ui::handle_option_hover,
+                strategic::ui::handle_option_selection,
             )
                 .chain()
                 .in_set(AppSet::Input)
@@ -64,13 +65,13 @@ impl Plugin for StrategicPlugin {
         app.add_systems(
             Update,
             (
-                ship::process_select_fleet,
-                ship::process_plan_transfer,
-                ship::process_commit_plan,
-                ship::process_cancel_leg,
-                ship::process_split_fleet,
-                ship::process_merge_fleets,
-                ship::process_time_control,
+                strategic::systems::process_select_fleet,
+                strategic::systems::process_plan_transfer,
+                strategic::systems::process_commit_plan,
+                strategic::systems::process_cancel_leg,
+                strategic::systems::process_split_fleet,
+                strategic::systems::process_merge_fleets,
+                strategic::systems::process_time_control,
             )
                 .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Strategic)),
@@ -82,13 +83,13 @@ impl Plugin for StrategicPlugin {
             (
                 common::handle_time_controls,
                 update_body_positions,
-                ship::update_fleet_positions,
-                ship::execute_departure,
-                ship::check_arrival,
-                ship::check_objectives,
-                ship::expire_stale_uncommitted_legs,
-                ship::sync_transfer_entities,
-                ship::detect_combat,
+                strategic::rendering::update_fleet_positions,
+                strategic::systems::execute_departure,
+                strategic::systems::check_arrival,
+                strategic::systems::check_objectives,
+                strategic::systems::expire_stale_uncommitted_legs,
+                strategic::rendering::sync_transfer_entities,
+                strategic::systems::detect_combat,
             )
                 .chain()
                 .in_set(AppSet::Simulation)
@@ -105,10 +106,10 @@ impl Plugin for StrategicPlugin {
         app.add_systems(
             Update,
             (
-                ship::sync_fleet_shapes,
-                ship::sync_objective_rings,
-                ship::sync_plan_markers,
-                transfer_vis::update_hovered_arc,
+                strategic::rendering::sync_fleet_shapes,
+                strategic::rendering::sync_objective_rings,
+                strategic::rendering::sync_plan_markers,
+                strategic::transfer_vis::update_hovered_arc,
             )
                 .chain()
                 .in_set(AppSet::Render)
@@ -119,11 +120,11 @@ impl Plugin for StrategicPlugin {
         app.add_systems(
             Update,
             (
-                ui::update_transfer_panel,
-                ui::update_fleet_tabs,
-                ui::update_victory_overlay,
-                ui::update_popup_options,
-                ui::update_popup_position,
+                strategic::ui::update_transfer_panel,
+                strategic::ui::update_fleet_tabs,
+                strategic::ui::update_victory_overlay,
+                strategic::ui::update_popup_options,
+                strategic::ui::update_popup_position,
             )
                 .chain()
                 .in_set(AppSet::Ui)
@@ -150,8 +151,8 @@ impl Plugin for TacticalPlugin {
         app.add_systems(
             OnEnter(AppState::Tactical),
             (
-                ship::despawn_strategic_markers,
-                ui::hide_transfer_ui,
+                strategic::rendering::despawn_strategic_markers,
+                strategic::ui::hide_transfer_ui,
                 tactical::setup_tactical_arena,
             ),
         );
@@ -161,7 +162,7 @@ impl Plugin for TacticalPlugin {
             (
                 tactical::cleanup_empty_fleets,
                 tactical::teardown_tactical_arena,
-                ui::show_transfer_ui,
+                strategic::ui::show_transfer_ui,
             ),
         );
 
@@ -184,7 +185,7 @@ impl Plugin for TacticalPlugin {
             Update,
             tactical::update_arena_position
                 .in_set(AppSet::Simulation)
-                .after(crate::update_body_positions)
+                .after(update_body_positions)
                 .run_if(in_state(AppState::Tactical)),
         );
         app.add_systems(
@@ -241,9 +242,9 @@ impl Plugin for TransferPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            transfer_vis::check_transfer_expiration
+            strategic::transfer_vis::check_transfer_expiration
                 .in_set(AppSet::Simulation)
-                .after(ship::sync_transfer_entities),
+                .after(strategic::rendering::sync_transfer_entities),
         );
     }
 }
@@ -254,7 +255,7 @@ impl Plugin for AppUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (ui::update_time_ui, ui::update_labels).in_set(AppSet::Ui),
+            (strategic::ui::update_time_ui, strategic::ui::update_labels).in_set(AppSet::Ui),
         );
     }
 }

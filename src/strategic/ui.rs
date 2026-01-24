@@ -5,18 +5,20 @@
 use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 
+use super::commands::StrategicCommand;
+use super::rendering::FLEET_PLAYER_SELECTED;
+use super::transfer_lut::TransferLut;
 use crate::common::{ComputedBody, SimulationTime};
 use crate::model::{
     Body, Faction, Fleet, FleetLocation, FlightPlan, LogicalShip, MU_SUN, Selected,
     TransferSolution, VictoryState, leg_base_day, leg_source, propagate_kepler_full, ship_count,
 };
 use crate::phys_vec_to_vec3;
-use crate::transfer_lut::TransferLut;
 
 // Re-export common UI components for backward compatibility
 pub use crate::common::ui::{
-    BodyLabel, SimDateText, SimSpeedText, VictoryOverlay, ZoomScaleText,
-    spawn_body_label, spawn_time_panel, update_labels, update_time_ui, update_victory_overlay,
+    BodyLabel, SimDateText, SimSpeedText, VictoryOverlay, ZoomScaleText, spawn_body_label,
+    spawn_time_panel, update_labels, update_time_ui, update_victory_overlay,
 };
 
 // ============================================================================
@@ -134,15 +136,7 @@ pub fn spawn_transfer_panel(commands: &mut Commands) {
 /// Shows the selected fleet's info.
 pub fn update_transfer_panel(
     bodies: Query<&Body>,
-    selected_query: Query<
-        (
-            Entity,
-            &Fleet,
-            &FleetLocation,
-            &FlightPlan,
-        ),
-        With<Selected>,
-    >,
+    selected_query: Query<(Entity, &Fleet, &FleetLocation, &FlightPlan), With<Selected>>,
     children_query: Query<&Children>,
     logical_ships: Query<&LogicalShip>,
     sim_time: Res<SimulationTime>,
@@ -521,15 +515,7 @@ pub fn handle_popup_spawn(
     lut: Res<TransferLut>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody, &GlobalTransform)>,
-    player_query: Query<
-        (
-            Entity,
-            &Fleet,
-            &FleetLocation,
-            &FlightPlan,
-        ),
-        With<Selected>,
-    >,
+    player_query: Query<(Entity, &Fleet, &FleetLocation, &FlightPlan), With<Selected>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Check if we need to spawn a popup
@@ -660,15 +646,7 @@ pub fn update_popup_options(
     lut: Res<TransferLut>,
     sim_time: Res<SimulationTime>,
     bodies: Query<(&Body, &ComputedBody, &GlobalTransform)>,
-    player_query: Query<
-        (
-            Entity,
-            &Fleet,
-            &FleetLocation,
-            &FlightPlan,
-        ),
-        With<Selected>,
-    >,
+    player_query: Query<(Entity, &Fleet, &FleetLocation, &FlightPlan), With<Selected>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     // Only process if popup is open
@@ -809,17 +787,10 @@ pub fn handle_option_hover(
 pub fn handle_option_selection(
     mut commands: Commands,
     mut popup: ResMut<TransferPopup>,
-    player_query: Query<
-        (
-            Entity,
-            &FleetLocation,
-            &FlightPlan,
-        ),
-        With<Selected>,
-    >,
+    player_query: Query<(Entity, &FleetLocation, &FlightPlan), With<Selected>>,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
-    mut cmd_writer: MessageWriter<crate::ship::StrategicCommand>,
+    mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     for (interaction, button) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -849,7 +820,7 @@ pub fn handle_option_selection(
         let departure_day = base_day + option.departure_day;
 
         // Post PlanTransfer event
-        cmd_writer.write(crate::ship::StrategicCommand::PlanTransfer {
+        cmd_writer.write(StrategicCommand::PlanTransfer {
             fleet: fleet_entity,
             target: target_entity,
             departure_day,
@@ -901,12 +872,7 @@ pub fn spawn_fleet_tabs(commands: &mut Commands) {
 /// Updates fleet tabs - rebuilds when fleet count changes.
 pub fn update_fleet_tabs(
     mut commands: Commands,
-    fleets: Query<(
-        Entity,
-        &Fleet,
-        Option<&Selected>,
-        &Faction,
-    )>,
+    fleets: Query<(Entity, &Fleet, Option<&Selected>, &Faction)>,
     children_query: Query<&Children>,
     logical_ships: Query<&LogicalShip>,
     container_query: Query<Entity, With<FleetTabsContainer>>,
@@ -944,8 +910,7 @@ pub fn update_fleet_tabs(
 
             let fleet_entity_copy = *fleet_entity;
             let fleet_name = fleet.name.clone();
-            let ship_count =
-                ship_count(*fleet_entity, &children_query, &logical_ships);
+            let ship_count = ship_count(*fleet_entity, &children_query, &logical_ships);
             let delta_v = fleet.delta_v_remaining;
 
             commands.entity(container).with_children(|parent| {
@@ -989,13 +954,11 @@ pub fn update_fleet_tabs(
                                 height: Val::Px(8.0),
                                 ..default()
                             },
-                            BackgroundColor(
-                                crate::ship::FLEET_PLAYER_SELECTED.with_alpha(if is_selected {
-                                    1.0
-                                } else {
-                                    0.5
-                                }),
-                            ),
+                            BackgroundColor(FLEET_PLAYER_SELECTED.with_alpha(if is_selected {
+                                1.0
+                            } else {
+                                0.5
+                            })),
                             BorderRadius::all(Val::Px(2.0)),
                         ));
 
@@ -1069,16 +1032,11 @@ pub fn handle_fleet_number_keys(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut key_state: ResMut<FleetKeyState>,
-    fleets: Query<(
-        Entity,
-        &Fleet,
-        &FleetLocation,
-        &Faction,
-    )>,
+    fleets: Query<(Entity, &Fleet, &FleetLocation, &Faction)>,
     bodies: Query<&GlobalTransform, With<Body>>,
     sim_time: Res<SimulationTime>,
     mut camera_query: Query<&mut crate::camera::CameraTarget>,
-    mut cmd_writer: MessageWriter<crate::ship::StrategicCommand>,
+    mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     // Map digit keys to indices
     let key_to_index = [
@@ -1152,7 +1110,7 @@ pub fn handle_fleet_number_keys(
                     info!("Selecting fleet {} via key {}", fleet.name, index + 1);
 
                     // Post SelectFleet event
-                    cmd_writer.write(crate::ship::StrategicCommand::SelectFleet(*fleet_entity));
+                    cmd_writer.write(StrategicCommand::SelectFleet(*fleet_entity));
 
                     // Record key press for double-tap detection
                     key_state.last_key = Some(key);

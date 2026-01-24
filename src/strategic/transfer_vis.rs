@@ -305,7 +305,7 @@ pub fn check_transfer_expiration(
 pub fn update_hovered_arc(
     mut commands: Commands,
     mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
-    popup: Res<crate::ui::TransferPopup>,
+    popup: Res<super::ui::TransferPopup>,
     preview_arcs: Query<Entity, With<HoveredTransferArc>>,
     bodies: Query<&Body>,
 ) {
