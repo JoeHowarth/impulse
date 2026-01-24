@@ -29,6 +29,7 @@ mod picking;
 mod plugins;
 mod ship;
 mod simulation;
+mod spatial;
 mod tactical;
 mod transfer;
 mod transfer_lut;
@@ -187,7 +188,8 @@ fn setup(
         bodies: bodies.clone(),
     });
 
-    // First pass: spawn all bodies as children of BigSpace with CellCoord
+    // First pass: spawn all bodies as children of BigSpace with GridNode
+    // Bodies use GridNode because they can have tactical arenas as children
     let mut body_entities: HashMap<String, BodyEntity> = HashMap::new();
     for body in bodies.values() {
         // Spawn body as child of BigSpace root with spatial components
@@ -197,9 +199,10 @@ fn setup(
                 body.clone(),
                 Visibility::Visible,
                 ComputedBody::default(),
-                CellCoord::default(), // Will be updated by update_body_positions
-                Transform::default(), // Will be updated by update_body_positions
-                ChildOf(dbg!(big_space_root.0)), // Parent to BigSpace root
+                spatial::GridNode,
+                spatial::GridNode::default_grid(), // 100m cells for children (arena, etc)
+                Transform::default(),              // Will be updated by update_body_positions
+                ChildOf(big_space_root.0),         // Parent to BigSpace root
             ))
             .id();
         body_entities.insert(body.name.clone(), entity);

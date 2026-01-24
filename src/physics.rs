@@ -12,6 +12,13 @@
 //! Custom sync systems in this module preserve f64 precision via CellCoord:
 //! - `big_space_transform_to_position`: CellCoord + Transform → Position (before physics)
 //! - `position_to_big_space_transform`: Position → CellCoord + Transform (after physics)
+//! Note: during main Update schedule, CellCoord + Transform is the source of truth and should be the
+//!       only place where it is updated.
+//! This gets synced to Position/Rotation during the FixedPreUpdate
+//! Then physics may mutate Position/Rotation, which gets synced back to CellCoord + Transform during
+//! the FixedPostUpdate
+//! This is a bidirectional sync system that ensures that the source of truth is always the same and
+//! avoids jittering or 1-frame delay issues.
 
 use avian3d::math::AdjustPrecision;
 use avian3d::physics_transform::{PhysicsTransformConfig, PhysicsTransformSystems};
@@ -72,21 +79,25 @@ impl Default for WorldTransform {
 /// Pre-physics sync: Walks the big_space hierarchy and writes world-space
 /// Position/Rotation from CellCoord + Transform.
 ///
-/// For entities with CellCoord: world_pos = grid.grid_position_double(cell, transform)
+/// Handles nested grids: uses the parent's Grid for CellCoord conversion, not the root's.
+/// For entities with CellCoord: world_pos = parent_world + parent_grid.grid_position_double(cell, transform)
 /// For entities without CellCoord: world_pos = parent_world + parent_rot * local_translation
 fn big_space_transform_to_position(
     root_query: Query<(Entity, &Grid, &Children), With<BigSpace>>,
     children_query: Query<&Children>,
     transform_query: Query<(&Transform, Option<&CellCoord>)>,
+    grid_query: Query<&Grid>,
     mut physics_query: Query<(&mut Position, &mut Rotation)>,
 ) {
-    let (root_entity, grid, root_children) = root_query.single().expect("No root found");
+    let Ok((root_entity, root_grid, root_children)) = root_query.single() else {
+        return;
+    };
 
-    // Cache of entity -> world transform for parent lookups
-    let mut world_cache: HashMap<Entity, WorldTransform> = HashMap::new();
+    // Cache of entity -> (world transform, grid for children)
+    let mut world_cache: HashMap<Entity, (WorldTransform, &Grid)> = HashMap::new();
 
-    // Root is at origin
-    world_cache.insert(root_entity, WorldTransform::default());
+    // Root is at origin with root grid
+    world_cache.insert(root_entity, (WorldTransform::default(), root_grid));
 
     // BFS traversal
     let mut queue: Vec<(Entity, Entity)> = root_children
@@ -95,19 +106,19 @@ fn big_space_transform_to_position(
         .collect();
 
     while let Some((parent_entity, entity)) = queue.pop() {
-        let parent_world = world_cache
+        let (parent_world, parent_grid) = world_cache
             .get(&parent_entity)
-            .copied()
+            .map(|(w, g)| (*w, *g))
             .expect("No parent found");
 
         // Compute this entity's world transform
         let world = match transform_query.get(entity) {
             Ok((transform, Some(cell))) => {
-                // Has CellCoord: use grid to compute world position
-                let grid_pos = grid.grid_position_double(cell, transform);
+                // Has CellCoord: use PARENT's grid to compute position relative to parent
+                let local_pos = parent_grid.grid_position_double(cell, transform);
                 WorldTransform {
-                    position: grid_pos,
-                    rotation: transform.rotation.as_dquat(),
+                    position: parent_world.position + local_pos,
+                    rotation: parent_world.rotation * transform.rotation.as_dquat(),
                 }
             }
             Ok((transform, None)) => {
@@ -122,8 +133,12 @@ fn big_space_transform_to_position(
             Err(_) => parent_world,
         };
 
+        // Determine which grid this entity provides for its children
+        // If entity has a Grid component, use that; otherwise inherit parent's grid
+        let entity_grid = grid_query.get(entity).unwrap_or(parent_grid);
+
         // Cache for children
-        world_cache.insert(entity, world);
+        world_cache.insert(entity, (world, entity_grid));
 
         // Write to Position/Rotation if entity has them
         if let Ok((mut position, mut rotation)) = physics_query.get_mut(entity) {
@@ -143,25 +158,26 @@ fn big_space_transform_to_position(
 /// Post-physics sync: Walks the big_space hierarchy and writes CellCoord + Transform
 /// from world-space Position/Rotation.
 ///
-/// For entities with CellCoord: convert Position → CellCoord + local Transform
+/// Handles nested grids: uses the parent's Grid for CellCoord conversion.
+/// For entities with CellCoord: convert (Position - parent_world) → CellCoord + local Transform using parent's Grid
 /// For entities without CellCoord: compute local Transform from parent's world position
 fn position_to_big_space_transform(
     root_query: Query<(Entity, &Grid, &Children), With<BigSpace>>,
     children_query: Query<&Children>,
+    grid_query: Query<&Grid>,
     physics_query: Query<(&Position, &Rotation), Changed<Position>>,
     physics_read_query: Query<(&Position, &Rotation)>,
     mut transform_query: Query<(&mut Transform, Option<&mut CellCoord>)>,
 ) {
-    let Ok((root_entity, grid, root_children)) = root_query.single() else {
+    let Ok((root_entity, root_grid, root_children)) = root_query.single() else {
         return;
     };
 
-    // Cache of entity -> world transform for parent lookups
-    // We need world positions to compute local transforms for children
-    let mut world_cache: HashMap<Entity, WorldTransform> = HashMap::new();
+    // Cache of entity -> (world transform, grid for children)
+    let mut world_cache: HashMap<Entity, (WorldTransform, &Grid)> = HashMap::new();
 
-    // Root is at origin
-    world_cache.insert(root_entity, WorldTransform::default());
+    // Root is at origin with root grid
+    world_cache.insert(root_entity, (WorldTransform::default(), root_grid));
 
     // BFS traversal
     let mut queue: Vec<(Entity, Entity)> = root_children
@@ -170,7 +186,10 @@ fn position_to_big_space_transform(
         .collect();
 
     while let Some((parent_entity, entity)) = queue.pop() {
-        let parent_world = world_cache.get(&parent_entity).copied().unwrap_or_default();
+        let (parent_world, parent_grid) = world_cache
+            .get(&parent_entity)
+            .map(|(w, g)| (*w, *g))
+            .expect("Parent should always be in cache before children");
 
         // Determine this entity's world position
         // If it has Position, use that (physics is source of truth)
@@ -181,12 +200,12 @@ fn position_to_big_space_transform(
                 position: position.0,
                 rotation: rotation.0,
             },
-            // Has CellCoord: use grid to compute world position
+            // Has CellCoord: use parent's grid to compute world position
             (_, Ok((transform, Some(cell)))) => {
-                let grid_pos = grid.grid_position_double(&cell, &transform);
+                let local_pos = parent_grid.grid_position_double(&cell, &transform);
                 WorldTransform {
-                    position: grid_pos,
-                    rotation: transform.rotation.as_dquat(),
+                    position: parent_world.position + local_pos,
+                    rotation: parent_world.rotation * transform.rotation.as_dquat(),
                 }
             }
             // Transform only: accumulate from parent
@@ -199,21 +218,29 @@ fn position_to_big_space_transform(
                 }
             }
             // No transform - inherit parent's world transform
-            _ => parent_world,
+            _ => (parent_world, parent_grid).0,
         };
 
+        // Determine which grid this entity provides for its children
+        let entity_grid = grid_query.get(entity).unwrap_or(parent_grid);
+
         // Cache for children
-        world_cache.insert(entity, world);
+        world_cache.insert(entity, (world, entity_grid));
 
         // Only update transform if Position actually changed (from physics)
         let dominated_by_physics = physics_query.get(entity).is_ok();
         match (dominated_by_physics, transform_query.get_mut(entity)) {
             (true, Ok((mut transform, Some(mut cell)))) => {
-                // Has CellCoord: convert world Position → CellCoord + local Transform
-                let (new_cell, local_pos) = grid.translation_to_grid(world.position);
+                // Has CellCoord: convert world Position → parent-local CellCoord + Transform
+                // First compute position relative to parent
+                let local_world = world.position - parent_world.position;
+                // Then convert to CellCoord using parent's grid
+                let (new_cell, local_pos) = parent_grid.translation_to_grid(local_world);
                 *cell = new_cell;
                 transform.translation = local_pos;
-                transform.rotation = world.rotation.as_quat();
+                // Rotation relative to parent
+                let inv_parent_rot = parent_world.rotation.inverse();
+                transform.rotation = (inv_parent_rot * world.rotation).as_quat();
             }
             (true, Ok((mut transform, None))) => {
                 // No CellCoord: compute local transform relative to parent

@@ -4,10 +4,10 @@
 //! and VisualShip entities for each LogicalShip in the involved fleets.
 
 use avian3d::prelude::*;
+use bevy::asset::RenderAssetUsages;
 use bevy::math::primitives::Triangle3d;
 use bevy::math::{DVec2, DVec3, Isometry3d};
 use bevy::prelude::*;
-use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy_vector_shapes::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
@@ -17,6 +17,7 @@ use crate::ComputedBody;
 use crate::camera::{CameraScale, CameraTarget};
 use crate::ship::{CombatState, Faction, LogicalShip, Selected, ship_count};
 use crate::simulation::SimulationTime;
+use crate::spatial::{GridLeaf, GridNode};
 
 // ============================================================================
 // Constants
@@ -64,27 +65,18 @@ const ARRIVAL_DISTANCE: f64 = 1_000.0;
 /// Arrival velocity threshold in m/s (10 m/s)
 const ARRIVAL_VELOCITY: f64 = 10.0;
 
-
 // ============================================================================
 // Components
 // ============================================================================
 
 /// The tactical combat arena - exists during combat only.
 /// Children include VisualShips and missiles.
+///
+/// Uses GridNode to position in the body's grid, inheriting body motion automatically.
 #[derive(Component)]
 pub struct TacticalArena {
     /// The body where this battle is occurring
     pub body: Entity,
-    /// Last known heliocentric position for arena center
-    pub last_helio_pos: DVec3,
-    // /// Arena center in heliocentric coordinates (Vec3 visual units)
-    // pub heliocentric_pos: Vec3,
-    // /// Previous camera position for restoration
-    // pub previous_camera_pos: Vec2,
-    // /// Previous camera scale for restoration
-    // pub previous_camera_scale: f32,
-    // /// Previous time scale for restoration
-    // pub previous_time_scale: f64,
 }
 
 /// A visual representation of a LogicalShip during tactical combat.
@@ -151,7 +143,7 @@ pub fn enter_tactical_mode(
     mut combat: ResMut<CombatState>,
     mut sim_time: ResMut<SimulationTime>,
     mut camera_query: Query<&mut CameraTarget>,
-    bodies: Query<&ComputedBody>,
+    bodies: Query<(&ComputedBody, &Grid)>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
 ) {
@@ -165,40 +157,40 @@ pub fn enter_tactical_mode(
         return;
     };
 
-    let Ok(body_computed) = bodies.get(body_entity) else {
-        warn!("Cannot get computed body for combat");
+    let Ok((body_computed, body_grid)) = bodies.get(body_entity) else {
+        warn!("Cannot get computed body or grid for combat");
         return;
     };
 
     // Get current camera state for later restoration
     let mut camera_target = camera_query.single_mut().expect("No camera found");
 
-    // Offset arena center so body appears on right side of view
-    // Offset in negative X to put body on positive X side
-    // TODO(Phase 5): Use CellCoord + Transform instead of f32 position
-    let arena_relative = Vec3::new(-(ARENA_CENTER_OFFSET as f32), 0.0, 0.0);
-    let arena_helio = body_computed.helio_pos + DVec3::from(arena_relative);
+    // Arena offset from body center (in meters, positioned in body's grid)
+    let arena_offset = DVec3::new(-ARENA_CENTER_OFFSET, 0.0, 0.0);
+    let arena_helio = body_computed.helio_pos + arena_offset;
 
     info!(
-        "Entering tactical mode at body (relative pos: {:?}), {} player fleets, {} enemy fleets",
-        arena_relative,
+        "Entering tactical mode at body (offset: {:?}m), {} player fleets, {} enemy fleets",
+        arena_offset,
         combat.player_fleets.len(),
         combat.enemy_fleets.len()
     );
 
-    // Spawn TacticalArena (Transform needed so VisualShips inherit a spatial parent)
+    // Spawn TacticalArena with GridNode - positioned in body's grid
+    // Arena inherits body's motion automatically via nested grid hierarchy
+    let (arena_cell, arena_local) = body_grid.translation_to_grid(arena_offset);
+    let arena_grid = Grid::new(
+        crate::spatial::GRID_CELL_SIZE,
+        crate::spatial::GRID_SWITCH_THRESHOLD,
+    );
     let arena = commands
         .spawn((
-            TacticalArena {
-                body: body_entity,
-                last_helio_pos: arena_helio,
-                // heliocentric_pos: arena_pos,
-                // previous_camera_pos: current_pos,
-                // previous_camera_scale: current_scale,
-                // previous_time_scale: sim_time.time_scale,
-            },
+            TacticalArena { body: body_entity },
+            GridNode,
+            arena_grid.clone(), // Explicit grid so we can use it for ship spawning
+            arena_cell,
+            Transform::from_translation(arena_local),
             ChildOf(body_entity),
-            Transform::from_translation(arena_relative),
             Visibility::default(),
         ))
         .id();
@@ -229,10 +221,11 @@ pub fn enter_tactical_mode(
         ..default()
     });
 
-    // Spawn player ships (bottom center, y = -50,000 km)
+    // Spawn player ships (bottom center, y = -3 km)
     let player_spawned = spawn_fleet_ships(
         &mut commands,
         arena,
+        &arena_grid,
         &combat.player_fleets,
         Faction::Player,
         -FLEET_SPAWN_OFFSET,
@@ -243,10 +236,11 @@ pub fn enter_tactical_mode(
         &player_material,
     );
 
-    // Spawn enemy ships (top center, y = +50,000 km)
+    // Spawn enemy ships (top center, y = +3 km)
     let enemy_spawned = spawn_fleet_ships(
         &mut commands,
         arena,
+        &arena_grid,
         &combat.enemy_fleets,
         Faction::Enemy,
         FLEET_SPAWN_OFFSET,
@@ -273,10 +267,12 @@ pub fn enter_tactical_mode(
 }
 
 /// Spawns VisualShips for all LogicalShips in the given fleets.
+/// Ships use GridLeaf for high-precision positioning in the arena's grid.
 /// Returns the number of ships spawned.
 fn spawn_fleet_ships(
     commands: &mut Commands,
     arena: Entity,
+    arena_grid: &Grid,
     fleets: &[Entity],
     faction: Faction,
     y_offset_meters: f64,
@@ -298,7 +294,11 @@ fn spawn_fleet_ships(
                 let x_offset = compute_ship_x_offset(index, total_ships);
                 let logical_ship = child;
 
-                // Spawn VisualShip
+                // Position ship in arena's grid (arena-local coordinates in meters)
+                let ship_position = DVec3::new(x_offset, y_offset_meters, 0.1);
+                let (leaf, cell, transform) = GridLeaf::at_position(ship_position, arena_grid);
+
+                // Spawn VisualShip with GridLeaf for high-precision positioning
                 let visual_ship = commands
                     .spawn((
                         VisualShip {
@@ -306,11 +306,9 @@ fn spawn_fleet_ships(
                             fleet: fleet_entity,
                             faction,
                         },
-                        Transform::from_translation(Vec3::new(
-                            x_offset as f32,
-                            y_offset_meters as f32,
-                            0.1,
-                        )),
+                        leaf,
+                        cell,
+                        transform,
                         Visibility::default(),
                         // Physics components
                         RigidBody::Dynamic,
@@ -323,7 +321,7 @@ fn spawn_fleet_ships(
                     ))
                     .id();
 
-                // Spawn triangle mesh as child of VisualShip
+                // Spawn triangle mesh as child of VisualShip (low-precision, just local offset)
                 commands.spawn((
                     Mesh3d(ship_mesh.clone()),
                     MeshMaterial3d(ship_material.clone()),
@@ -350,23 +348,24 @@ fn compute_ship_x_offset(index: usize, total: usize) -> f64 {
     -half_width + index as f64 * SHIP_SPACING
 }
 
-/// Updates the arena position to follow the combat body.
-/// This keeps tactical ships centered on the body as it orbits.
-/// Also moves the camera by the same delta so it tracks the arena.
+/// Updates the camera to track the tactical arena.
+///
+/// With nested grids, the arena automatically inherits body motion.
+/// This system keeps the camera following the arena's world position.
 pub fn update_arena_position(
-    mut arena_query: Query<&mut TacticalArena>,
-    bodies: Query<&ComputedBody>,
-    grid_query: Query<&Grid, With<BigSpace>>,
+    arena_query: Query<(&TacticalArena, &CellCoord, &Transform)>,
+    bodies: Query<(&ComputedBody, &Grid)>,
+    root_grid_query: Query<&Grid, With<BigSpace>>,
     mut camera_query: Query<
         (
             &mut Transform,
             &mut CellCoord,
             &mut crate::camera::CameraTarget,
         ),
-        With<Camera3d>,
+        (With<Camera3d>, Without<TacticalArena>),
     >,
 ) {
-    let Ok(grid) = grid_query.single() else {
+    let Ok(root_grid) = root_grid_query.single() else {
         return;
     };
 
@@ -374,31 +373,33 @@ pub fn update_arena_position(
         return;
     };
 
-    for mut arena in &mut arena_query {
-        let Ok(body) = bodies.get(arena.body) else {
+    for (arena, arena_cell, arena_transform) in &arena_query {
+        let Ok((body, body_grid)) = bodies.get(arena.body) else {
             continue;
         };
 
-        // Arena center tracks body position with fixed offset
-        let arena_helio = body.helio_pos + DVec3::new(-ARENA_CENTER_OFFSET, 0.0, 0.0);
-        let delta = arena_helio - arena.last_helio_pos;
-        if delta.length_squared() <= f64::EPSILON {
-            continue;
-        }
+        // Compute arena's world position:
+        // 1. Body's world position (from ComputedBody, updated by orbital mechanics)
+        // 2. Arena's position in body's grid
+        let arena_in_body_grid = body_grid.grid_position_double(arena_cell, arena_transform);
+        let arena_world = body.helio_pos + arena_in_body_grid;
 
-        arena.last_helio_pos = arena_helio;
+        // Get camera's current world position
+        let cam_world = root_grid.grid_position_double(&cam_cell, &cam_transform);
 
-        // Move camera by the same delta to keep its relative offset in the arena frame
-        let current_world = grid.grid_position_double(&cam_cell, &cam_transform);
-        let new_world = current_world + delta;
-        let (new_cell, new_local) = grid.translation_to_grid(new_world);
-        *cam_cell = new_cell;
-        cam_transform.translation = new_local;
-
-        // If animating, move the target too so we animate toward the right place
-        if let Some(ref mut target_pos) = camera_target.position {
-            target_pos.x += delta.x;
-            target_pos.y += delta.y;
+        // Compute where camera should be (same offset from arena as currently)
+        // On first frame or when not animating, camera should track arena directly
+        if camera_target.position.is_none() {
+            // Not animating - directly track arena with current offset
+            let offset = cam_world.xy() - arena_world.xy();
+            let new_cam_world = arena_world + DVec3::new(offset.x, offset.y, 0.0);
+            let (new_cell, new_local) = root_grid.translation_to_grid(new_cam_world);
+            *cam_cell = new_cell;
+            cam_transform.translation = new_local;
+        } else {
+            // Animating - update target to track arena
+            // The animate_camera system will lerp toward this
+            camera_target.position = Some(arena_world.xy());
         }
     }
 }
@@ -445,7 +446,10 @@ fn create_ship_triangle_mesh() -> Mesh {
 }
 
 fn create_move_marker_mesh() -> Mesh {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     let half_len = 0.5;
     let half_thickness = 0.08;
 
@@ -722,11 +726,7 @@ pub fn render_move_markers(
     for (ship_entity, order) in &ships {
         desired_positions.insert(
             ship_entity,
-            Vec3::new(
-                order.destination.x as f32,
-                order.destination.y as f32,
-                0.1,
-            ),
+            Vec3::new(order.destination.x as f32, order.destination.y as f32, 0.1),
         );
     }
 

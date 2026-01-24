@@ -346,13 +346,11 @@ pub fn sync_box_selection(
     };
 
     // Convert screen coords to arena-local coords
-    let Some(start_local) =
-        screen_to_arena_local(start, camera, camera_transform, arena_transform)
+    let Some(start_local) = screen_to_arena_local(start, camera, camera_transform, arena_transform)
     else {
         return;
     };
-    let Some(end_local) =
-        screen_to_arena_local(current, camera, camera_transform, arena_transform)
+    let Some(end_local) = screen_to_arena_local(current, camera, camera_transform, arena_transform)
     else {
         return;
     };

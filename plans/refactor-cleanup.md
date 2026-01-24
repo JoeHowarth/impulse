@@ -181,3 +181,32 @@ Make the strategic/tactical split explicit while keeping a single shared univers
 
 ### Notes
 - Tactical rendering now uses LOD-style scaling (display size), decoupled from physics size.
+
+---
+
+## Progress Update (2026-01-23, Phase 2 complete)
+
+### Completed
+- **Nested grid hierarchy:** Introduced `GridNode` and `GridLeaf` spatial primitives (`src/spatial.rs`).
+  - `GridNode`: Interior nodes (bodies, arenas) that can have high-precision children.
+  - `GridLeaf`: Leaf nodes (ships, projectiles) with CellCoord but no children needing precision.
+- **100m cells everywhere:** All grids use 100m cells with i64 CellCoord, giving 0.1mm precision within cells and effectively unlimited range.
+- **Bodies have Grid:** Bodies now spawn with `GridNode` + `Grid`, enabling arenas as high-precision children.
+- **Arena inherits body motion:** Arena has CellCoord in body's grid. When body moves (orbital mechanics), arena moves automatically via nested grid propagation. Removed manual `last_helio_pos` tracking.
+- **Ships use GridLeaf:** Ships spawn with CellCoord in arena's grid, giving arena-local coordinates with full precision.
+- **Physics sync handles nested grids:** Updated `big_space_transform_to_position` and `position_to_big_space_transform` to use parent's Grid for CellCoord conversion, not just root grid.
+
+### Items Deemed Unnecessary
+- **ComputedPosition formalization:** `ComputedBody.helio_pos` is body-specific (output of orbital mechanics). Ships get position from Avian physics, arena from grid hierarchy. No need for a generic abstraction.
+- **f32 position cache audit:** With nested grids, world position is always reconstructed via `CellCoord * cell_size + Transform.translation` (f64 math). Transform.translation is cell-local (<100m), so f32 is fine. The precision architecture is now correct by design.
+
+### Hierarchy Structure
+```
+Root (Grid: 100m)
+  └─ Body (GridNode + CellCoord + Grid)
+       └─ Arena (GridNode + CellCoord in body's grid + Grid)
+            └─ Ship (GridLeaf + CellCoord in arena's grid)
+```
+
+### Phase 2 Status: ✅ Complete
+Ready for Phase 3 (tactical runtime boundaries + event pipeline).
