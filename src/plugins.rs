@@ -117,15 +117,34 @@ pub struct TacticalPlugin;
 
 impl Plugin for TacticalPlugin {
     fn build(&self, app: &mut App) {
+        // Register tactical messages and resources
+        app.add_message::<tactical::TacticalCommand>();
+        app.init_resource::<tactical::ShowExitDialog>();
+        app.init_resource::<tactical::TacticalCameraState>();
+
         app.add_systems(
             OnEnter(AppState::Tactical),
-            (ship::despawn_strategic_markers, ui::hide_transfer_ui),
+            (
+                ship::despawn_strategic_markers,
+                ui::hide_transfer_ui,
+                tactical::setup_tactical_arena,
+            ),
+        );
+
+        app.add_systems(
+            OnExit(AppState::Tactical),
+            (
+                tactical::cleanup_empty_fleets,
+                tactical::teardown_tactical_arena,
+                ui::show_transfer_ui,
+            ),
         );
 
         // Input systems (tactical only)
         app.add_systems(
             Update,
             (
+                tactical::handle_tactical_escape,
                 picking::update_box_selection,
                 picking::handle_tactical_click,
                 picking::handle_tactical_move_order,
@@ -136,12 +155,6 @@ impl Plugin for TacticalPlugin {
         );
 
         // Simulation systems (tactical only)
-        app.add_systems(
-            Update,
-            tactical::enter_tactical_mode
-                .in_set(AppSet::Simulation)
-                .run_if(in_state(AppState::Tactical)),
-        );
         app.add_systems(
             Update,
             tactical::update_arena_position
@@ -155,6 +168,14 @@ impl Plugin for TacticalPlugin {
                 .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Tactical)),
         );
+        app.add_systems(
+            Update,
+            (tactical::check_ship_bounds, tactical::detect_combat_end)
+                .chain()
+                .in_set(AppSet::Simulation)
+                .after(tactical::update_ship_movement)
+                .run_if(in_state(AppState::Tactical)),
+        );
 
         // Rendering systems (tactical only)
         app.add_systems(
@@ -166,6 +187,18 @@ impl Plugin for TacticalPlugin {
             )
                 .chain()
                 .in_set(AppSet::Render)
+                .run_if(in_state(AppState::Tactical)),
+        );
+
+        // UI systems (tactical only)
+        app.add_systems(
+            Update,
+            (
+                tactical::sync_exit_dialog,
+                tactical::handle_exit_dialog_buttons,
+            )
+                .chain()
+                .in_set(AppSet::Ui)
                 .run_if(in_state(AppState::Tactical)),
         );
     }

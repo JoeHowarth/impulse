@@ -5,8 +5,9 @@
 
 use avian3d::prelude::*;
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::message::Message;
 use bevy::math::primitives::Triangle3d;
-use bevy::math::{DVec2, DVec3, Isometry3d};
+use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy_vector_shapes::prelude::*;
@@ -131,29 +132,72 @@ impl Default for ShipStats {
 }
 
 // ============================================================================
+// Events
+// ============================================================================
+
+/// Commands posted by input systems, consumed by simulation systems.
+/// Decouples input handling from game state mutation.
+#[derive(Message, Debug, Clone)]
+pub enum TacticalCommand {
+    /// Move ships to destination (arena-local coordinates in meters)
+    MoveShips {
+        ships: Vec<Entity>,
+        destination: DVec3,
+    },
+    /// Select ships (replace current selection)
+    SelectShips(Vec<Entity>),
+    /// Add ships to current selection
+    AddToSelection(Vec<Entity>),
+    /// Clear all selection
+    ClearSelection,
+    /// Request exit from tactical mode
+    RequestExit { reason: ExitReason },
+}
+
+/// Reason for exiting tactical mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitReason {
+    /// All enemy ships destroyed or fled
+    Victory,
+    /// All player ships destroyed or fled
+    Defeat,
+    /// Player pressed escape (requires confirmation)
+    Manual,
+}
+
+/// Resource controlling the exit confirmation dialog
+#[derive(Resource, Default)]
+pub struct ShowExitDialog(pub bool);
+
+/// Saved camera state for restoration after tactical mode
+#[derive(Resource, Default)]
+pub struct TacticalCameraState {
+    pub previous_position: DVec2,
+    pub previous_scale: f32,
+}
+
+// ============================================================================
 // Systems
 // ============================================================================
 
-/// Enters tactical mode when combat is triggered.
-/// Spawns TacticalArena and VisualShips, animates camera, adjusts time scale.
-pub fn enter_tactical_mode(
+/// Sets up tactical mode: spawns TacticalArena and VisualShips, animates camera, adjusts time scale.
+/// Runs once on OnEnter(AppState::Tactical).
+pub fn setup_tactical_arena(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut combat: ResMut<CombatState>,
     mut sim_time: ResMut<SimulationTime>,
-    mut camera_query: Query<&mut CameraTarget>,
+    mut camera_query: Query<(&Transform, &CellCoord, &mut CameraTarget), With<Camera3d>>,
+    mut camera_state: ResMut<TacticalCameraState>,
+    cam_scale: Res<CameraScale>,
     bodies: Query<(&ComputedBody, &Grid)>,
     children_query: Query<&Children>,
     ships: Query<&LogicalShip>,
+    root_grid: Query<&Grid, With<BigSpace>>,
 ) {
-    // Only run when combat is active but arena not yet spawned
-    if !combat.active || combat.arena.is_some() {
-        return;
-    }
-
     let Some(body_entity) = combat.body else {
-        warn!("Combat active but no body specified");
+        warn!("Entering tactical but no body specified in CombatState");
         return;
     };
 
@@ -162,8 +206,19 @@ pub fn enter_tactical_mode(
         return;
     };
 
-    // Get current camera state for later restoration
-    let mut camera_target = camera_query.single_mut().expect("No camera found");
+    let Ok(root_grid) = root_grid.single() else {
+        warn!("No root grid found");
+        return;
+    };
+
+    // Get current camera state and save it for restoration on exit
+    let Ok((cam_transform, cam_cell, mut camera_target)) = camera_query.single_mut() else {
+        warn!("No camera found");
+        return;
+    };
+    let cam_world_pos = root_grid.grid_position_double(cam_cell, cam_transform);
+    camera_state.previous_position = cam_world_pos.xy();
+    camera_state.previous_scale = cam_scale.0;
 
     // Arena offset from body center (in meters, positioned in body's grid)
     let arena_offset = DVec3::new(-ARENA_CENTER_OFFSET, 0.0, 0.0);
@@ -764,5 +819,267 @@ pub fn render_move_markers(
             Transform::from_translation(pos).with_scale(Vec3::splat(display_size)),
             ChildOf(arena_entity),
         ));
+    }
+}
+
+// ============================================================================
+// State Transition Systems
+// ============================================================================
+
+/// Cleans up tactical mode when exiting.
+/// Despawns arena and all children, resets combat state, restores camera and time.
+pub fn teardown_tactical_arena(
+    mut commands: Commands,
+    arena_query: Query<Entity, With<TacticalArena>>,
+    exit_dialog: Query<Entity, With<ExitDialogRoot>>,
+    mut combat: ResMut<CombatState>,
+    mut sim_time: ResMut<SimulationTime>,
+    mut show_dialog: ResMut<ShowExitDialog>,
+    mut camera_query: Query<&mut CameraTarget>,
+    camera_state: Res<TacticalCameraState>,
+) {
+    // Despawn arena - children are automatically despawned via ChildOf relationship
+    for arena in &arena_query {
+        commands.entity(arena).despawn();
+    }
+
+    // Despawn exit dialog if open
+    for dialog in &exit_dialog {
+        commands.entity(dialog).despawn();
+    }
+    show_dialog.0 = false;
+
+    // Reset combat state
+    combat.active = false;
+    combat.arena = None;
+    combat.player_fleets.clear();
+    combat.enemy_fleets.clear();
+    combat.body = None;
+
+    // Restore time scale to strategic default
+    sim_time.time_scale = 1.0;
+
+    // Restore camera to previous position
+    if let Ok(mut camera_target) = camera_query.single_mut() {
+        camera_target.move_to(camera_state.previous_position, camera_state.previous_scale);
+    }
+
+    info!("Tactical arena cleaned up, returning to strategic mode");
+}
+
+/// Cleans up empty fleets after combat (fleets with no remaining LogicalShips).
+pub fn cleanup_empty_fleets(
+    mut commands: Commands,
+    fleets: Query<(Entity, &Children), With<crate::ship::Fleet>>,
+    ships: Query<&crate::ship::LogicalShip>,
+) {
+    for (fleet_entity, children) in &fleets {
+        let has_ships = children.iter().any(|child| ships.contains(child));
+        if !has_ships {
+            info!(
+                "Fleet {:?} has no remaining ships - despawning",
+                fleet_entity
+            );
+            commands.entity(fleet_entity).despawn();
+        }
+    }
+}
+
+/// Checks if ships have left the arena bounds (400km x 400km).
+/// Ships leaving the arena are considered to have fled - despawn both visual and logical.
+pub fn check_ship_bounds(mut commands: Commands, ships: Query<(Entity, &VisualShip, &Transform)>) {
+    for (entity, visual, transform) in &ships {
+        let pos = transform.translation;
+
+        // Check if outside arena bounds (±200,000 km = ±200,000,000 m)
+        if pos.x.abs() as f64 > ARENA_HALF || pos.y.abs() as f64 > ARENA_HALF {
+            info!(
+                "Ship {:?} fled arena at ({:.0} km, {:.0} km) - despawning",
+                entity,
+                pos.x as f64 / 1000.0,
+                pos.y as f64 / 1000.0
+            );
+
+            // Despawn visual ship (children despawn automatically via ChildOf)
+            commands.entity(entity).despawn();
+
+            // Despawn the logical ship from strategic layer
+            commands.entity(visual.logical).despawn();
+        }
+    }
+}
+
+/// Handles escape key press in tactical mode - shows exit confirmation dialog.
+pub fn handle_tactical_escape(
+    input: Res<ButtonInput<KeyCode>>,
+    mut show_dialog: ResMut<ShowExitDialog>,
+) {
+    if input.just_pressed(KeyCode::Escape) {
+        // Toggle dialog (pressing escape again closes it)
+        show_dialog.0 = !show_dialog.0;
+        info!("Tactical escape pressed, show_dialog={}", show_dialog.0);
+    }
+}
+
+/// Marker for the exit dialog root entity
+#[derive(Component)]
+pub struct ExitDialogRoot;
+
+/// Marker for the "Yes" button
+#[derive(Component)]
+pub struct ExitDialogYesButton;
+
+/// Marker for the "No" button
+#[derive(Component)]
+pub struct ExitDialogNoButton;
+
+/// Spawns or despawns the exit dialog based on ShowExitDialog state.
+pub fn sync_exit_dialog(
+    mut commands: Commands,
+    show_dialog: Res<ShowExitDialog>,
+    existing_dialog: Query<Entity, With<ExitDialogRoot>>,
+) {
+    let dialog_exists = !existing_dialog.is_empty();
+
+    if show_dialog.0 && !dialog_exists {
+        // Spawn dialog
+        commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+                ExitDialogRoot,
+            ))
+            .with_children(|parent| {
+                // Dialog box
+                parent
+                    .spawn((
+                        Node {
+                            padding: UiRect::all(Val::Px(20.0)),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            row_gap: Val::Px(16.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.15, 0.15, 0.2, 0.95)),
+                        BorderRadius::all(Val::Px(8.0)),
+                    ))
+                    .with_children(|dialog| {
+                        // Title
+                        dialog.spawn((
+                            Text::new("Retreat from combat?"),
+                            TextFont {
+                                font_size: 18.0,
+                                ..default()
+                            },
+                            TextColor(Color::srgba(1.0, 1.0, 1.0, 1.0)),
+                        ));
+
+                        // Button row
+                        dialog
+                            .spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                column_gap: Val::Px(12.0),
+                                ..default()
+                            })
+                            .with_children(|row| {
+                                // Yes button
+                                row.spawn((
+                                    Button,
+                                    Node {
+                                        padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.6, 0.2, 0.2, 1.0)),
+                                    BorderRadius::all(Val::Px(4.0)),
+                                    ExitDialogYesButton,
+                                ))
+                                .with_child((
+                                    Text::new("Yes, retreat"),
+                                    TextFont {
+                                        font_size: 14.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::WHITE),
+                                ));
+
+                                // No button
+                                row.spawn((
+                                    Button,
+                                    Node {
+                                        padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.3, 0.3, 0.4, 1.0)),
+                                    BorderRadius::all(Val::Px(4.0)),
+                                    ExitDialogNoButton,
+                                ))
+                                .with_child((
+                                    Text::new("No, continue"),
+                                    TextFont {
+                                        font_size: 14.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::WHITE),
+                                ));
+                            });
+                    });
+            });
+    } else if !show_dialog.0 && dialog_exists {
+        // Despawn dialog
+        for entity in &existing_dialog {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Handles button clicks on the exit dialog.
+pub fn handle_exit_dialog_buttons(
+    mut show_dialog: ResMut<ShowExitDialog>,
+    mut next_state: ResMut<NextState<crate::app_state::AppState>>,
+    yes_button: Query<&Interaction, (Changed<Interaction>, With<ExitDialogYesButton>)>,
+    no_button: Query<&Interaction, (Changed<Interaction>, With<ExitDialogNoButton>)>,
+) {
+    for interaction in &yes_button {
+        if *interaction == Interaction::Pressed {
+            show_dialog.0 = false;
+            next_state.set(crate::app_state::AppState::Strategic);
+        }
+    }
+
+    for interaction in &no_button {
+        if *interaction == Interaction::Pressed {
+            show_dialog.0 = false;
+        }
+    }
+}
+
+/// Detects end of combat: victory (all enemies destroyed/fled) or defeat (all player ships destroyed/fled).
+pub fn detect_combat_end(
+    ships: Query<&VisualShip>,
+    mut next_state: ResMut<NextState<crate::app_state::AppState>>,
+) {
+    let mut player_alive = 0;
+    let mut enemy_alive = 0;
+
+    for ship in &ships {
+        match ship.faction {
+            Faction::Player => player_alive += 1,
+            Faction::Enemy => enemy_alive += 1,
+        }
+    }
+
+    if enemy_alive == 0 && player_alive > 0 {
+        info!("Victory! All enemy ships destroyed or fled");
+        next_state.set(crate::app_state::AppState::Strategic);
+    } else if player_alive == 0 {
+        info!("Defeat! All player ships destroyed or fled");
+        next_state.set(crate::app_state::AppState::Strategic);
     }
 }

@@ -210,3 +210,41 @@ Root (Grid: 100m)
 
 ### Phase 2 Status: ✅ Complete
 Ready for Phase 3 (tactical runtime boundaries + event pipeline).
+
+---
+
+## Progress Update (2026-01-23, Phase 3 complete)
+
+### Completed
+- **OnEnter/OnExit state hooks:**
+  - `setup_tactical_arena` runs on OnEnter(AppState::Tactical) - spawns arena, ships, saves camera state, sets tactical time scale.
+  - `teardown_tactical_arena` runs on OnExit - despawns arena (children cascade via ChildOf), restores camera/time, cleans up dialog if open.
+  - Removed guard pattern (`if !combat.active || combat.arena.is_some()`) from Update loop.
+
+- **Combat resolution:**
+  - `check_ship_bounds` - ships leaving 400km arena bounds are despawned (both visual and logical).
+  - `detect_combat_end` - victory when all enemies destroyed/fled, defeat when all player ships gone.
+  - `cleanup_empty_fleets` - removes fleets with no remaining LogicalShips after combat.
+
+- **Manual exit with confirmation:**
+  - `handle_tactical_escape` - Escape key toggles ShowExitDialog resource.
+  - `sync_exit_dialog` + `handle_exit_dialog_buttons` - Bevy UI modal with "Yes, retreat" / "No, continue".
+
+- **Camera state preservation:**
+  - `TacticalCameraState` resource stores previous position and scale.
+  - Saved in `setup_tactical_arena`, restored in `teardown_tactical_arena`.
+
+- **Event infrastructure (partial):**
+  - `TacticalCommand` enum defined with `#[derive(Message)]` (Bevy 0.17 API).
+  - Registered via `app.add_message::<TacticalCommand>()`.
+  - Input systems still use direct component insertion - event refactor deferred as optional.
+
+### Files Modified
+- `src/tactical.rs` - Added state transition systems, combat resolution, exit dialog, event types.
+- `src/plugins.rs` - Registered OnEnter/OnExit hooks, new simulation/UI systems, TacticalCommand message.
+
+### Deferred
+- Refactoring input systems to post TacticalCommand events instead of direct component insertion. Current approach works and is simpler; event decoupling is optional future enhancement.
+
+### Phase 3 Status: ✅ Complete
+Ready for Phase 4 (strategic event pipeline) or Phase 5 (handoff integrity).
