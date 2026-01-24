@@ -21,7 +21,6 @@ mod camera;
 mod common;
 mod model;
 mod physics;
-mod picking;
 mod plugins;
 mod spatial;
 mod strategic;
@@ -77,7 +76,7 @@ fn main() {
         .init_resource::<strategic::FleetKeyState>()
         .init_resource::<VictoryState>()
         .init_resource::<CombatState>()
-        .init_resource::<picking::BoxSelection>()
+        .init_resource::<tactical::BoxSelection>()
         .init_state::<AppState>()
         .add_systems(
             Startup,

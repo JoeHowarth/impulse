@@ -3,9 +3,11 @@
 //! When combat triggers, we spawn a TacticalArena at the body's position
 //! and VisualShip entities for each LogicalShip in the involved fleets.
 
+pub mod commands;
+pub mod input;
+
 use avian3d::prelude::*;
 use bevy::asset::RenderAssetUsages;
-use bevy::ecs::message::Message;
 use bevy::math::primitives::Triangle3d;
 use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
@@ -19,6 +21,13 @@ use crate::camera::{CameraScale, CameraTarget};
 use crate::common::SimulationTime;
 use crate::model::{CombatState, Faction, Fleet, LogicalShip, Selected, ship_count};
 use crate::spatial::{BigSpaceHierarchy, GridLeaf, GridNode, TrackedWorldPosition};
+
+// Re-export commonly used types
+pub use commands::{ExitReason, TacticalCommand};
+pub use input::{
+    BoxSelection, handle_tactical_click, handle_tactical_move_order, sync_box_selection,
+    update_box_selection,
+};
 
 // ============================================================================
 // Constants
@@ -132,38 +141,8 @@ impl Default for ShipStats {
 }
 
 // ============================================================================
-// Events
+// Resources
 // ============================================================================
-
-/// Commands posted by input systems, consumed by simulation systems.
-/// Decouples input handling from game state mutation.
-#[derive(Message, Debug, Clone)]
-pub enum TacticalCommand {
-    /// Move ships to destination (arena-local coordinates in meters)
-    MoveShips {
-        ships: Vec<Entity>,
-        destination: DVec3,
-    },
-    /// Select ships (replace current selection)
-    SelectShips(Vec<Entity>),
-    /// Add ships to current selection
-    AddToSelection(Vec<Entity>),
-    /// Clear all selection
-    ClearSelection,
-    /// Request exit from tactical mode
-    RequestExit { reason: ExitReason },
-}
-
-/// Reason for exiting tactical mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExitReason {
-    /// All enemy ships destroyed or fled
-    Victory,
-    /// All player ships destroyed or fled
-    Defeat,
-    /// Player pressed escape (requires confirmation)
-    Manual,
-}
 
 /// Resource controlling the exit confirmation dialog
 #[derive(Resource, Default)]

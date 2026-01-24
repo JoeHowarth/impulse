@@ -10,7 +10,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::model::{CombatState, Faction, Selected};
 
-use crate::tactical::{MoveOrder, TacticalArena, VisualShip};
+use super::{MoveOrder, TacticalArena, VisualShip};
 
 /// Marker for the box selection rectangle gizmo entity.
 #[derive(Component)]

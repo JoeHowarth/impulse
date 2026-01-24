@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::app_sets::AppSet;
 use crate::app_state::AppState;
 use crate::common::{update_body_positions, update_body_shape_scale};
-use crate::{camera, common, picking, spatial, strategic, tactical};
+use crate::{camera, common, spatial, strategic, tactical};
 
 pub struct AppCameraPlugin;
 
@@ -171,9 +171,9 @@ impl Plugin for TacticalPlugin {
             Update,
             (
                 tactical::handle_tactical_escape,
-                picking::update_box_selection,
-                picking::handle_tactical_click,
-                picking::handle_tactical_move_order,
+                tactical::update_box_selection,
+                tactical::handle_tactical_click,
+                tactical::handle_tactical_move_order,
             )
                 .chain()
                 .in_set(AppSet::Input)
@@ -209,7 +209,7 @@ impl Plugin for TacticalPlugin {
             (
                 tactical::render_move_markers,
                 tactical::update_ship_mesh_scale,
-                picking::sync_box_selection,
+                tactical::sync_box_selection,
             )
                 .chain()
                 .in_set(AppSet::Render)
