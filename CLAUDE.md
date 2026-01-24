@@ -1,3 +1,64 @@
+# Project Structure
+
+```
+src/
+  model/          # Pure data types + computation (no Bevy systems)
+    fleet.rs      # Fleet, LogicalShip, FleetLocation, CombatState, Faction
+    orbital.rs    # Body, OrbitalElements, propagate_elliptic
+    transfer.rs   # TransferSolution, Lambert solver math
+
+  common/         # Always-on systems (run in both modes)
+    simulation.rs # SimulationTime, time controls
+    rendering.rs  # Body positions, shapes, orbit gizmos
+    ui.rs         # HUD (date/speed/zoom), body labels, victory overlay
+
+  strategic/      # Strategic mode - full vertical slice
+    commands.rs   # StrategicCommand enum (message-based input)
+    systems.rs    # Fleet movement, arrival, combat detection
+    input.rs      # Fleet selection, transfer planning
+    rendering.rs  # Fleet shapes, transfer arcs, objective rings
+    ui.rs         # Transfer popup, fleet tabs, info panel
+    transfer_*.rs # LUT generation, arc visualization
+
+  tactical/       # Tactical mode (not yet fully split out)
+    mod.rs        # Arena, VisualShip, movement, rendering, UI - all in one for now
+    commands.rs   # TacticalCommand enum
+    input.rs      # Ship selection, box select, move orders
+
+  # Infrastructure (root level)
+  spatial.rs      # GridNode/GridLeaf - f64 precision hierarchy (big_space)
+  camera.rs       # Camera animation, scale tracking
+  physics.rs      # Avian3D integration with big_space sync
+  app_state.rs    # AppState::Strategic | Tactical
+  app_sets.rs     # System ordering: Input → Simulation → Render → Ui
+  plugins.rs      # Plugin registration and system scheduling
+```
+
+## Design Principles
+
+**Vertical slices by mode**: Each mode (strategic/tactical) owns its full stack - input, systems, rendering, UI. You can work on tactical combat without touching strategic code.
+
+**Model is pure**: `model/` has no Bevy systems, just types and math. Can reason about game logic independently.
+
+**Common for shared concerns**: Body rendering, time controls, HUD run regardless of mode.
+
+**Message-based input**: Input systems post `StrategicCommand`/`TacticalCommand` messages, separate systems consume them. Decouples input handling from state mutation.
+
+**Two-layer ships**: `LogicalShip` (persistent, strategic) vs `VisualShip` (ephemeral, tactical). Fleets survive combat; individual ships are spawned/despawned per battle.
+
+## Maintenance
+
+**Keep this codemap current**: Before every commit, verify the structure above matches reality. Update if files were added/moved/removed.
+
+## Extension Points
+
+- **New weapon type**: Add to `tactical/mod.rs` (component + systems), `tactical/input.rs` (fire command)
+- **New strategic mechanic**: Add to `strategic/systems.rs`, wire input in `strategic/input.rs`
+- **New UI panel**: Mode-specific goes in `strategic/ui.rs` or `tactical/ui.rs`, shared in `common/ui.rs`
+- **New ship stat**: Add to `LogicalShip` in `model/fleet.rs`, use in `tactical/mod.rs`
+
+---
+
 # Working Style
 
 - Do NOT change approach from what we discussed without talking to me first
