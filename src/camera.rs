@@ -114,14 +114,12 @@ pub fn update_camera_scale(
     mut scale: ResMut<CameraScale>,
 ) {
     let mut next_scale = DEFAULT_CAMERA_SCALE;
-    for (projection, transform) in camera.iter() {
+    for (projection, _transform) in camera.iter() {
         if let Projection::Orthographic(ortho) = projection {
-            dbg!(ortho.scale, transform.scale);
             next_scale = ortho.scale;
             break;
         }
     }
-    dbg!(next_scale);
     scale.0 = next_scale;
 }
 
@@ -189,8 +187,8 @@ pub fn animate_camera(
             *cell = new_cell;
             transform.translation = new_transform;
 
-            // Clear target if close enough (0.1% of target magnitude, min 1.0)
-            let threshold = (target_pos.length() * 0.001).max(1.0);
+            // Clear target if close enough (100 meters - tactical precision)
+            let threshold = 100.0;
             if current_2.distance(target_pos) < threshold {
                 // Snap to exact target position to eliminate any remaining error
                 let (target_cell, target_transform) =

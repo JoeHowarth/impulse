@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::app_sets::AppSet;
 use crate::app_state::AppState;
 use crate::{
-    camera, handle_body_click, picking, ship, simulation, tactical, transfer_vis, ui,
+    camera, handle_body_click, picking, ship, simulation, spatial, tactical, transfer_vis, ui,
     update_body_positions, update_body_shape_scale,
 };
 
@@ -31,6 +31,9 @@ pub struct StrategicPlugin;
 
 impl Plugin for StrategicPlugin {
     fn build(&self, app: &mut App) {
+        // Register strategic command message
+        app.add_message::<ship::StrategicCommand>();
+
         app.add_systems(
             OnEnter(AppState::Strategic),
             (ship::reset_combat_state, ui::show_transfer_ui),
@@ -54,6 +57,22 @@ impl Plugin for StrategicPlugin {
             )
                 .chain()
                 .in_set(AppSet::Input)
+                .run_if(in_state(AppState::Strategic)),
+        );
+
+        // Command consumers (process strategic command events)
+        app.add_systems(
+            Update,
+            (
+                ship::process_select_fleet,
+                ship::process_plan_transfer,
+                ship::process_commit_plan,
+                ship::process_cancel_leg,
+                ship::process_split_fleet,
+                ship::process_merge_fleets,
+                ship::process_time_control,
+            )
+                .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Strategic)),
         );
 
@@ -200,6 +219,12 @@ impl Plugin for TacticalPlugin {
                 .chain()
                 .in_set(AppSet::Ui)
                 .run_if(in_state(AppState::Tactical)),
+        );
+
+        // PostUpdate: capture world positions for next frame's delta calculation
+        app.add_systems(
+            PostUpdate,
+            spatial::sync_tracked_world_positions.run_if(in_state(AppState::Tactical)),
         );
     }
 }

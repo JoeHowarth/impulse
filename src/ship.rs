@@ -13,6 +13,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use bevy::ecs::message::{Message, MessageReader, MessageWriter};
 use bevy::gizmos::GizmoAsset;
 use bevy::math::{DVec3, Isometry3d};
 use bevy::prelude::*;
@@ -208,6 +209,481 @@ pub struct FlightPlan {
     pub legs: VecDeque<PlannedLeg>,
     /// Number of committed (locked) legs from front
     pub committed_count: usize,
+}
+
+// ============================================================================
+// Strategic Commands (Events)
+// ============================================================================
+
+/// Commands posted by input systems, consumed by simulation systems.
+/// Decouples input handling from game state mutation for programmatic control.
+#[derive(Message, Debug, Clone)]
+pub enum StrategicCommand {
+    /// Select a fleet (sets SelectedFleet resource)
+    SelectFleet(Entity),
+    /// Deselect current fleet
+    DeselectFleet,
+
+    /// Plan a transfer leg for a fleet
+    PlanTransfer {
+        fleet: Entity,
+        target: Entity,
+        /// Absolute departure day
+        departure_day: i32,
+        /// Time of flight in days
+        tof_days: i32,
+    },
+    /// Commit all uncommitted legs of a fleet's plan
+    CommitPlan(Entity),
+    /// Cancel the last leg of a fleet's plan
+    CancelLeg(Entity),
+
+    /// Split a fleet in half (fleet must be at a body with >1 ship)
+    SplitFleet(Entity),
+    /// Merge all other player fleets at same body into this fleet
+    MergeFleets(Entity),
+
+    /// Set simulation paused state
+    SetPaused(bool),
+    /// Set simulation time scale (sim seconds per real second)
+    SetTimeScale(f64),
+}
+
+// ============================================================================
+// Strategic Command Consumers
+// ============================================================================
+
+/// Process SelectFleet and DeselectFleet commands.
+pub fn process_select_fleet(
+    mut commands: Commands,
+    mut reader: MessageReader<StrategicCommand>,
+    selected: Query<Entity, With<Selected>>,
+    fleets: Query<&Fleet>,
+) {
+    for cmd in reader.read() {
+        match cmd {
+            StrategicCommand::SelectFleet(fleet_entity) => {
+                // Verify the entity is a fleet
+                if fleets.get(*fleet_entity).is_err() {
+                    warn!("SelectFleet: entity {:?} is not a fleet", fleet_entity);
+                    continue;
+                }
+                // Remove Selected from all
+                for old in &selected {
+                    commands.entity(old).remove::<Selected>();
+                }
+                // Add Selected to target
+                commands.entity(*fleet_entity).insert(Selected);
+            }
+            StrategicCommand::DeselectFleet => {
+                for old in &selected {
+                    commands.entity(old).remove::<Selected>();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Process PlanTransfer commands - add a transfer leg to a fleet's flight plan.
+pub fn process_plan_transfer(
+    mut reader: MessageReader<StrategicCommand>,
+    mut fleets: Query<(&Fleet, &FleetLocation, &mut FlightPlan)>,
+    bodies: Query<&crate::orbital_data::Body>,
+    lut: Res<crate::transfer_lut::TransferLut>,
+    sim_time: Res<crate::simulation::SimulationTime>,
+) {
+    for cmd in reader.read() {
+        let StrategicCommand::PlanTransfer {
+            fleet,
+            target,
+            departure_day,
+            tof_days,
+        } = cmd
+        else {
+            continue;
+        };
+
+        let Ok((ship, location, mut plan)) = fleets.get_mut(*fleet) else {
+            warn!("PlanTransfer: fleet {:?} not found", fleet);
+            continue;
+        };
+
+        let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
+
+        // Source is where we'd depart from after all current legs
+        let next_leg_index = plan.legs.len();
+        let source_entity = leg_source(location, &plan, next_leg_index);
+
+        // Calculate total delta-v needed (existing legs + new leg)
+        let existing_dv: f64 = plan
+            .legs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, leg)| {
+                let src = leg_source(location, &plan, i);
+                let (Ok(src_body), Ok(tgt_body)) = (bodies.get(src), bodies.get(leg.target)) else {
+                    return None;
+                };
+                lut.get_transfer(
+                    src,
+                    leg.target,
+                    &src_body.orbital_elements,
+                    &tgt_body.orbital_elements,
+                    leg.departure_day,
+                    leg.tof_days,
+                )
+                .map(|s| s.total_dv)
+            })
+            .sum();
+
+        // Look up the new transfer
+        let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source_entity), bodies.get(*target)) else {
+            warn!("PlanTransfer: could not get body orbital elements");
+            continue;
+        };
+        let Some(solution) = lut.get_transfer(
+            source_entity,
+            *target,
+            &src_body.orbital_elements,
+            &tgt_body.orbital_elements,
+            *departure_day,
+            *tof_days,
+        ) else {
+            warn!(
+                "PlanTransfer: no transfer found for dep_day={}, tof={}",
+                departure_day, tof_days
+            );
+            continue;
+        };
+
+        let total_required = existing_dv + solution.total_dv;
+        if ship.delta_v_remaining < total_required {
+            warn!(
+                "PlanTransfer: insufficient delta-v! Need {:.0} m/s, have {:.0} m/s",
+                total_required, ship.delta_v_remaining
+            );
+            continue;
+        }
+
+        info!(
+            "Queueing leg {} -> {} (dep day {}, {} m/s)",
+            src_body.name, tgt_body.name, departure_day, solution.total_dv as i32
+        );
+
+        plan.legs.push_back(PlannedLeg {
+            target: *target,
+            departure_day: *departure_day,
+            tof_days: *tof_days,
+        });
+    }
+}
+
+/// Process CommitPlan commands - commit all uncommitted legs.
+pub fn process_commit_plan(
+    mut reader: MessageReader<StrategicCommand>,
+    mut fleets: Query<(&Fleet, &FleetLocation, &mut FlightPlan)>,
+    lut: Res<crate::transfer_lut::TransferLut>,
+    bodies: Query<&crate::orbital_data::Body>,
+) {
+    for cmd in reader.read() {
+        let StrategicCommand::CommitPlan(fleet_entity) = cmd else {
+            continue;
+        };
+
+        let Ok((fleet, location, mut plan)) = fleets.get_mut(*fleet_entity) else {
+            warn!("CommitPlan: fleet {:?} not found", fleet_entity);
+            continue;
+        };
+
+        // Check if there are uncommitted legs
+        if plan.committed_count >= plan.legs.len() {
+            info!("CommitPlan: no uncommitted legs");
+            continue;
+        }
+
+        // Sum delta-v for uncommitted legs
+        let uncommitted_dv: f64 = plan
+            .legs
+            .iter()
+            .enumerate()
+            .skip(plan.committed_count)
+            .filter_map(|(i, leg)| {
+                let source = leg_source(location, &plan, i);
+                let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target))
+                else {
+                    return None;
+                };
+                lut.get_transfer(
+                    source,
+                    leg.target,
+                    &src_body.orbital_elements,
+                    &tgt_body.orbital_elements,
+                    leg.departure_day,
+                    leg.tof_days,
+                )
+                .map(|s| s.total_dv)
+            })
+            .sum();
+
+        if fleet.delta_v_remaining < uncommitted_dv {
+            warn!(
+                "CommitPlan: insufficient delta-v! Need {:.0} m/s, have {:.0} m/s",
+                uncommitted_dv, fleet.delta_v_remaining
+            );
+            continue;
+        }
+
+        // Log what we're committing
+        for i in plan.committed_count..plan.legs.len() {
+            let leg = &plan.legs[i];
+            let source = leg_source(location, &plan, i);
+            let source_name = bodies.get(source).map(|b| b.name.as_str()).unwrap_or("?");
+            let target_name = bodies
+                .get(leg.target)
+                .map(|b| b.name.as_str())
+                .unwrap_or("?");
+
+            if let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) {
+                if let Some(solution) = lut.get_transfer(
+                    source,
+                    leg.target,
+                    &src_body.orbital_elements,
+                    &tgt_body.orbital_elements,
+                    leg.departure_day,
+                    leg.tof_days,
+                ) {
+                    info!(
+                        "Committing leg {} -> {} (day {}, {:.0} m/s)",
+                        source_name, target_name, leg.departure_day, solution.total_dv
+                    );
+                }
+            }
+        }
+
+        // Commit all
+        plan.committed_count = plan.legs.len();
+    }
+}
+
+/// Process CancelLeg commands - remove the last leg from flight plan.
+pub fn process_cancel_leg(
+    mut reader: MessageReader<StrategicCommand>,
+    mut fleets: Query<&mut FlightPlan>,
+    bodies: Query<&crate::orbital_data::Body>,
+) {
+    for cmd in reader.read() {
+        let StrategicCommand::CancelLeg(fleet_entity) = cmd else {
+            continue;
+        };
+
+        let Ok(mut plan) = fleets.get_mut(*fleet_entity) else {
+            warn!("CancelLeg: fleet {:?} not found", fleet_entity);
+            continue;
+        };
+
+        if let Some(cancelled) = plan.legs.pop_back() {
+            // Adjust committed_count if we removed a committed leg
+            if plan.committed_count > plan.legs.len() {
+                plan.committed_count = plan.legs.len();
+            }
+
+            let target_name = bodies
+                .get(cancelled.target)
+                .map(|b| b.name.as_str())
+                .unwrap_or("?");
+            let was_committed = plan.legs.len() < plan.committed_count;
+
+            info!(
+                "Cancelled {} leg to {} ({} remaining)",
+                if was_committed {
+                    "committed"
+                } else {
+                    "planned"
+                },
+                target_name,
+                plan.legs.len()
+            );
+        } else {
+            info!("CancelLeg: no legs to cancel");
+        }
+    }
+}
+
+/// Process SplitFleet commands - split a fleet in half.
+pub fn process_split_fleet(
+    mut commands: Commands,
+    mut reader: MessageReader<StrategicCommand>,
+    fleets: Query<(&Fleet, &FleetLocation)>,
+    children_query: Query<&Children>,
+    ships: Query<&LogicalShip>,
+) {
+    for cmd in reader.read() {
+        let StrategicCommand::SplitFleet(fleet_entity) = cmd else {
+            continue;
+        };
+
+        let Ok((fleet, location)) = fleets.get(*fleet_entity) else {
+            warn!("SplitFleet: fleet {:?} not found", fleet_entity);
+            continue;
+        };
+
+        // Must be at a body
+        let FleetLocation::AtBody(body) = location else {
+            info!("SplitFleet: cannot split fleet while in transit");
+            continue;
+        };
+
+        // Count ships from children
+        let total_ships = ship_count(*fleet_entity, &children_query, &ships);
+
+        // Must have more than 1 ship
+        if total_ships <= 1 {
+            info!(
+                "SplitFleet: cannot split fleet with only {} ship(s)",
+                total_ships
+            );
+            continue;
+        }
+
+        // Split in half (larger half stays with original)
+        let split_count = total_ships / 2;
+
+        // Collect LogicalShip children to move to new fleet
+        let mut ships_to_move = Vec::new();
+        if let Ok(children) = children_query.get(*fleet_entity) {
+            for child in children.iter() {
+                if ships.contains(child) {
+                    ships_to_move.push(child);
+                    if ships_to_move.len() >= split_count as usize {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Spawn new fleet at same body
+        let new_name = generate_fleet_name();
+        info!(
+            "Split {} ships from {} to new fleet {}",
+            split_count, fleet.name, new_name
+        );
+
+        let new_fleet = commands
+            .spawn((
+                Fleet {
+                    delta_v_remaining: fleet.delta_v_remaining,
+                    name: new_name,
+                },
+                FleetLocation::AtBody(*body),
+                Faction::Player,
+                FlightPlan::default(),
+            ))
+            .id();
+
+        // Reparent ships to new fleet
+        for ship in ships_to_move {
+            commands.entity(new_fleet).add_child(ship);
+        }
+    }
+}
+
+/// Process time control commands - set paused state and time scale.
+pub fn process_time_control(
+    mut reader: MessageReader<StrategicCommand>,
+    mut sim_time: ResMut<crate::simulation::SimulationTime>,
+) {
+    for cmd in reader.read() {
+        match cmd {
+            StrategicCommand::SetPaused(paused) => {
+                sim_time.paused = *paused;
+                info!("Simulation {}", if *paused { "paused" } else { "resumed" });
+            }
+            StrategicCommand::SetTimeScale(scale) => {
+                sim_time.time_scale = *scale;
+                info!("Time scale set to {:.1}x", scale / 86400.0);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Process MergeFleets commands - merge all player fleets at same body into target fleet.
+pub fn process_merge_fleets(
+    mut commands: Commands,
+    mut reader: MessageReader<StrategicCommand>,
+    fleets: Query<(Entity, &Fleet, &FleetLocation, &Faction)>,
+    children_query: Query<&Children>,
+    ships: Query<&LogicalShip>,
+) {
+    for cmd in reader.read() {
+        let StrategicCommand::MergeFleets(fleet_entity) = cmd else {
+            continue;
+        };
+
+        let Ok((_, selected_fleet, selected_location, _)) = fleets.get(*fleet_entity) else {
+            warn!("MergeFleets: fleet {:?} not found", fleet_entity);
+            continue;
+        };
+
+        // Must be at a body
+        let FleetLocation::AtBody(body) = selected_location else {
+            info!("MergeFleets: cannot merge fleets while in transit");
+            continue;
+        };
+
+        // Find other player fleets at the same body
+        let fleets_to_merge: Vec<_> = fleets
+            .iter()
+            .filter(|(e, _, loc, faction)| {
+                *e != *fleet_entity
+                    && **faction == Faction::Player
+                    && matches!(loc, FleetLocation::AtBody(b) if *b == *body)
+            })
+            .collect();
+
+        if fleets_to_merge.is_empty() {
+            info!("MergeFleets: no other fleets at this body to merge");
+            continue;
+        }
+
+        let mut merged_names = Vec::new();
+
+        for (entity, fleet, _, _) in &fleets_to_merge {
+            merged_names.push(fleet.name.as_str());
+
+            // Reparent all LogicalShip children to selected fleet before despawning
+            if let Ok(children) = children_query.get(*entity) {
+                for child in children.iter() {
+                    if ships.contains(child) {
+                        commands.entity(*fleet_entity).add_child(child);
+                    }
+                }
+            }
+
+            // Despawn the empty fleet shell (children have been reparented)
+            commands.entity(*entity).despawn();
+        }
+
+        // Keep the higher delta-v (they should be the same, but just in case)
+        let max_dv = fleets_to_merge
+            .iter()
+            .map(|(_, f, _, _)| f.delta_v_remaining)
+            .fold(selected_fleet.delta_v_remaining, f64::max);
+
+        if max_dv != selected_fleet.delta_v_remaining {
+            commands.entity(*fleet_entity).insert(Fleet {
+                delta_v_remaining: max_dv,
+                name: selected_fleet.name.clone(),
+            });
+        }
+
+        info!(
+            "Merged {} into {}",
+            merged_names.join(", "),
+            selected_fleet.name,
+        );
+    }
 }
 
 // ============================================================================
@@ -445,125 +921,33 @@ pub fn detect_combat(
     }
 }
 
-/// Commits all uncommitted legs when Enter is pressed.
-/// Only operates on the selected fleet.
+/// Posts CommitPlan command when Enter is pressed.
 pub fn commit_plan(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut fleets: Query<(&Fleet, &FleetLocation, &mut FlightPlan), With<Selected>>,
-    lut: Res<TransferLut>,
-    bodies: Query<&Body>,
+    selected: Query<Entity, With<Selected>>,
+    mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     if !keyboard.just_pressed(KeyCode::Enter) {
         return;
     }
 
-    for (fleet, location, mut plan) in &mut fleets {
-        // Check if there are uncommitted legs
-        if plan.committed_count >= plan.legs.len() {
-            continue;
-        }
-
-        // Sum delta-v for uncommitted legs
-        let uncommitted_dv: f64 = plan
-            .legs
-            .iter()
-            .enumerate()
-            .skip(plan.committed_count)
-            .filter_map(|(i, leg)| {
-                let source = leg_source(location, &plan, i);
-                let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target))
-                else {
-                    return None;
-                };
-                lut.get_transfer(
-                    source,
-                    leg.target,
-                    &src_body.orbital_elements,
-                    &tgt_body.orbital_elements,
-                    leg.departure_day,
-                    leg.tof_days,
-                )
-                .map(|s| s.total_dv)
-            })
-            .sum();
-
-        if fleet.delta_v_remaining < uncommitted_dv {
-            warn!(
-                "Insufficient delta-v to commit plan: need {:.0} m/s, have {:.0} m/s",
-                uncommitted_dv, fleet.delta_v_remaining
-            );
-            continue;
-        }
-
-        // Log what we're committing
-        for i in plan.committed_count..plan.legs.len() {
-            let leg = &plan.legs[i];
-            let source = leg_source(location, &plan, i);
-            let source_name = bodies.get(source).map(|b| b.name.as_str()).unwrap_or("?");
-            let target_name = bodies
-                .get(leg.target)
-                .map(|b| b.name.as_str())
-                .unwrap_or("?");
-
-            if let (Ok(src_body), Ok(tgt_body)) = (bodies.get(source), bodies.get(leg.target)) {
-                if let Some(solution) = lut.get_transfer(
-                    source,
-                    leg.target,
-                    &src_body.orbital_elements,
-                    &tgt_body.orbital_elements,
-                    leg.departure_day,
-                    leg.tof_days,
-                ) {
-                    info!(
-                        "Committing leg {} -> {} (day {}, {:.0} m/s)",
-                        source_name, target_name, leg.departure_day, solution.total_dv
-                    );
-                }
-            }
-        }
-
-        // Commit all
-        plan.committed_count = plan.legs.len();
+    for fleet_entity in &selected {
+        cmd_writer.write(StrategicCommand::CommitPlan(fleet_entity));
     }
 }
 
-/// Cancels the last leg when N is pressed.
-/// Only operates on the selected fleet.
+/// Posts CancelLeg command when N is pressed.
 pub fn cancel_last_leg(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut fleets: Query<&mut FlightPlan, With<Selected>>,
-    bodies: Query<&Body>,
+    selected: Query<Entity, With<Selected>>,
+    mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyN) {
         return;
     }
 
-    for mut plan in &mut fleets {
-        if let Some(cancelled) = plan.legs.pop_back() {
-            // Adjust committed_count if we removed a committed leg
-            if plan.committed_count > plan.legs.len() {
-                plan.committed_count = plan.legs.len();
-            }
-
-            let target_name = bodies
-                .get(cancelled.target)
-                .map(|b| b.name.as_str())
-                .unwrap_or("?");
-            let was_committed = plan.legs.len() < plan.committed_count;
-
-            info!(
-                "Cancelled {} leg to {} ({} remaining)",
-                if was_committed {
-                    "committed"
-                } else {
-                    "planned"
-                },
-                target_name,
-                plan.legs.len()
-            );
-        } else {
-            info!("No legs to cancel");
-        }
+    for fleet_entity in &selected {
+        cmd_writer.write(StrategicCommand::CancelLeg(fleet_entity));
     }
 }
 
@@ -585,152 +969,34 @@ fn generate_fleet_name() -> String {
     }
 }
 
-/// Splits the selected fleet in half when S is pressed.
-/// Only works if fleet is at a body (not in transit) and has >1 ship.
+/// Posts SplitFleet command when S is pressed.
 pub fn split_fleet(
-    mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
-    selected: Query<(Entity, &Fleet, &FleetLocation), With<Selected>>,
-    children_query: Query<&Children>,
-    ships: Query<&LogicalShip>,
+    selected: Query<Entity, With<Selected>>,
+    mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyS) {
         return;
     }
 
-    let Ok((fleet_entity, fleet, location)) = selected.single() else {
-        return;
-    };
-
-    // Must be at a body
-    let FleetLocation::AtBody(body) = location else {
-        info!("Cannot split fleet while in transit");
-        return;
-    };
-
-    // Count ships from children
-    let total_ships = ship_count(fleet_entity, &children_query, &ships);
-
-    // Must have more than 1 ship
-    if total_ships <= 1 {
-        info!("Cannot split fleet with only {} ship(s)", total_ships);
-        return;
-    }
-
-    // Split in half (larger half stays with original)
-    let split_count = total_ships / 2;
-
-    // Collect LogicalShip children to move to new fleet
-    let mut ships_to_move = Vec::new();
-    if let Ok(children) = children_query.get(fleet_entity) {
-        for child in children.iter() {
-            if ships.contains(child) {
-                ships_to_move.push(child);
-                if ships_to_move.len() >= split_count as usize {
-                    break;
-                }
-            }
-        }
-    }
-
-    // Spawn new fleet at same body
-    let new_name = generate_fleet_name();
-    info!(
-        "Split {} ships from {} to new fleet {}",
-        split_count, fleet.name, new_name
-    );
-
-    let new_fleet = commands
-        .spawn((
-            Fleet {
-                delta_v_remaining: fleet.delta_v_remaining,
-                name: new_name,
-            },
-            FleetLocation::AtBody(*body),
-            Faction::Player,
-            FlightPlan::default(),
-        ))
-        .id();
-
-    // Reparent ships to new fleet
-    for ship in ships_to_move {
-        commands.entity(new_fleet).add_child(ship);
+    if let Ok(fleet_entity) = selected.single() {
+        cmd_writer.write(StrategicCommand::SplitFleet(fleet_entity));
     }
 }
 
-/// Merges all fleets at the same body into the selected fleet when M is pressed.
-/// Only works if there are 2+ fleets at the same body.
+/// Posts MergeFleets command when M is pressed.
 pub fn merge_fleets(
-    mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
-    selected: Query<(Entity, &Fleet, &FleetLocation), With<Selected>>,
-    other_fleets: Query<(Entity, &Fleet, &FleetLocation, &Faction), Without<Selected>>,
-    children_query: Query<&Children>,
-    ships: Query<&LogicalShip>,
+    selected: Query<Entity, With<Selected>>,
+    mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyM) {
         return;
     }
 
-    let Ok((selected_entity, selected_fleet, selected_location)) = selected.single() else {
-        return;
-    };
-
-    // Must be at a body
-    let FleetLocation::AtBody(body) = selected_location else {
-        info!("Cannot merge fleets while in transit");
-        return;
-    };
-
-    // Find other player fleets at the same body
-    let fleets_to_merge: Vec<_> = other_fleets
-        .iter()
-        .filter(|(_, _, loc, faction)| {
-            **faction == Faction::Player && matches!(loc, FleetLocation::AtBody(b) if *b == *body)
-        })
-        .collect();
-
-    if fleets_to_merge.is_empty() {
-        info!("No other fleets at this body to merge");
-        return;
+    if let Ok(fleet_entity) = selected.single() {
+        cmd_writer.write(StrategicCommand::MergeFleets(fleet_entity));
     }
-
-    let mut merged_names = Vec::new();
-
-    for (entity, fleet, _, _) in &fleets_to_merge {
-        merged_names.push(fleet.name.as_str());
-
-        // Reparent all LogicalShip children to selected fleet before despawning
-        if let Ok(children) = children_query.get(*entity) {
-            for child in children.iter() {
-                if ships.contains(child) {
-                    commands.entity(selected_entity).add_child(child);
-                }
-            }
-        }
-
-        // Despawn the empty fleet shell (children have been reparented)
-        commands.entity(*entity).despawn();
-    }
-
-    // Keep the higher delta-v (they should be the same, but just in case)
-    let max_dv = fleets_to_merge
-        .iter()
-        .map(|(_, f, _, _)| f.delta_v_remaining)
-        .fold(selected_fleet.delta_v_remaining, f64::max);
-
-    if max_dv != selected_fleet.delta_v_remaining {
-        commands.entity(selected_entity).insert(Fleet {
-            delta_v_remaining: max_dv,
-            name: selected_fleet.name.clone(),
-        });
-    }
-
-    info!(
-        "Merged {} into {}",
-        merged_names.join(", "),
-        selected_fleet.name,
-    );
 }
 
 /// Checks if all enemy fleets are destroyed and updates victory state.

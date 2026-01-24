@@ -5,7 +5,12 @@
 //! Two types of spatial entities:
 //! - [`GridNode`]: Can have high-precision children (bodies, arenas)
 //! - [`GridLeaf`]: High-precision entity without high-precision children (ships, projectiles)
+//!
+//! World position tracking:
+//! - [`TrackedWorldPosition`]: Component storing last frame's world position
+//! - [`BigSpaceHierarchy`]: System param to compute current world position on demand
 
+use bevy::ecs::system::SystemParam;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::prelude::*;
@@ -114,5 +119,107 @@ impl SpatialCommands for Commands<'_, '_> {
         let (leaf, cell, transform) = GridLeaf::at_position(position, parent_grid);
         self.spawn((leaf, cell, transform, ChildOf(parent), bundle))
             .id()
+    }
+}
+
+// ============================================================================
+// World Position Tracking
+// ============================================================================
+
+/// Stores the world position from the previous frame.
+///
+/// Add this component to entities that need frame-to-frame position deltas
+/// (e.g., for camera tracking of moving bodies).
+///
+/// Updated automatically in PostUpdate by [`sync_tracked_world_positions`].
+#[derive(Component, Default, Debug)]
+pub struct TrackedWorldPosition {
+    /// World position at the end of the previous frame
+    pub last_frame: DVec3,
+}
+
+/// System param for computing world positions in the big_space hierarchy.
+///
+/// Walks from an entity up to the root, accumulating position through nested grids.
+/// Excludes Camera3d entities to avoid query conflicts with camera manipulation systems.
+#[derive(SystemParam)]
+pub struct BigSpaceHierarchy<'w, 's> {
+    root: Query<'w, 's, (Entity, &'static Grid), With<BigSpace>>,
+    spatial: Query<
+        'w,
+        's,
+        (
+            &'static Transform,
+            Option<&'static CellCoord>,
+            Option<&'static ChildOf>,
+        ),
+        Without<Camera3d>,
+    >,
+    grids: Query<'w, 's, &'static Grid>,
+}
+
+impl BigSpaceHierarchy<'_, '_> {
+    /// Compute the world position (DVec3) of an entity by walking up the hierarchy.
+    ///
+    /// Returns None if the entity isn't in the big_space hierarchy or queries fail.
+    pub fn world_position(&self, entity: Entity) -> Option<DVec3> {
+        let (root_entity, root_grid) = self.root.single().ok()?;
+
+        // Build chain from entity up to root
+        let mut chain = Vec::new();
+        let mut current = entity;
+
+        loop {
+            let (transform, cell, parent) = self.spatial.get(current).ok()?;
+            chain.push((current, transform.clone(), cell.cloned()));
+
+            if let Some(child_of) = parent {
+                if child_of.0 == root_entity {
+                    break; // Reached root
+                }
+                current = child_of.0;
+            } else {
+                break; // No parent, assume at root level
+            }
+        }
+
+        // Walk down the chain (from root toward entity), accumulating position
+        // Start at root position (origin)
+        let mut world_pos = DVec3::ZERO;
+        let mut current_grid: &Grid = root_grid;
+
+        // Process chain in reverse (from closest-to-root to entity)
+        for (ent, transform, cell) in chain.into_iter().rev() {
+            // Compute this entity's position relative to parent using parent's grid
+            let local_pos = if let Some(cell) = cell {
+                current_grid.grid_position_double(&cell, &transform)
+            } else {
+                transform.translation.as_dvec3()
+            };
+
+            world_pos += local_pos;
+
+            // If this entity has a grid, use it for children
+            if let Ok(grid) = self.grids.get(ent) {
+                current_grid = grid;
+            }
+        }
+
+        Some(world_pos)
+    }
+}
+
+/// Updates [`TrackedWorldPosition`] components with current world position.
+///
+/// Run this in PostUpdate so `last_frame` captures the position at end of frame.
+/// Next frame, compute current position on-demand and diff against `last_frame`.
+pub fn sync_tracked_world_positions(
+    hierarchy: BigSpaceHierarchy,
+    mut query: Query<(Entity, &mut TrackedWorldPosition)>,
+) {
+    for (entity, mut tracked) in &mut query {
+        if let Some(pos) = hierarchy.world_position(entity) {
+            tracked.last_frame = pos;
+        }
     }
 }

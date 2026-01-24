@@ -18,7 +18,7 @@ use crate::ComputedBody;
 use crate::camera::{CameraScale, CameraTarget};
 use crate::ship::{CombatState, Faction, LogicalShip, Selected, ship_count};
 use crate::simulation::SimulationTime;
-use crate::spatial::{GridLeaf, GridNode};
+use crate::spatial::{BigSpaceHierarchy, GridLeaf, GridNode, TrackedWorldPosition};
 
 // ============================================================================
 // Constants
@@ -216,6 +216,7 @@ pub fn setup_tactical_arena(
         warn!("No camera found");
         return;
     };
+    // Save current camera state for restoration when exiting tactical
     let cam_world_pos = root_grid.grid_position_double(cam_cell, cam_transform);
     camera_state.previous_position = cam_world_pos.xy();
     camera_state.previous_scale = cam_scale.0;
@@ -247,6 +248,10 @@ pub fn setup_tactical_arena(
             Transform::from_translation(arena_local),
             ChildOf(body_entity),
             Visibility::default(),
+            // Track world position for camera delta calculation
+            TrackedWorldPosition {
+                last_frame: arena_helio,
+            },
         ))
         .id();
 
@@ -405,11 +410,13 @@ fn compute_ship_x_offset(index: usize, total: usize) -> f64 {
 
 /// Updates the camera to track the tactical arena.
 ///
-/// With nested grids, the arena automatically inherits body motion.
-/// This system keeps the camera following the arena's world position.
+/// The camera needs to move with the body's orbital motion while also
+/// animating toward the arena center. We handle these separately:
+/// 1. Apply body motion delta directly to camera position
+/// 2. Let animate_camera handle the lerp toward arena center
 pub fn update_arena_position(
-    arena_query: Query<(&TacticalArena, &CellCoord, &Transform)>,
-    bodies: Query<(&ComputedBody, &Grid)>,
+    hierarchy: BigSpaceHierarchy,
+    arena_query: Query<(Entity, &TrackedWorldPosition)>,
     root_grid_query: Query<&Grid, With<BigSpace>>,
     mut camera_query: Query<
         (
@@ -428,32 +435,25 @@ pub fn update_arena_position(
         return;
     };
 
-    for (arena, arena_cell, arena_transform) in &arena_query {
-        let Ok((body, body_grid)) = bodies.get(arena.body) else {
+    for (arena_entity, tracked) in &arena_query {
+        // Get arena's current world position via hierarchy walk
+        let Some(arena_world) = hierarchy.world_position(arena_entity) else {
             continue;
         };
 
-        // Compute arena's world position:
-        // 1. Body's world position (from ComputedBody, updated by orbital mechanics)
-        // 2. Arena's position in body's grid
-        let arena_in_body_grid = body_grid.grid_position_double(arena_cell, arena_transform);
-        let arena_world = body.helio_pos + arena_in_body_grid;
+        // Compute how much the arena moved since last frame (body orbital motion)
+        let delta = arena_world - tracked.last_frame;
 
-        // Get camera's current world position
+        // Apply delta to camera position - this keeps the camera moving with the body
         let cam_world = root_grid.grid_position_double(&cam_cell, &cam_transform);
+        let new_cam_world = cam_world + delta;
+        let (new_cell, new_local) = root_grid.translation_to_grid(new_cam_world);
+        *cam_cell = new_cell;
+        cam_transform.translation = new_local;
 
-        // Compute where camera should be (same offset from arena as currently)
-        // On first frame or when not animating, camera should track arena directly
-        if camera_target.position.is_none() {
-            // Not animating - directly track arena with current offset
-            let offset = cam_world.xy() - arena_world.xy();
-            let new_cam_world = arena_world + DVec3::new(offset.x, offset.y, 0.0);
-            let (new_cell, new_local) = root_grid.translation_to_grid(new_cam_world);
-            *cam_cell = new_cell;
-            cam_transform.translation = new_local;
-        } else {
-            // Animating - update target to track arena
-            // The animate_camera system will lerp toward this
+        // Update animation target to arena's current position
+        // animate_camera will lerp from camera's new position toward this target
+        if camera_target.position.is_some() {
             camera_target.position = Some(arena_world.xy());
         }
     }
@@ -473,7 +473,6 @@ fn compute_ship_display(cam_scale: f32) -> (f32, f32) {
     let screen_pixels =
         ((log_radius - 1.0).max(1.0) * SHIP_TARGET_PIXELS_SCALE).min(SHIP_TARGET_PIXELS_MAX);
     let log_scaled_size = screen_pixels * cam_scale;
-    dbg!(log_scaled_size, screen_pixels, cam_scale);
 
     // Take max of log-scaled size vs physical size (like bodies do)
     let display_size = log_scaled_size.max(SHIP_PHYSICAL_SIZE);
@@ -558,7 +557,6 @@ pub fn update_ship_mesh_scale(
 ) {
     let (display_size, visibility) = compute_ship_display(cam_scale.0);
     let visible = visibility > 0.01;
-    dbg!(cam_scale.0, display_size, visibility);
 
     for (mut transform, mut vis) in &mut meshes {
         transform.scale = Vec3::splat(display_size);

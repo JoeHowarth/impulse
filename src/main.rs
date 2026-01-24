@@ -6,6 +6,7 @@ use bevy::{
     asset::Assets,
     camera::visibility::NoFrustumCulling,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    ecs::message::MessageWriter,
     gizmos::{
         GizmoAsset,
         config::{GizmoConfigStore, GizmoLineJoint},
@@ -172,7 +173,7 @@ fn spawn_body_circles(
             Mesh3d(mesh),
             MeshMaterial3d(material),
             Transform::default(),
-            dbg!(ChildOf(entity)),
+            ChildOf(entity),
         ));
     }
 }
@@ -385,9 +386,6 @@ pub(crate) fn update_body_positions(
         computed.visibility =
             calculate_visibility_f64(body, helio_pos, &helio_positions, cam_scale);
         computed.display_size = compute_display_size(body, cam_scale);
-        if body.name == "Earth" {
-            dbg!(cam_scale, computed.display_size, computed.visibility);
-        }
     }
 }
 
@@ -557,7 +555,6 @@ fn compute_display_size(body: &Body, cam_scale: f32) -> f32 {
 /// - Click: select fleet if one is at click location
 /// - Shift+click: open transfer popup for selected fleet
 pub(crate) fn handle_body_click(
-    mut commands: Commands,
     mouse_button: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -568,6 +565,7 @@ pub(crate) fn handle_body_click(
     selected_query: Query<Entity, With<ship::Selected>>,
     mut popup: ResMut<ui::TransferPopup>,
     combat: Res<ship::CombatState>,
+    mut cmd_writer: MessageWriter<ship::StrategicCommand>,
 ) {
     // Skip in tactical mode - picking::handle_tactical_click handles that
     if combat.active {
@@ -663,10 +661,8 @@ pub(crate) fn handle_body_click(
                 .map(|(_, f, _, _)| f.name.clone())
                 .unwrap_or_default();
             info!("Selected fleet: {}", fleet_name);
-            for old_selected in selected_query.iter() {
-                commands.entity(old_selected).remove::<ship::Selected>();
-            }
-            commands.entity(fleet_entity).insert(ship::Selected);
+            // Post SelectFleet event
+            cmd_writer.write(ship::StrategicCommand::SelectFleet(fleet_entity));
         }
     }
 }

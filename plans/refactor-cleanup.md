@@ -248,3 +248,84 @@ Ready for Phase 3 (tactical runtime boundaries + event pipeline).
 
 ### Phase 3 Status: ✅ Complete
 Ready for Phase 4 (strategic event pipeline) or Phase 5 (handoff integrity).
+
+---
+
+## Progress Update (2026-01-23, Phase 4 complete)
+
+### Goal
+Make the simulation drivable by CLI/programmatic systems. All user actions become events that can be posted by UI, tests, or scripts.
+
+### Completed
+- **StrategicCommand enum** with 9 variants:
+  - `SelectFleet(Entity)`, `DeselectFleet`
+  - `PlanTransfer { fleet, target, departure_day, tof_days }`
+  - `CommitPlan(Entity)`, `CancelLeg(Entity)`
+  - `SplitFleet(Entity)`, `MergeFleets(Entity)`
+  - `SetPaused(bool)`, `SetTimeScale(f64)`
+
+- **Consumer functions** (one per command type):
+  - `process_select_fleet` - handles fleet selection
+  - `process_plan_transfer` - adds transfer leg to flight plan
+  - `process_commit_plan` - commits uncommitted legs
+  - `process_cancel_leg` - removes last leg
+  - `process_split_fleet` - splits fleet in half
+  - `process_merge_fleets` - merges fleets at same body
+  - `process_time_control` - handles pause and time scale
+
+- **Input systems refactored** to post events:
+  - `handle_body_click` → `SelectFleet`
+  - `handle_fleet_number_keys` → `SelectFleet`
+  - `handle_option_selection` → `PlanTransfer`
+  - `commit_plan` → `CommitPlan`
+  - `cancel_last_leg` → `CancelLeg`
+  - `split_fleet` → `SplitFleet`
+  - `merge_fleets` → `MergeFleets`
+  - `handle_time_controls` → `SetPaused`, `SetTimeScale`
+
+### Files Modified
+- `src/ship.rs` - Added StrategicCommand enum and all consumer functions
+- `src/ui.rs` - Refactored handle_option_selection, handle_fleet_number_keys
+- `src/main.rs` - Refactored handle_body_click
+- `src/simulation.rs` - Refactored handle_time_controls
+- `src/plugins.rs` - Registered StrategicCommand message and consumers
+
+### Deferred
+- Test harness / CLI injection for programmatic control (follow-up task)
+
+### Phase 4 Status: ✅ Complete
+Ready for Phase 5 (handoff integrity) or programmatic testing infrastructure.
+
+---
+
+## Progress Update (2026-01-23, Camera tracking fix)
+
+### Problem
+Tactical camera animation couldn't keep up with fast-moving bodies (Mercury at 47 km/s). The lerp tried to chase an absolute world position that moved faster than the lerp could converge.
+
+### Root Cause
+When Phase 2 introduced nested grids, the old `last_helio_pos` tracking for body motion delta was removed. The camera was no longer being moved with the body's orbital motion, only lerping toward the arena's absolute position.
+
+### Solution
+Added general-purpose world position tracking infrastructure to `spatial.rs`:
+
+1. **`TrackedWorldPosition` component** - stores previous frame's world position (DVec3)
+2. **`BigSpaceHierarchy` system param** - computes current world position by walking up the hierarchy on-demand
+3. **`sync_tracked_world_positions` system** - runs in PostUpdate to capture positions for next frame
+
+Camera tracking now works in two parts:
+- **Delta application**: Camera moves with body motion (`delta = current - last_frame`)
+- **Lerp animation**: Independently closes gap to arena center
+
+### Key Design Decisions
+- `BigSpaceHierarchy` walks up from entity to root (O(depth), depth ~4)
+- Excludes `Camera3d` from spatial query to avoid conflicts with camera mutation
+- `TrackedWorldPosition` updated in PostUpdate so delta reflects full frame of movement
+- Physics sync left unchanged - this is separate infrastructure for Update-schedule tracking
+
+### Files Modified
+- `src/spatial.rs` - Added TrackedWorldPosition, BigSpaceHierarchy, sync system
+- `src/tactical.rs` - Arena spawns with TrackedWorldPosition, update_arena_position uses delta
+- `src/plugins.rs` - Registered sync_tracked_world_positions in PostUpdate
+- `src/camera.rs` - Fixed animation threshold (was 0.1% of distance from origin, now fixed 100m)
+- `CLAUDE.md` - Added working style note about not changing approach without discussion

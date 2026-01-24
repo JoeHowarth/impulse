@@ -1,5 +1,6 @@
 //! UI components and systems for the orbital simulation.
 
+use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
 
 use crate::ComputedBody;
@@ -1006,19 +1007,17 @@ pub fn handle_option_hover(
 pub fn handle_option_selection(
     mut commands: Commands,
     mut popup: ResMut<TransferPopup>,
-    mut player_query: Query<
+    player_query: Query<
         (
             Entity,
-            &crate::ship::Fleet,
             &crate::ship::FleetLocation,
-            &mut crate::ship::FlightPlan,
+            &crate::ship::FlightPlan,
         ),
         With<crate::ship::Selected>,
     >,
     sim_time: Res<SimulationTime>,
     interactions: Query<(&Interaction, &TransferOptionButton), Changed<Interaction>>,
-    bodies: Query<&crate::orbital_data::Body>,
-    lut: Res<TransferLut>,
+    mut cmd_writer: MessageWriter<crate::ship::StrategicCommand>,
 ) {
     for (interaction, button) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -1031,9 +1030,9 @@ pub fn handle_option_selection(
             continue;
         };
 
-        // Get player ship and flight plan
-        let Ok((_ship_entity, ship, location, mut plan)) = player_query.single_mut() else {
-            warn!("No player ship found");
+        // Get player fleet entity
+        let Ok((fleet_entity, location, plan)) = player_query.single() else {
+            warn!("No player fleet selected");
             continue;
         };
 
@@ -1043,68 +1042,19 @@ pub fn handle_option_selection(
         };
 
         let current_day = (sim_time.sim_time / 86400.0).floor() as i32;
-
-        // Source is where we'd depart from after all current legs
         let next_leg_index = plan.legs.len();
-        let source_entity = crate::ship::leg_source(location, &plan, next_leg_index);
-        let base_day = crate::ship::leg_base_day(location, &plan, next_leg_index, current_day);
-
+        let base_day = crate::ship::leg_base_day(location, plan, next_leg_index, current_day);
         let departure_day = base_day + option.departure_day;
-        let tof_days = option.tof_days;
 
-        // Calculate total delta-v needed (all existing legs + this new one)
-        let existing_dv: f64 = plan
-            .legs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, leg)| {
-                let src = crate::ship::leg_source(location, &plan, i);
-                let (Ok(src_body), Ok(tgt_body)) = (bodies.get(src), bodies.get(leg.target)) else {
-                    return None;
-                };
-                lut.get_transfer(
-                    src,
-                    leg.target,
-                    &src_body.orbital_elements,
-                    &tgt_body.orbital_elements,
-                    leg.departure_day,
-                    leg.tof_days,
-                )
-                .map(|s| s.total_dv)
-            })
-            .sum();
-
-        let total_required = existing_dv + option.solution.total_dv;
-
-        if ship.delta_v_remaining < total_required {
-            warn!(
-                "Insufficient delta-v! Need {:.0} m/s, have {:.0} m/s",
-                total_required, ship.delta_v_remaining
-            );
-            continue;
-        }
-
-        let target_name = bodies
-            .get(target_entity)
-            .map(|b| b.name.as_str())
-            .unwrap_or("???");
-        let source_name = bodies
-            .get(source_entity)
-            .map(|b| b.name.as_str())
-            .unwrap_or("???");
-
-        info!(
-            "Queueing leg {} -> {} (dep day {}, {} m/s)",
-            source_name, target_name, departure_day, option.solution.total_dv as i32
-        );
-
-        plan.legs.push_back(crate::ship::PlannedLeg {
+        // Post PlanTransfer event
+        cmd_writer.write(crate::ship::StrategicCommand::PlanTransfer {
+            fleet: fleet_entity,
             target: target_entity,
             departure_day,
-            tof_days,
+            tof_days: option.tof_days,
         });
 
-        // Close the popup
+        // Close the popup (UI cleanup happens here)
         info!("handle_option_selection: closing popup");
         despawn_transfer_popup(&mut commands, &mut popup);
 
@@ -1314,7 +1264,6 @@ pub fn update_fleet_tabs(
 /// System to handle number key presses for fleet selection.
 /// Double-tap a number key to pan the camera to that fleet.
 pub fn handle_fleet_number_keys(
-    mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut key_state: ResMut<FleetKeyState>,
@@ -1324,10 +1273,10 @@ pub fn handle_fleet_number_keys(
         &crate::ship::FleetLocation,
         &crate::ship::Faction,
     )>,
-    selected: Query<Entity, With<crate::ship::Selected>>,
     bodies: Query<&GlobalTransform, With<Body>>,
     sim_time: Res<SimulationTime>,
     mut camera_query: Query<&mut crate::camera::CameraTarget>,
+    mut cmd_writer: MessageWriter<crate::ship::StrategicCommand>,
 ) {
     // Map digit keys to indices
     let key_to_index = [
@@ -1400,13 +1349,8 @@ pub fn handle_fleet_number_keys(
                     // Single tap: select fleet
                     info!("Selecting fleet {} via key {}", fleet.name, index + 1);
 
-                    // Remove Selected from all
-                    for old in selected.iter() {
-                        commands.entity(old).remove::<crate::ship::Selected>();
-                    }
-
-                    // Add Selected to target
-                    commands.entity(*fleet_entity).insert(crate::ship::Selected);
+                    // Post SelectFleet event
+                    cmd_writer.write(crate::ship::StrategicCommand::SelectFleet(*fleet_entity));
 
                     // Record key press for double-tap detection
                     key_state.last_key = Some(key);

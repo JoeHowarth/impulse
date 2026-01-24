@@ -1,6 +1,9 @@
 //! Simulation time management.
 
+use bevy::ecs::message::MessageWriter;
 use bevy::prelude::*;
+
+use crate::ship::StrategicCommand;
 
 /// Seconds per day
 pub const SECONDS_PER_DAY: f64 = 60.0 * 60.0 * 24.0;
@@ -55,27 +58,27 @@ pub fn parse_start_day() -> i32 {
     0
 }
 
-/// Handles keyboard input for time controls (pause, speed up/down).
+/// Posts time control commands when keyboard input is detected.
+/// Also advances simulation time if not paused.
 pub fn handle_time_controls(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut sim_time: ResMut<SimulationTime>,
+    mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     // Toggle pause with P
     if keyboard.just_pressed(KeyCode::KeyP) {
-        sim_time.paused = !sim_time.paused;
+        cmd_writer.write(StrategicCommand::SetPaused(!sim_time.paused));
     }
 
     // Adjust time scale with +/- (also = for + without shift)
     if keyboard.just_pressed(KeyCode::Equal) || keyboard.just_pressed(KeyCode::NumpadAdd) {
-        sim_time.time_scale *= 2.0;
-        // Cap at ~640 days/sec
-        sim_time.time_scale = sim_time.time_scale.min(STRATEGIC_TIME_SCALE * 64.0);
+        let new_scale = (sim_time.time_scale * 2.0).min(STRATEGIC_TIME_SCALE * 64.0);
+        cmd_writer.write(StrategicCommand::SetTimeScale(new_scale));
     }
     if keyboard.just_pressed(KeyCode::Minus) || keyboard.just_pressed(KeyCode::NumpadSubtract) {
-        sim_time.time_scale /= 2.0;
-        // Min at 1 second per second (realtime)
-        sim_time.time_scale = sim_time.time_scale.max(1.0);
+        let new_scale = (sim_time.time_scale / 2.0).max(1.0);
+        cmd_writer.write(StrategicCommand::SetTimeScale(new_scale));
     }
 
     // Advance simulation time if not paused

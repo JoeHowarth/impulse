@@ -1,3 +1,9 @@
+# Working Style
+
+- Do NOT change approach from what we discussed without talking to me first
+- If a fix isn't working as expected, discuss options before pivoting to a different solution
+- When I ask "why isn't X working", I want to understand the problem, not have you silently switch to approach Y
+
 # Bevy Development Notes
 
 ## Understanding the Bevy API
