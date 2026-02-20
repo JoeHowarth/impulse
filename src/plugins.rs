@@ -153,6 +153,8 @@ impl Plugin for TacticalPlugin {
         app.init_resource::<tactical::ShowExitDialog>();
         app.init_resource::<tactical::TacticalCameraState>();
         app.init_resource::<tactical::BoxSelection>();
+        app.init_resource::<tactical::RightClickDrag>();
+        app.init_resource::<tactical::Flagships>();
 
         app.add_systems(
             OnEnter(AppState::Tactical),
@@ -190,6 +192,8 @@ impl Plugin for TacticalPlugin {
             (
                 tactical::apply_selection_commands,
                 tactical::apply_move_commands,
+                tactical::apply_acceleration_commands,
+                tactical::apply_escort_position_commands,
             )
                 .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Tactical)),
@@ -209,9 +213,14 @@ impl Plugin for TacticalPlugin {
                 .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Tactical)),
         );
+        // Ship movement systems - legacy MoveOrder and new relational positioning
         app.add_systems(
             Update,
-            tactical::update_ship_movement
+            (
+                tactical::update_ship_movement,      // Legacy: go-to-destination
+                tactical::update_flagship_movement,  // New: flagship AccelerationOrder
+                tactical::update_escort_movement,    // New: escort RelativePosition (PD controller)
+            )
                 .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Tactical)),
         );
@@ -248,6 +257,7 @@ impl Plugin for TacticalPlugin {
                 tactical::render_move_markers,
                 tactical::sync_target_rings,
                 tactical::render_targeting_lines,
+                tactical::render_threat_axis,
                 tactical::update_ship_mesh_scale,
                 tactical::update_missile_mesh_scale,
                 tactical::sync_box_selection,

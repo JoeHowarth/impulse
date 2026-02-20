@@ -70,8 +70,8 @@ pub fn spawn_camera(mut commands: Commands, query: Query<&Window, With<PrimaryWi
             }),
             Transform::from_xyz(0.0, 0.0, 0.0).looking_at(Vec3::NEG_Z, Vec3::Y),
             PanCam {
-                // Only use right/middle mouse for panning - left is for selection
-                grab_buttons: vec![MouseButton::Right, MouseButton::Middle],
+                // Only middle mouse for panning - right-click is for movement commands
+                grab_buttons: vec![MouseButton::Middle],
                 ..default()
             },
             CameraTarget::default(),

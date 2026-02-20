@@ -27,8 +27,8 @@ use crate::spatial::{BigSpaceHierarchy, GridLeaf, GridNode, TrackedWorldPosition
 // Re-export commonly used types
 pub use commands::TacticalCommand;
 pub use input::{
-    BoxSelection, apply_move_commands, apply_selection_commands, handle_tactical_input,
-    sync_box_selection,
+    BoxSelection, RightClickDrag, apply_move_commands, apply_selection_commands,
+    handle_tactical_input, sync_box_selection,
 };
 
 // ============================================================================
@@ -234,6 +234,44 @@ pub struct DespawnAt(pub f64);
 #[derive(Component)]
 pub struct TargetRing;
 
+/// Marker for the flagship of a fleet.
+/// Each fleet has exactly one flagship. The game designates the first ship spawned.
+#[derive(Component)]
+pub struct Flagship;
+
+/// Urgency level for position-keeping. Higher urgency = tighter tolerance, more fuel burn.
+#[derive(Component, Default, Clone, Copy, PartialEq, Debug)]
+pub enum Urgency {
+    Lazy,
+    #[default]
+    Normal,
+    Aggressive,
+    Emergency,
+}
+
+/// Escort's assigned position relative to their flagship.
+/// Position is specified in polar coordinates relative to the threat axis.
+#[derive(Component)]
+pub struct RelativePosition {
+    /// Angle in radians from the threat axis (flagship → enemy flagship line).
+    /// 0 = directly toward enemy, π/2 = perpendicular (left), -π/2 = perpendicular (right).
+    pub angle: f64,
+    /// Distance from flagship in meters.
+    pub radius: f64,
+    /// How aggressively to maintain position.
+    pub urgency: Urgency,
+}
+
+/// Flagship's acceleration order - direct thrust control.
+/// The flagship maintains this acceleration until changed or cleared.
+#[derive(Component)]
+pub struct AccelerationOrder {
+    /// Thrust direction (unit vector, arena-local coordinates).
+    pub direction: DVec3,
+    /// Thrust magnitude in m/s².
+    pub magnitude: f64,
+}
+
 // ============================================================================
 // Resources
 // ============================================================================
@@ -247,6 +285,14 @@ pub struct ShowExitDialog(pub bool);
 pub struct TacticalCameraState {
     pub previous_position: DVec2,
     pub previous_scale: f32,
+}
+
+/// Cached references to flagship entities for quick lookup.
+/// Updated when ships are spawned or destroyed.
+#[derive(Resource, Default)]
+pub struct Flagships {
+    pub player: Option<Entity>,
+    pub enemy: Option<Entity>,
 }
 
 // ============================================================================
@@ -355,7 +401,7 @@ pub fn setup_tactical_arena(
     });
 
     // Spawn player ships (bottom center, y = -3 km)
-    let player_spawned = spawn_fleet_ships(
+    let (player_spawned, player_flagship) = spawn_fleet_ships(
         &mut commands,
         arena,
         &arena_grid,
@@ -370,7 +416,7 @@ pub fn setup_tactical_arena(
     );
 
     // Spawn enemy ships (top center, y = +3 km)
-    let enemy_spawned = spawn_fleet_ships(
+    let (enemy_spawned, enemy_flagship) = spawn_fleet_ships(
         &mut commands,
         arena,
         &arena_grid,
@@ -384,9 +430,15 @@ pub fn setup_tactical_arena(
         &enemy_material,
     );
 
+    // Store flagship references for quick lookup
+    commands.insert_resource(Flagships {
+        player: player_flagship,
+        enemy: enemy_flagship,
+    });
+
     info!(
-        "Spawned {} player ships and {} enemy ships in arena",
-        player_spawned, enemy_spawned
+        "Spawned {} player ships (flagship: {:?}) and {} enemy ships (flagship: {:?}) in arena",
+        player_spawned, player_flagship, enemy_spawned, enemy_flagship
     );
 
     // Store arena entity in combat state
@@ -401,7 +453,7 @@ pub fn setup_tactical_arena(
 
 /// Spawns VisualShips for all LogicalShips in the given fleets.
 /// Ships use GridLeaf for high-precision positioning in the arena's grid.
-/// Returns the number of ships spawned.
+/// Returns (ship_count, flagship_entity) - the first ship spawned is designated flagship.
 fn spawn_fleet_ships(
     commands: &mut Commands,
     arena: Entity,
@@ -414,8 +466,9 @@ fn spawn_fleet_ships(
     ships: &Query<&LogicalShip>,
     ship_mesh: &Handle<Mesh>,
     ship_material: &Handle<StandardMaterial>,
-) -> usize {
+) -> (usize, Option<Entity>) {
     let mut index = 0;
+    let mut flagship: Option<Entity> = None;
 
     for &fleet_entity in fleets {
         let Ok(children) = children_query.get(fleet_entity) else {
@@ -432,28 +485,34 @@ fn spawn_fleet_ships(
                 let (leaf, cell, transform) = GridLeaf::at_position(ship_position, arena_grid);
 
                 // Spawn VisualShip with GridLeaf for high-precision positioning
-                let visual_ship = commands
-                    .spawn((
-                        VisualShip {
-                            logical: logical_ship,
-                            fleet: fleet_entity,
-                            faction,
-                        },
-                        leaf,
-                        cell,
-                        transform,
-                        Visibility::default(),
-                        // Physics components
-                        RigidBody::Dynamic,
-                        Collider::sphere(50.0), // 50m radius collider
-                        LinearVelocity::default(),
-                        SweptCcd::default(), // Prevent tunneling at high speeds
-                        CollisionEventsEnabled, // Enable collision events for missiles
-                        // Movement stats
-                        ShipStats::default(),
-                        ChildOf(arena),
-                    ))
-                    .id();
+                let mut entity_commands = commands.spawn((
+                    VisualShip {
+                        logical: logical_ship,
+                        fleet: fleet_entity,
+                        faction,
+                    },
+                    leaf,
+                    cell,
+                    transform,
+                    Visibility::default(),
+                    // Physics components
+                    RigidBody::Dynamic,
+                    Collider::sphere(50.0), // 50m radius collider
+                    LinearVelocity::default(),
+                    SweptCcd::default(), // Prevent tunneling at high speeds
+                    CollisionEventsEnabled, // Enable collision events for missiles
+                    // Movement stats
+                    ShipStats::default(),
+                    ChildOf(arena),
+                ));
+
+                // First ship spawned becomes flagship
+                if flagship.is_none() {
+                    entity_commands.insert(Flagship);
+                    flagship = Some(entity_commands.id());
+                }
+
+                let visual_ship = entity_commands.id();
 
                 // Spawn triangle mesh as child of VisualShip (low-precision, just local offset)
                 commands.spawn((
@@ -469,7 +528,7 @@ fn spawn_fleet_ships(
         }
     }
 
-    index
+    (index, flagship)
 }
 
 /// Computes horizontal X offset in meters for a ship given its index and total count.
@@ -1265,6 +1324,181 @@ pub fn update_ship_movement(
     }
 }
 
+/// Updates flagship velocity based on AccelerationOrder.
+/// Flagship applies continuous thrust in the specified direction.
+pub fn update_flagship_movement(
+    time: Res<Time>,
+    mut flagships: Query<
+        (&AccelerationOrder, &mut LinearVelocity, &ShipStats),
+        With<Flagship>,
+    >,
+) {
+    let dt = time.delta_secs_f64();
+    if dt <= 0.0 {
+        return;
+    }
+
+    for (order, mut velocity, stats) in &mut flagships {
+        // Clamp magnitude to ship's max acceleration
+        let magnitude = order.magnitude.min(stats.max_acceleration);
+        let accel = order.direction * magnitude;
+
+        // Apply acceleration
+        velocity.0 += accel * dt;
+
+        // Clamp to max speed
+        let speed = velocity.0.length();
+        if speed > stats.max_speed {
+            velocity.0 = velocity.0.normalize() * stats.max_speed;
+        }
+    }
+}
+
+/// Updates escort positions using a PD controller to maintain relative position to flagship.
+/// Position is defined in a rotating reference frame: origin at player flagship,
+/// +X axis pointing toward enemy flagship (the "threat axis").
+pub fn update_escort_movement(
+    time: Res<Time>,
+    flagships: Res<Flagships>,
+    arena_query: Query<&Grid, With<TacticalArena>>,
+    flagship_query: Query<(&CellCoord, &Transform, &LinearVelocity), With<Flagship>>,
+    mut escorts: Query<
+        (
+            &RelativePosition,
+            &mut LinearVelocity,
+            &ShipStats,
+            &CellCoord,
+            &Transform,
+            &VisualShip,
+        ),
+        Without<Flagship>,
+    >,
+) {
+    let dt = time.delta_secs_f64();
+    if dt <= 0.0 {
+        return;
+    }
+
+    // Need both flagships to define the reference frame
+    let Some(player_flag_entity) = flagships.player else { return };
+    let Some(enemy_flag_entity) = flagships.enemy else { return };
+
+    let Ok((pf_cell, pf_tf, pf_vel)) = flagship_query.get(player_flag_entity) else { return };
+    let Ok((ef_cell, ef_tf, _)) = flagship_query.get(enemy_flag_entity) else { return };
+
+    let Ok(arena_grid) = arena_query.single() else { return };
+
+    // Get world positions of flagships
+    let player_flag_pos = arena_grid.grid_position_double(pf_cell, pf_tf);
+    let enemy_flag_pos = arena_grid.grid_position_double(ef_cell, ef_tf);
+
+    // Compute threat axis (from player flagship toward enemy flagship)
+    let to_enemy = enemy_flag_pos - player_flag_pos;
+    let axis = to_enemy.normalize_or_zero();
+
+    // Perpendicular axis (for angular offset) - rotate 90° counterclockwise in XY plane
+    let axis_perp = DVec3::new(-axis.y, axis.x, 0.0);
+
+    for (rel_pos, mut velocity, stats, cell, tf, visual_ship) in &mut escorts {
+        // Only control player escorts (enemy escorts could have their own AI)
+        if visual_ship.faction != Faction::Player {
+            continue;
+        }
+
+        // Compute desired world position from polar coordinates
+        // offset = axis * cos(angle) * radius + axis_perp * sin(angle) * radius
+        let offset = axis * rel_pos.angle.cos() * rel_pos.radius
+            + axis_perp * rel_pos.angle.sin() * rel_pos.radius;
+        let desired_pos = player_flag_pos + offset;
+
+        // Desired velocity matches flagship velocity (stay in formation)
+        let desired_vel = pf_vel.0;
+
+        // Current state
+        let current_pos = arena_grid.grid_position_double(cell, tf);
+        let current_vel = velocity.0;
+
+        // Compute errors
+        let pos_error = desired_pos - current_pos;
+        let vel_error = desired_vel - current_vel;
+
+        // PD gains and tolerance based on urgency
+        let (kp, kd, pos_tolerance, vel_tolerance) = match rel_pos.urgency {
+            Urgency::Lazy => (0.01, 0.1, 5000.0, 50.0),      // 5km, 50m/s tolerance
+            Urgency::Normal => (0.05, 0.2, 2000.0, 20.0),   // 2km, 20m/s tolerance
+            Urgency::Aggressive => (0.1, 0.3, 500.0, 10.0), // 500m, 10m/s tolerance
+            Urgency::Emergency => (0.2, 0.4, 100.0, 5.0),   // 100m, 5m/s tolerance
+        };
+
+        // Dead zone - don't thrust if within tolerance
+        if pos_error.length() < pos_tolerance && vel_error.length() < vel_tolerance {
+            continue;
+        }
+
+        // PD control: thrust = Kp * pos_error + Kd * vel_error
+        let thrust_vec = pos_error * kp + vel_error * kd;
+        let thrust_mag = thrust_vec.length().min(stats.max_acceleration);
+
+        if thrust_mag > 0.01 {
+            let thrust_dir = thrust_vec.normalize();
+            velocity.0 += thrust_dir * thrust_mag * dt;
+        }
+
+        // Clamp to max speed
+        let speed = velocity.0.length();
+        if speed > stats.max_speed {
+            velocity.0 = velocity.0.normalize() * stats.max_speed;
+        }
+    }
+}
+
+/// Applies acceleration commands to flagships.
+pub fn apply_acceleration_commands(
+    mut commands: Commands,
+    mut events: MessageReader<TacticalCommand>,
+    flagships: Query<Entity, With<Flagship>>,
+) {
+    for event in events.read() {
+        match event {
+            TacticalCommand::SetFlagshipAcceleration { flagship, direction, magnitude } => {
+                if flagships.contains(*flagship) {
+                    commands.entity(*flagship).insert(AccelerationOrder {
+                        direction: *direction,
+                        magnitude: *magnitude,
+                    });
+                }
+            }
+            TacticalCommand::ClearAcceleration { flagship } => {
+                if flagships.contains(*flagship) {
+                    commands.entity(*flagship).remove::<AccelerationOrder>();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Applies escort position commands.
+pub fn apply_escort_position_commands(
+    mut commands: Commands,
+    mut events: MessageReader<TacticalCommand>,
+    ships: Query<Entity, (With<VisualShip>, Without<Flagship>)>,
+) {
+    for event in events.read() {
+        if let TacticalCommand::SetEscortPosition { ship, angle, radius, urgency } = event {
+            if ships.contains(*ship) {
+                commands.entity(*ship).insert(RelativePosition {
+                    angle: *angle,
+                    radius: *radius,
+                    urgency: *urgency,
+                });
+                // Remove any legacy MoveOrder when using relational positioning
+                commands.entity(*ship).remove::<MoveOrder>();
+            }
+        }
+    }
+}
+
 /// Renders destination markers for selected ships with move orders.
 pub fn render_move_markers(
     mut commands: Commands,
@@ -1527,6 +1761,93 @@ pub fn render_targeting_lines(
             Vec3::new(attacker_pos.x as f32, attacker_pos.y as f32, 0.02),
             Vec3::new(target_pos.x as f32, target_pos.y as f32, 0.02),
         );
+    }
+}
+
+/// Renders the threat axis line from player flagship to enemy flagship.
+/// Also draws assigned position indicators for escorts with RelativePosition.
+pub fn render_threat_axis(
+    combat: Res<CombatState>,
+    flagships: Res<Flagships>,
+    arena_query: Query<&Grid, With<TacticalArena>>,
+    flagship_query: Query<(&CellCoord, &Transform), With<Flagship>>,
+    escorts: Query<(&RelativePosition, &CellCoord, &Transform), (With<VisualShip>, Without<Flagship>)>,
+    mut painter: ShapePainter,
+) {
+    if !combat.active {
+        return;
+    }
+
+    let Some(player_flag_entity) = flagships.player else { return };
+    let Some(enemy_flag_entity) = flagships.enemy else { return };
+
+    let Ok((pf_cell, pf_tf)) = flagship_query.get(player_flag_entity) else { return };
+    let Ok((ef_cell, ef_tf)) = flagship_query.get(enemy_flag_entity) else { return };
+
+    let Ok(arena_grid) = arena_query.single() else { return };
+
+    let player_flag_pos = arena_grid.grid_position_double(pf_cell, pf_tf);
+    let enemy_flag_pos = arena_grid.grid_position_double(ef_cell, ef_tf);
+
+    // Draw threat axis line (faint orange)
+    painter.set_color(Color::srgba(1.0, 0.5, 0.0, 0.3));
+    painter.thickness = 3.0;
+    painter.line(
+        Vec3::new(player_flag_pos.x as f32, player_flag_pos.y as f32, 0.01),
+        Vec3::new(enemy_flag_pos.x as f32, enemy_flag_pos.y as f32, 0.01),
+    );
+
+    // Compute axis vectors for escort position rendering
+    let to_enemy = enemy_flag_pos - player_flag_pos;
+    let axis = to_enemy.normalize_or_zero();
+    let axis_perp = DVec3::new(-axis.y, axis.x, 0.0);
+
+    // Draw assigned position markers for escorts
+    for (rel_pos, escort_cell, escort_tf) in &escorts {
+        // Compute assigned world position
+        let offset = axis * rel_pos.angle.cos() * rel_pos.radius
+            + axis_perp * rel_pos.angle.sin() * rel_pos.radius;
+        let assigned_pos = player_flag_pos + offset;
+
+        // Current position
+        let current_pos = arena_grid.grid_position_double(escort_cell, escort_tf);
+
+        // Check if out of tolerance
+        let pos_error = (assigned_pos - current_pos).length();
+        let tolerance = match rel_pos.urgency {
+            Urgency::Lazy => 5000.0,
+            Urgency::Normal => 2000.0,
+            Urgency::Aggressive => 500.0,
+            Urgency::Emergency => 100.0,
+        };
+
+        if pos_error > tolerance {
+            // Draw ghost marker at assigned position
+            let ghost_color = Color::srgba(0.5, 1.0, 0.5, 0.4);
+            painter.set_color(ghost_color);
+            painter.thickness = 2.0;
+
+            // Small X marker
+            let size = 200.0; // 200m marker
+            let gx = assigned_pos.x as f32;
+            let gy = assigned_pos.y as f32;
+            painter.line(
+                Vec3::new(gx - size, gy - size, 0.02),
+                Vec3::new(gx + size, gy + size, 0.02),
+            );
+            painter.line(
+                Vec3::new(gx - size, gy + size, 0.02),
+                Vec3::new(gx + size, gy - size, 0.02),
+            );
+
+            // Line from current position to assigned position
+            painter.set_color(Color::srgba(0.5, 1.0, 0.5, 0.2));
+            painter.thickness = 1.0;
+            painter.line(
+                Vec3::new(current_pos.x as f32, current_pos.y as f32, 0.02),
+                Vec3::new(gx, gy, 0.02),
+            );
+        }
     }
 }
 

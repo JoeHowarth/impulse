@@ -8,11 +8,12 @@ use bevy::gizmos::GizmoAsset;
 use bevy::math::{DVec3, Isometry3d};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use big_space::prelude::{CellCoord, Grid};
 
 use crate::model::{CombatState, Faction, Selected};
 
 use super::commands::TacticalCommand;
-use super::{TacticalArena, VisualShip};
+use super::{Flagship, Flagships, TacticalArena, Urgency, VisualShip};
 
 /// Marker for the box selection rectangle gizmo entity.
 #[derive(Component)]
@@ -43,6 +44,22 @@ pub struct BoxSelection {
     /// Current drag position
     pub current: Option<Vec2>,
 }
+
+/// Tracks right-click drag state for movement/positioning commands.
+#[derive(Resource, Default)]
+pub struct RightClickDrag {
+    /// Screen position where drag started
+    pub start: Option<Vec2>,
+    /// Current drag position
+    pub current: Option<Vec2>,
+    /// The ship being controlled (if flagship, uses accel; if escort, uses relative position)
+    pub ship: Option<Entity>,
+    /// Whether the ship is a flagship (determines command type)
+    pub is_flagship: bool,
+}
+
+/// Pixels of drag that equals max acceleration for flagship
+const FLAGSHIP_DRAG_SCALE: f32 = 100.0;
 
 // ============================================================================
 // Helper Functions
@@ -133,17 +150,24 @@ pub fn handle_tactical_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    arena_query: Query<&GlobalTransform, With<TacticalArena>>,
+    arena_query: Query<(&GlobalTransform, &Grid), With<TacticalArena>>,
     combat: Res<CombatState>,
+    flagships_res: Res<Flagships>,
     mut box_sel: ResMut<BoxSelection>,
-    visual_ships: Query<(Entity, &GlobalTransform, &VisualShip)>,
+    mut right_drag: ResMut<RightClickDrag>,
+    visual_ships: Query<(Entity, &GlobalTransform, &VisualShip, &CellCoord, &Transform)>,
     selected_ships: Query<Entity, (With<VisualShip>, With<Selected>)>,
+    flagship_query: Query<&Flagship>,
+    ship_stats: Query<&super::ShipStats>,
     ui_interaction: Query<&Interaction>,
 ) {
     // Only in tactical mode
     if !combat.active {
         box_sel.start = None;
         box_sel.current = None;
+        right_drag.start = None;
+        right_drag.current = None;
+        right_drag.ship = None;
         return;
     }
 
@@ -165,19 +189,20 @@ pub fn handle_tactical_input(
 
     // Modifier keys
     let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
     let e_held = keyboard.pressed(KeyCode::KeyE);
 
     // Collect ship data for picking
     let player_ships: Vec<_> = visual_ships
         .iter()
-        .filter(|(_, _, vs)| vs.faction == Faction::Player)
-        .map(|(e, gt, _)| (e, gt.translation()))
+        .filter(|(_, _, vs, _, _)| vs.faction == Faction::Player)
+        .map(|(e, gt, _, _, _)| (e, gt.translation()))
         .collect();
 
     let enemy_ships: Vec<_> = visual_ships
         .iter()
-        .filter(|(_, _, vs)| vs.faction == Faction::Enemy)
-        .map(|(e, gt, _)| (e, gt.translation()))
+        .filter(|(_, _, vs, _, _)| vs.faction == Faction::Enemy)
+        .map(|(e, gt, _, _, _)| (e, gt.translation()))
         .collect();
 
     // ========== LEFT CLICK PRESS: Start drag ==========
@@ -269,21 +294,152 @@ pub fn handle_tactical_input(
         box_sel.current = None;
     }
 
-    // ========== RIGHT CLICK: Move order ==========
+    // ========== RIGHT CLICK PRESS: Start movement drag ==========
     if mouse.just_pressed(MouseButton::Right) && !ui_blocking {
-        let selected: Vec<Entity> = selected_ships.iter().collect();
-        if !selected.is_empty() {
-            if let Ok(arena_transform) = arena_query.single() {
-                if let Some(destination) =
-                    screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform)
-                {
-                    cmd_writer.write(TacticalCommand::MoveShips {
-                        ships: selected,
-                        destination,
+        // Get the first selected ship (for now, we only control one at a time for positioning)
+        if let Some(ship) = selected_ships.iter().next() {
+            let is_flagship = flagship_query.get(ship).is_ok();
+            right_drag.start = Some(cursor_pos);
+            right_drag.current = Some(cursor_pos);
+            right_drag.ship = Some(ship);
+            right_drag.is_flagship = is_flagship;
+        }
+    }
+
+    // ========== RIGHT CLICK HELD: Update drag position ==========
+    if mouse.pressed(MouseButton::Right) && right_drag.start.is_some() {
+        right_drag.current = Some(cursor_pos);
+    }
+
+    // ========== RIGHT CLICK RELEASE: Issue movement command ==========
+    if mouse.just_released(MouseButton::Right) {
+        if let (Some(start), Some(ship)) = (right_drag.start, right_drag.ship) {
+            let Ok((arena_transform, arena_grid)) = arena_query.single() else {
+                right_drag.start = None;
+                right_drag.current = None;
+                right_drag.ship = None;
+                return;
+            };
+
+            let drag_dist = start.distance(cursor_pos);
+
+            if right_drag.is_flagship {
+                // === FLAGSHIP: Set acceleration vector ===
+                if drag_dist > 5.0 {
+                    // Get ship's world position as drag origin
+                    if let Ok((_, ship_gt, _, _, _)) = visual_ships.get(ship) {
+                        let ship_screen = camera.world_to_viewport(camera_transform, ship_gt.translation());
+
+                        if let Ok(ship_screen_pos) = ship_screen {
+                            // Direction from ship to cursor (in screen space, then normalize)
+                            let screen_dir = (cursor_pos - ship_screen_pos).normalize_or_zero();
+                            // Convert screen direction to world direction (flip Y because screen Y is down)
+                            let world_dir = DVec3::new(screen_dir.x as f64, -screen_dir.y as f64, 0.0).normalize();
+
+                            // Magnitude: drag distance / scale, clamped to max acceleration
+                            let max_accel = ship_stats.get(ship).map(|s| s.max_acceleration).unwrap_or(10.0);
+                            let magnitude = ((drag_dist / FLAGSHIP_DRAG_SCALE) as f64 * max_accel).min(max_accel);
+
+                            cmd_writer.write(TacticalCommand::SetFlagshipAcceleration {
+                                flagship: ship,
+                                direction: world_dir,
+                                magnitude,
+                            });
+                        }
+                    }
+                } else {
+                    // Short drag/click = clear acceleration (coast)
+                    cmd_writer.write(TacticalCommand::ClearAcceleration { flagship: ship });
+                }
+            } else {
+                // === ESCORT: Set relative position ===
+                // Get player flagship position
+                let Some(player_flag_entity) = flagships_res.player else {
+                    // No flagship, fall back to legacy move command
+                    if let Some(dest) = screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform) {
+                        cmd_writer.write(TacticalCommand::MoveShips {
+                            ships: vec![ship],
+                            destination: dest,
+                        });
+                    }
+                    right_drag.start = None;
+                    right_drag.current = None;
+                    right_drag.ship = None;
+                    return;
+                };
+
+                let Some(enemy_flag_entity) = flagships_res.enemy else {
+                    // No enemy flagship, fall back to legacy
+                    if let Some(dest) = screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform) {
+                        cmd_writer.write(TacticalCommand::MoveShips {
+                            ships: vec![ship],
+                            destination: dest,
+                        });
+                    }
+                    right_drag.start = None;
+                    right_drag.current = None;
+                    right_drag.ship = None;
+                    return;
+                };
+
+                // Get flagship positions
+                let Ok((_, _, _, pf_cell, pf_tf)) = visual_ships.get(player_flag_entity) else {
+                    right_drag.start = None;
+                    right_drag.current = None;
+                    right_drag.ship = None;
+                    return;
+                };
+                let Ok((_, _, _, ef_cell, ef_tf)) = visual_ships.get(enemy_flag_entity) else {
+                    right_drag.start = None;
+                    right_drag.current = None;
+                    right_drag.ship = None;
+                    return;
+                };
+
+                let player_flag_pos = arena_grid.grid_position_double(pf_cell, pf_tf);
+                let enemy_flag_pos = arena_grid.grid_position_double(ef_cell, ef_tf);
+
+                // Compute threat axis
+                let to_enemy = enemy_flag_pos - player_flag_pos;
+                let axis = to_enemy.normalize_or_zero();
+                let axis_perp = DVec3::new(-axis.y, axis.x, 0.0);
+
+                // Get drag destination in arena-local coordinates
+                if let Some(drag_pos) = screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform) {
+                    // Offset from player flagship
+                    let offset = drag_pos - player_flag_pos;
+                    let radius = offset.length();
+
+                    // Compute angle from axis using atan2
+                    // dot with axis = cos(angle) * radius
+                    // dot with axis_perp = sin(angle) * radius
+                    let dot_axis = offset.dot(axis);
+                    let dot_perp = offset.dot(axis_perp);
+                    let angle = dot_perp.atan2(dot_axis);
+
+                    // Determine urgency from modifier keys
+                    let urgency = if shift {
+                        Urgency::Aggressive
+                    } else if ctrl {
+                        Urgency::Lazy
+                    } else {
+                        Urgency::Normal
+                    };
+
+                    cmd_writer.write(TacticalCommand::SetEscortPosition {
+                        ship,
+                        angle,
+                        radius,
+                        urgency,
                     });
                 }
             }
         }
+
+        // Reset drag state
+        right_drag.start = None;
+        right_drag.current = None;
+        right_drag.ship = None;
     }
 }
 
