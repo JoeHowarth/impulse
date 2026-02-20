@@ -3,6 +3,7 @@
 //! Strategic-mode specific UI. Common UI (HUD, labels) is in common/ui.rs.
 
 use bevy::ecs::message::MessageWriter;
+use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
 
 use super::commands::StrategicCommand;
@@ -13,7 +14,6 @@ use crate::model::{
     Body, Faction, Fleet, FleetLocation, FlightPlan, LogicalShip, MU_SUN, Selected,
     TransferSolution, leg_base_day, leg_source, propagate_kepler_full, ship_count,
 };
-use crate::phys_vec_to_vec3;
 
 // Re-export common UI components for backward compatibility
 pub use crate::common::ui::{
@@ -40,6 +40,9 @@ const DOUBLE_TAP_THRESHOLD: f64 = 0.35;
 #[derive(Resource, Default)]
 pub struct TransferPopup {
     pub target_entity: Option<Entity>,
+    /// Which target body the currently spawned popup UI is showing.
+    /// Used to detect retarget while popup is already open.
+    pub displayed_target: Option<Entity>,
     pub popup_entity: Option<Entity>,
     /// Cached options for the currently displayed popup
     pub options: Vec<TransferOption>,
@@ -503,8 +506,13 @@ pub fn despawn_transfer_popup(commands: &mut Commands, popup: &mut TransferPopup
         commands.entity(entity).despawn();
     }
     popup.target_entity = None;
+    popup.displayed_target = None;
     popup.hovered_option = None;
     popup.waiting_for_cache = None;
+}
+
+fn popup_needs_rebuild(popup: &TransferPopup, requested_target: Entity) -> bool {
+    popup.popup_entity.is_none() || popup.displayed_target != Some(requested_target)
 }
 
 /// System to handle popup spawning when target is set.
@@ -522,9 +530,16 @@ pub fn handle_popup_spawn(
         return;
     };
 
-    // If popup already exists, don't spawn again
-    if popup.popup_entity.is_some() {
+    // If popup for this exact target already exists, keep it.
+    if !popup_needs_rebuild(&popup, target_entity) {
         return;
+    }
+
+    // Retarget while open: despawn old popup first so options/UI are rebuilt for the new target.
+    if let Some(entity) = popup.popup_entity.take() {
+        commands.entity(entity).despawn();
+        popup.hovered_option = None;
+        popup.displayed_target = None;
     }
 
     // Get player ship state to find source body
@@ -599,6 +614,7 @@ pub fn handle_popup_spawn(
     );
 
     popup.popup_entity = Some(popup_entity);
+    popup.displayed_target = Some(target_entity);
 }
 
 /// System to update popup position to follow target body.
@@ -728,6 +744,7 @@ pub fn update_popup_options(
         available_dv,
     );
     popup.popup_entity = Some(new_popup_entity);
+    popup.displayed_target = Some(target_entity);
 }
 
 /// System to handle close button clicks.
@@ -1032,9 +1049,9 @@ pub fn handle_fleet_number_keys(
     time: Res<Time>,
     mut key_state: ResMut<FleetKeyState>,
     fleets: Query<(Entity, &Fleet, &FleetLocation, &Faction)>,
-    bodies: Query<&GlobalTransform, With<Body>>,
+    bodies: Query<&ComputedBody, With<Body>>,
     sim_time: Res<SimulationTime>,
-    camera_query: Query<&mut crate::camera::CameraTarget>,
+    mut camera_query: Query<&mut crate::camera::CameraTarget>,
     mut cmd_writer: MessageWriter<StrategicCommand>,
 ) {
     // Map digit keys to indices
@@ -1065,15 +1082,16 @@ pub fn handle_fleet_number_keys(
                     && (current_time - key_state.last_press_time) < DOUBLE_TAP_THRESHOLD;
 
                 if is_double_tap {
-                    // Double-tap: zoom camera to fleet position
-                    info!("Double-tap: zooming to fleet {}", fleet.name);
+                    // Double-tap: pan camera to fleet position
+                    info!("Double-tap: panning to fleet {}", fleet.name);
 
                     // Get fleet position
                     let fleet_pos = match location {
                         FleetLocation::AtBody(body_entity) => bodies
                             .get(*body_entity)
-                            .map(|gt| gt.translation())
-                            .unwrap_or(Vec3::ZERO),
+                            .map(|computed| computed.helio_pos)
+                            .unwrap_or(DVec3::ZERO)
+                            .xy(),
                         FleetLocation::InTransit {
                             solution,
                             departure_time,
@@ -1087,20 +1105,20 @@ pub fn handle_fleet_number_keys(
                                     MU_SUN,
                                     elapsed,
                                 ) {
-                                    phys_vec_to_vec3(r_vec)
+                                    DVec2::new(r_vec.x, r_vec.y)
                                 } else {
-                                    Vec3::ZERO
+                                    DVec2::ZERO
                                 }
                             } else {
-                                Vec3::ZERO
+                                DVec2::ZERO
                             }
                         }
                     };
 
                     // Set camera target for smooth animation (just recenter, no zoom)
-                    // if let Ok(mut camera_target) = camera_query.single_mut() {
-                    //     camera_target.pan_to(Vec2::new(fleet_pos.x, fleet_pos.y));
-                    // }
+                    if let Ok(mut camera_target) = camera_query.single_mut() {
+                        camera_target.pan_to(fleet_pos);
+                    }
 
                     // Clear double-tap state
                     key_state.last_key = None;
@@ -1118,6 +1136,25 @@ pub fn handle_fleet_number_keys(
             }
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_rebuild_decision_handles_retarget() {
+        let mut popup = TransferPopup::default();
+        let a = Entity::from_bits(1);
+        let b = Entity::from_bits(2);
+
+        assert!(popup_needs_rebuild(&popup, a));
+
+        popup.popup_entity = Some(Entity::from_bits(10));
+        popup.displayed_target = Some(a);
+        assert!(!popup_needs_rebuild(&popup, a));
+        assert!(popup_needs_rebuild(&popup, b));
     }
 }
 

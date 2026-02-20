@@ -236,6 +236,7 @@ pub fn sync_fleet_shapes(
     big_space_root: Res<BigSpaceRoot>,
     grid_query: Query<&Grid, With<BigSpace>>,
     fleets: Query<(Entity, &Fleet, &FleetLocation, Option<&Selected>, &Faction)>,
+    bodies: Query<&GlobalTransform, With<Body>>,
     existing_shapes: Query<(Entity, &FleetShape)>,
     mut shape_transforms: Query<&mut Transform, With<FleetShape>>,
     sim_time: Res<SimulationTime>,
@@ -254,6 +255,22 @@ pub fn sync_fleet_shapes(
 
     let cam_scale = cam_scale.0;
     let fleet_size = cam_scale * FLEET_SIZE_PIXELS;
+    let computed_positions = compute_fleet_positions(&fleets, &bodies, cam_scale);
+
+    let at_body_local_offset = |fleet_entity: Entity, body: Entity| -> Vec3 {
+        let Some((fleet_world_pos, _)) = computed_positions.get(&fleet_entity) else {
+            return Vec3::new(cam_scale * 15.0, 0.0, 0.2);
+        };
+        let Ok(body_transform) = bodies.get(body) else {
+            return Vec3::new(cam_scale * 15.0, 0.0, 0.2);
+        };
+        let body_world_pos = body_transform.translation();
+        Vec3::new(
+            fleet_world_pos.x - body_world_pos.x,
+            fleet_world_pos.y - body_world_pos.y,
+            0.2,
+        )
+    };
 
     // Track which fleets currently exist and have shapes
     let mut fleets_with_shapes: HashMap<Entity, Entity> = HashMap::new();
@@ -332,9 +349,9 @@ pub fn sync_fleet_shapes(
                     // Update existing shape
                     if let Ok(mut transform) = shape_transforms.get_mut(shape_entity) {
                         match location {
-                            FleetLocation::AtBody(_body) => {
+                            FleetLocation::AtBody(body) => {
                                 // Shape is child of body - just update local offset and rotation
-                                transform.translation = Vec3::new(cam_scale * 15.0, 0.0, 0.2);
+                                transform.translation = at_body_local_offset(fleet_entity, *body);
                                 transform.rotation = rotation;
                             }
                             FleetLocation::InTransit {
@@ -392,8 +409,10 @@ pub fn sync_fleet_shapes(
             match location {
                 FleetLocation::AtBody(body) => {
                     // Spawn as child of body entity
-                    let local_transform =
-                        Transform::from_xyz(cam_scale * 15.0, 0.0, 0.2).with_rotation(rotation);
+                    let local_transform = Transform::from_translation(
+                        at_body_local_offset(fleet_entity, *body),
+                    )
+                    .with_rotation(rotation);
                     let config = ShapeConfig {
                         color,
                         thickness: cam_scale * 1.0,
