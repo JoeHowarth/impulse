@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ComputedBody;
 use crate::camera::{CameraScale, CameraTarget};
-use crate::common::SimulationTime;
+use crate::common::{STRATEGIC_TIME_SCALE, SimulationTime};
 use crate::model::{CombatState, Faction, Fleet, LogicalShip, Selected, ship_count};
 use crate::spatial::{BigSpaceHierarchy, GridLeaf, GridNode, TrackedWorldPosition};
 
@@ -1211,6 +1211,7 @@ pub fn clear_dead_targets(
 pub fn update_ship_movement(
     mut commands: Commands,
     time: Res<Time>,
+    sim_time: Res<SimulationTime>,
     arena_query: Query<&Grid, With<TacticalArena>>,
     mut ships: Query<
         (
@@ -1225,7 +1226,7 @@ pub fn update_ship_movement(
     >,
 ) {
     // Use frame delta time - Avian will integrate the velocity
-    let dt = time.delta_secs_f64();
+    let dt = time.delta_secs_f64() * sim_time.time_scale;
     if dt <= 0.0 {
         return;
     }
@@ -1328,12 +1329,13 @@ pub fn update_ship_movement(
 /// Flagship applies continuous thrust in the specified direction.
 pub fn update_flagship_movement(
     time: Res<Time>,
+    sim_time: Res<SimulationTime>,
     mut flagships: Query<
         (&AccelerationOrder, &mut LinearVelocity, &ShipStats),
         With<Flagship>,
     >,
 ) {
-    let dt = time.delta_secs_f64();
+    let dt = time.delta_secs_f64() * sim_time.time_scale;
     if dt <= 0.0 {
         return;
     }
@@ -1359,6 +1361,7 @@ pub fn update_flagship_movement(
 /// +X axis pointing toward enemy flagship (the "threat axis").
 pub fn update_escort_movement(
     time: Res<Time>,
+    sim_time: Res<SimulationTime>,
     flagships: Res<Flagships>,
     arena_query: Query<&Grid, With<TacticalArena>>,
     flagship_query: Query<(&CellCoord, &Transform, &LinearVelocity), With<Flagship>>,
@@ -1374,7 +1377,7 @@ pub fn update_escort_movement(
         Without<Flagship>,
     >,
 ) {
-    let dt = time.delta_secs_f64();
+    let dt = time.delta_secs_f64() * sim_time.time_scale;
     if dt <= 0.0 {
         return;
     }
@@ -1886,7 +1889,7 @@ pub fn teardown_tactical_arena(
     combat.body = None;
 
     // Restore time scale to strategic default
-    sim_time.time_scale = 1.0;
+    sim_time.time_scale = STRATEGIC_TIME_SCALE;
 
     // Restore camera to previous position
     if let Ok(mut camera_target) = camera_query.single_mut() {
@@ -1916,17 +1919,25 @@ pub fn cleanup_empty_fleets(
 
 /// Checks if ships have left the arena bounds (400km x 400km).
 /// Ships leaving the arena are considered to have fled - despawn both visual and logical.
-pub fn check_ship_bounds(mut commands: Commands, ships: Query<(Entity, &VisualShip, &Transform)>) {
-    for (entity, visual, transform) in &ships {
-        let pos = transform.translation;
+pub fn check_ship_bounds(
+    mut commands: Commands,
+    arena_query: Query<&Grid, With<TacticalArena>>,
+    ships: Query<(Entity, &VisualShip, &Transform, &CellCoord)>,
+) {
+    let Ok(arena_grid) = arena_query.single() else {
+        return;
+    };
+
+    for (entity, visual, transform, cell) in &ships {
+        let pos = arena_grid.grid_position_double(cell, transform);
 
         // Check if outside arena bounds (±200,000 km = ±200,000,000 m)
-        if pos.x.abs() as f64 > ARENA_HALF || pos.y.abs() as f64 > ARENA_HALF {
+        if pos.x.abs() > ARENA_HALF || pos.y.abs() > ARENA_HALF {
             info!(
                 "Ship {:?} fled arena at ({:.0} km, {:.0} km) - despawning",
                 entity,
-                pos.x as f64 / 1000.0,
-                pos.y as f64 / 1000.0
+                pos.x / 1000.0,
+                pos.y / 1000.0
             );
 
             // Despawn visual ship (children despawn automatically via ChildOf)
@@ -2110,6 +2121,127 @@ pub fn detect_combat_end(
     } else if player_alive == 0 {
         info!("Defeat! All player ships destroyed or fled");
         next_state.set(crate::app_state::AppState::Strategic);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn check_ship_bounds_uses_cellcoord_world_position() {
+        let mut app = App::new();
+        app.add_systems(Update, check_ship_bounds);
+
+        app.world_mut().spawn((
+            TacticalArena {
+                body: Entity::PLACEHOLDER,
+            },
+            Grid::new(crate::spatial::GRID_CELL_SIZE, crate::spatial::GRID_SWITCH_THRESHOLD),
+        ));
+
+        let fleet = app.world_mut().spawn_empty().id();
+        let logical = app.world_mut().spawn(LogicalShip).id();
+        let visual = app
+            .world_mut()
+            .spawn((
+                VisualShip {
+                    logical,
+                    fleet,
+                    faction: Faction::Player,
+                },
+                // 3_000_000 * 100m = 300_000_000m > ARENA_HALF
+                CellCoord::new(3_000_000, 0, 0),
+                Transform::default(),
+            ))
+            .id();
+
+        app.update();
+
+        assert!(!app.world().entities().contains(visual));
+        assert!(!app.world().entities().contains(logical));
+    }
+
+    #[test]
+    fn flagship_movement_uses_simulation_scaled_dt() {
+        let mut app = App::new();
+        app.add_systems(Update, update_flagship_movement);
+        app.insert_resource(Time::<()>::default());
+        app.insert_resource(SimulationTime {
+            sim_time: 0.0,
+            time_scale: 10.0,
+            paused: false,
+        });
+
+        let flagship = app
+            .world_mut()
+            .spawn((
+                Flagship,
+                AccelerationOrder {
+                    direction: DVec3::X,
+                    magnitude: 2.0,
+                },
+                LinearVelocity::default(),
+                ShipStats {
+                    max_acceleration: 10.0,
+                    max_speed: 10_000.0,
+                },
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f64(0.5));
+        app.update();
+
+        let velocity = app.world().get::<LinearVelocity>(flagship).unwrap().0;
+        // dv = a * dt * time_scale = 2.0 * 0.5 * 10 = 10.0 m/s
+        assert!((velocity.x - 10.0).abs() < 1e-6, "velocity.x={}", velocity.x);
+    }
+
+    #[test]
+    fn teardown_restores_strategic_time_scale() {
+        let mut app = App::new();
+        app.add_systems(Update, teardown_tactical_arena);
+
+        let arena = app
+            .world_mut()
+            .spawn((TacticalArena {
+                body: Entity::PLACEHOLDER,
+            },))
+            .id();
+        let camera_entity = app.world_mut().spawn(CameraTarget::default()).id();
+
+        app.insert_resource(CombatState {
+            active: true,
+            arena: Some(arena),
+            body: Some(Entity::PLACEHOLDER),
+            player_fleets: vec![],
+            enemy_fleets: vec![],
+        });
+        app.insert_resource(SimulationTime {
+            sim_time: 0.0,
+            time_scale: TACTICAL_TIME_SCALE,
+            paused: false,
+        });
+        app.insert_resource(ShowExitDialog(true));
+        app.insert_resource(TacticalCameraState {
+            previous_position: DVec2::new(123.0, -456.0),
+            previous_scale: 42.0,
+        });
+
+        app.update();
+
+        let sim_time = app.world().resource::<SimulationTime>();
+        assert_eq!(sim_time.time_scale, STRATEGIC_TIME_SCALE);
+
+        let combat = app.world().resource::<CombatState>();
+        assert!(!combat.active);
+
+        let camera = app.world().get::<CameraTarget>(camera_entity).unwrap();
+        assert_eq!(camera.position, Some(DVec2::new(123.0, -456.0)));
+        assert_eq!(camera.scale, Some(42.0));
     }
 }
 
