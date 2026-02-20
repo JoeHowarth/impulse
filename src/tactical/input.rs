@@ -308,7 +308,14 @@ pub fn handle_tactical_input(
 
     // ========== RIGHT CLICK HELD: Update drag position ==========
     if mouse.pressed(MouseButton::Right) && right_drag.start.is_some() {
-        right_drag.current = Some(cursor_pos);
+        if ui_blocking {
+            // Cancel drag if UI appeared mid-drag (e.g. exit dialog)
+            right_drag.start = None;
+            right_drag.current = None;
+            right_drag.ship = None;
+        } else {
+            right_drag.current = Some(cursor_pos);
+        }
     }
 
     // ========== RIGHT CLICK RELEASE: Issue movement command ==========

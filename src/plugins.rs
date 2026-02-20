@@ -239,6 +239,7 @@ impl Plugin for TacticalPlugin {
             Update,
             (
                 tactical::handle_missile_collisions,
+                tactical::sync_flagships,
                 tactical::clear_dead_targets,
                 tactical::process_despawn_at,
                 tactical::check_ship_bounds,

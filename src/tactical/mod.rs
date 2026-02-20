@@ -1189,6 +1189,26 @@ pub fn process_despawn_at(
     }
 }
 
+/// Syncs the Flagships resource when flagship entities are destroyed.
+/// If a flagship is gone, clears the reference so other systems degrade gracefully.
+pub fn sync_flagships(
+    mut flagships: ResMut<Flagships>,
+    flagship_query: Query<Entity, With<Flagship>>,
+) {
+    if let Some(entity) = flagships.player {
+        if !flagship_query.contains(entity) {
+            info!("Player flagship {:?} destroyed - clearing reference", entity);
+            flagships.player = None;
+        }
+    }
+    if let Some(entity) = flagships.enemy {
+        if !flagship_query.contains(entity) {
+            info!("Enemy flagship {:?} destroyed - clearing reference", entity);
+            flagships.enemy = None;
+        }
+    }
+}
+
 /// Clears AttackTarget from ships whose target no longer exists.
 pub fn clear_dead_targets(
     mut commands: Commands,
@@ -1225,7 +1245,11 @@ pub fn update_ship_movement(
         With<VisualShip>,
     >,
 ) {
-    // Use frame delta time - Avian will integrate the velocity
+    // Use frame delta time scaled by simulation speed.
+    // Don't modify velocities while paused - physics isn't stepping but velocity would accumulate.
+    if sim_time.paused {
+        return;
+    }
     let dt = time.delta_secs_f64() * sim_time.time_scale;
     if dt <= 0.0 {
         return;
@@ -1335,6 +1359,9 @@ pub fn update_flagship_movement(
         With<Flagship>,
     >,
 ) {
+    if sim_time.paused {
+        return;
+    }
     let dt = time.delta_secs_f64() * sim_time.time_scale;
     if dt <= 0.0 {
         return;
@@ -1377,6 +1404,9 @@ pub fn update_escort_movement(
         Without<Flagship>,
     >,
 ) {
+    if sim_time.paused {
+        return;
+    }
     let dt = time.delta_secs_f64() * sim_time.time_scale;
     if dt <= 0.0 {
         return;
@@ -1888,6 +1918,9 @@ pub fn teardown_tactical_arena(
     combat.enemy_fleets.clear();
     combat.body = None;
 
+    // Clear stale flagship references
+    commands.insert_resource(Flagships::default());
+
     // Restore time scale to strategic default
     sim_time.time_scale = STRATEGIC_TIME_SCALE;
 
@@ -2242,6 +2275,64 @@ mod tests {
         let camera = app.world().get::<CameraTarget>(camera_entity).unwrap();
         assert_eq!(camera.position, Some(DVec2::new(123.0, -456.0)));
         assert_eq!(camera.scale, Some(42.0));
+    }
+
+    #[test]
+    fn flagship_movement_blocked_while_paused() {
+        let mut app = App::new();
+        app.add_systems(Update, update_flagship_movement);
+        app.insert_resource(Time::<()>::default());
+        app.insert_resource(SimulationTime {
+            sim_time: 0.0,
+            time_scale: 60.0,
+            paused: true,
+        });
+
+        let flagship = app
+            .world_mut()
+            .spawn((
+                Flagship,
+                AccelerationOrder {
+                    direction: DVec3::X,
+                    magnitude: 10.0,
+                },
+                LinearVelocity::default(),
+                ShipStats {
+                    max_acceleration: 10.0,
+                    max_speed: 50_000.0,
+                },
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f64(1.0));
+        app.update();
+
+        let velocity = app.world().get::<LinearVelocity>(flagship).unwrap().0;
+        assert_eq!(velocity, DVec3::ZERO, "velocity should stay zero while paused");
+    }
+
+    #[test]
+    fn sync_flagships_clears_dead_entities() {
+        let mut app = App::new();
+        app.add_systems(Update, sync_flagships);
+
+        let player_flag = app.world_mut().spawn(Flagship).id();
+        let enemy_flag = app.world_mut().spawn(Flagship).id();
+
+        app.insert_resource(Flagships {
+            player: Some(player_flag),
+            enemy: Some(enemy_flag),
+        });
+
+        // Despawn player flagship
+        app.world_mut().despawn(player_flag);
+        app.update();
+
+        let flagships = app.world().resource::<Flagships>();
+        assert_eq!(flagships.player, None, "dead player flagship should be cleared");
+        assert_eq!(flagships.enemy, Some(enemy_flag), "living enemy flagship should remain");
     }
 }
 
