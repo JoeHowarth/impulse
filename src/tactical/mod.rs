@@ -7,14 +7,13 @@ pub mod commands;
 pub mod input;
 
 use avian3d::prelude::*;
-use bevy::ecs::message::MessageReader;
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::message::MessageReader;
 use bevy::math::primitives::Triangle3d;
-use bevy::math::{DVec2, DVec3};
-use bevy::prelude::*;
+use bevy::math::{DVec2, DVec3, Isometry3d};
 use bevy::mesh::Indices;
+use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
-use bevy_vector_shapes::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use std::collections::{HashMap, HashSet};
 
@@ -499,7 +498,7 @@ fn spawn_fleet_ships(
                     RigidBody::Dynamic,
                     Collider::sphere(50.0), // 50m radius collider
                     LinearVelocity::default(),
-                    SweptCcd::default(), // Prevent tunneling at high speeds
+                    SweptCcd::default(),    // Prevent tunneling at high speeds
                     CollisionEventsEnabled, // Enable collision events for missiles
                     // Movement stats
                     ShipStats::default(),
@@ -811,7 +810,7 @@ pub fn render_visual_ships(
     combat: Res<CombatState>,
     visual_ships: Query<(&VisualShip, &GlobalTransform, &Transform, Option<&Selected>)>,
     cam_scale: Res<CameraScale>,
-    mut painter: ShapePainter,
+    mut gizmos: Gizmos,
 ) {
     if !combat.active {
         return;
@@ -835,36 +834,25 @@ pub fn render_visual_ships(
         // Apply visibility fade
         let color = base_color.with_alpha(visibility);
 
-        painter.set_translation(pos);
-        painter.set_rotation(Quat::IDENTITY);
-        painter.set_color(color);
-
         // Triangle dimensions
         let size = display_size;
-        painter.thickness = size * 0.15;
         let half_base = size * 0.5;
         let height = size;
+        let a = pos + Vec3::new(0.0, height * 0.5, 0.0);
+        let b = pos + Vec3::new(-half_base, -height * 0.5, 0.0);
+        let c = pos + Vec3::new(half_base, -height * 0.5, 0.0);
 
-        painter.line(
-            Vec3::new(0.0, height * 0.5, 0.0),
-            Vec3::new(-half_base, -height * 0.5, 0.0),
-        );
-        painter.line(
-            Vec3::new(-half_base, -height * 0.5, 0.0),
-            Vec3::new(half_base, -height * 0.5, 0.0),
-        );
-        painter.line(
-            Vec3::new(half_base, -height * 0.5, 0.0),
-            Vec3::new(0.0, height * 0.5, 0.0),
-        );
+        gizmos.line(a, b, color);
+        gizmos.line(b, c, color);
+        gizmos.line(c, a, color);
 
         // Selection indicator: white ring around selected ships
         if is_selected.is_some() {
-            painter.set_color(Color::srgba(1.0, 1.0, 1.0, 0.8 * visibility));
-            painter.hollow = true;
-            painter.thickness = size * 0.1;
-            painter.circle(size * 0.8);
-            painter.hollow = false;
+            gizmos.circle(
+                Isometry3d::from_translation(pos),
+                size * 0.8,
+                Color::srgba(1.0, 1.0, 1.0, 0.8 * visibility),
+            );
         }
     }
 }
@@ -877,10 +865,15 @@ pub fn apply_attack_target(
 ) {
     for event in events.read() {
         match event {
-            TacticalCommand::AttackTarget { ships: ship_list, target } => {
+            TacticalCommand::AttackTarget {
+                ships: ship_list,
+                target,
+            } => {
                 for &ship in ship_list {
                     if ships.contains(ship) {
-                        commands.entity(ship).insert(AttackTarget { target: *target });
+                        commands
+                            .entity(ship)
+                            .insert(AttackTarget { target: *target });
                         // Add MissileState only if not present (preserve cooldown state)
                         commands.entity(ship).insert_if_new(MissileState::default());
                     }
@@ -1048,7 +1041,13 @@ pub fn update_missile_guidance(
     sim_time: Res<SimulationTime>,
     arena_query: Query<&Grid, With<TacticalArena>>,
     mut missiles: Query<
-        (Entity, &mut Missile, &mut LinearVelocity, &Transform, &CellCoord),
+        (
+            Entity,
+            &mut Missile,
+            &mut LinearVelocity,
+            &Transform,
+            &CellCoord,
+        ),
         Without<VisualShip>,
     >,
     targets: Query<(&Transform, &CellCoord), With<VisualShip>>,
@@ -1072,7 +1071,9 @@ pub fn update_missile_guidance(
         let Ok((target_transform, target_cell)) = targets.get(target) else {
             // Target is gone - clear target and mark for despawn in 1 hour
             missile.target = None;
-            commands.entity(entity).insert(DespawnAt(sim_time.sim_time + 3600.0));
+            commands
+                .entity(entity)
+                .insert(DespawnAt(sim_time.sim_time + 3600.0));
             continue;
         };
 
@@ -1113,7 +1114,12 @@ pub fn handle_missile_collisions(
     // Track entities to despawn (avoid double-despawn)
     let mut to_despawn: HashSet<Entity> = HashSet::new();
 
-    for CollisionStart { collider1, collider2, .. } in collision_events.read() {
+    for CollisionStart {
+        collider1,
+        collider2,
+        ..
+    } in collision_events.read()
+    {
         let entity1 = *collider1;
         let entity2 = *collider2;
 
@@ -1197,7 +1203,10 @@ pub fn sync_flagships(
 ) {
     if let Some(entity) = flagships.player {
         if !flagship_query.contains(entity) {
-            info!("Player flagship {:?} destroyed - clearing reference", entity);
+            info!(
+                "Player flagship {:?} destroyed - clearing reference",
+                entity
+            );
             flagships.player = None;
         }
     }
@@ -1354,10 +1363,7 @@ pub fn update_ship_movement(
 pub fn update_flagship_movement(
     time: Res<Time>,
     sim_time: Res<SimulationTime>,
-    mut flagships: Query<
-        (&AccelerationOrder, &mut LinearVelocity, &ShipStats),
-        With<Flagship>,
-    >,
+    mut flagships: Query<(&AccelerationOrder, &mut LinearVelocity, &ShipStats), With<Flagship>>,
 ) {
     if sim_time.paused {
         return;
@@ -1413,13 +1419,23 @@ pub fn update_escort_movement(
     }
 
     // Need both flagships to define the reference frame
-    let Some(player_flag_entity) = flagships.player else { return };
-    let Some(enemy_flag_entity) = flagships.enemy else { return };
+    let Some(player_flag_entity) = flagships.player else {
+        return;
+    };
+    let Some(enemy_flag_entity) = flagships.enemy else {
+        return;
+    };
 
-    let Ok((pf_cell, pf_tf, pf_vel)) = flagship_query.get(player_flag_entity) else { return };
-    let Ok((ef_cell, ef_tf, _)) = flagship_query.get(enemy_flag_entity) else { return };
+    let Ok((pf_cell, pf_tf, pf_vel)) = flagship_query.get(player_flag_entity) else {
+        return;
+    };
+    let Ok((ef_cell, ef_tf, _)) = flagship_query.get(enemy_flag_entity) else {
+        return;
+    };
 
-    let Ok(arena_grid) = arena_query.single() else { return };
+    let Ok(arena_grid) = arena_query.single() else {
+        return;
+    };
 
     // Get world positions of flagships
     let player_flag_pos = arena_grid.grid_position_double(pf_cell, pf_tf);
@@ -1457,10 +1473,10 @@ pub fn update_escort_movement(
 
         // PD gains and tolerance based on urgency
         let (kp, kd, pos_tolerance, vel_tolerance) = match rel_pos.urgency {
-            Urgency::Lazy => (0.01, 0.1, 5000.0, 50.0),      // 5km, 50m/s tolerance
-            Urgency::Normal => (0.05, 0.2, 2000.0, 20.0),   // 2km, 20m/s tolerance
+            Urgency::Lazy => (0.01, 0.1, 5000.0, 50.0), // 5km, 50m/s tolerance
+            Urgency::Normal => (0.05, 0.2, 2000.0, 20.0), // 2km, 20m/s tolerance
             Urgency::Aggressive => (0.1, 0.3, 500.0, 10.0), // 500m, 10m/s tolerance
-            Urgency::Emergency => (0.2, 0.4, 100.0, 5.0),   // 100m, 5m/s tolerance
+            Urgency::Emergency => (0.2, 0.4, 100.0, 5.0), // 100m, 5m/s tolerance
         };
 
         // Dead zone - don't thrust if within tolerance
@@ -1493,7 +1509,11 @@ pub fn apply_acceleration_commands(
 ) {
     for event in events.read() {
         match event {
-            TacticalCommand::SetFlagshipAcceleration { flagship, direction, magnitude } => {
+            TacticalCommand::SetFlagshipAcceleration {
+                flagship,
+                direction,
+                magnitude,
+            } => {
                 if flagships.contains(*flagship) {
                     commands.entity(*flagship).insert(AccelerationOrder {
                         direction: *direction,
@@ -1518,7 +1538,13 @@ pub fn apply_escort_position_commands(
     ships: Query<Entity, (With<VisualShip>, Without<Flagship>)>,
 ) {
     for event in events.read() {
-        if let TacticalCommand::SetEscortPosition { ship, angle, radius, urgency } = event {
+        if let TacticalCommand::SetEscortPosition {
+            ship,
+            angle,
+            radius,
+            urgency,
+        } = event
+        {
             if ships.contains(*ship) {
                 commands.entity(*ship).insert(RelativePosition {
                     angle: *angle,
@@ -1610,7 +1636,16 @@ pub fn sync_target_rings(
     mut materials: ResMut<Assets<StandardMaterial>>,
     combat: Res<CombatState>,
     arena_query: Query<(Entity, &Grid), With<TacticalArena>>,
-    attackers: Query<(Entity, &AttackTarget, &Transform, &CellCoord, Option<&Selected>), With<VisualShip>>,
+    attackers: Query<
+        (
+            Entity,
+            &AttackTarget,
+            &Transform,
+            &CellCoord,
+            Option<&Selected>,
+        ),
+        With<VisualShip>,
+    >,
     targets: Query<(Entity, &Transform, &CellCoord), With<VisualShip>>,
     existing_rings: Query<(Entity, &TargetRing, &ChildOf)>,
     cam_scale: Res<CameraScale>,
@@ -1674,7 +1709,8 @@ pub fn sync_target_rings(
     // Map: target_entity -> (min_distance, any_attacker_selected)
     let mut target_info: HashMap<Entity, (f64, bool)> = HashMap::new();
 
-    for (_attacker_entity, attack_target, attacker_transform, attacker_cell, selected) in &attackers {
+    for (_attacker_entity, attack_target, attacker_transform, attacker_cell, selected) in &attackers
+    {
         let target_entity = attack_target.target;
 
         // Get target position to compute distance
@@ -1726,8 +1762,10 @@ pub fn sync_target_rings(
             commands
                 .entity(ring_entity)
                 .insert(MeshMaterial3d(material))
-                .insert(Transform::from_translation(Vec3::new(0.0, 0.0, 0.05))
-                    .with_scale(Vec3::splat(ring_scale)));
+                .insert(
+                    Transform::from_translation(Vec3::new(0.0, 0.0, 0.05))
+                        .with_scale(Vec3::splat(ring_scale)),
+                );
         } else {
             // Target no longer being attacked - remove ring
             commands.entity(ring_entity).despawn();
@@ -1762,7 +1800,7 @@ pub fn render_targeting_lines(
     arena_query: Query<&Grid, With<TacticalArena>>,
     attackers: Query<(&AttackTarget, &Transform, &CellCoord), (With<VisualShip>, With<Selected>)>,
     targets: Query<(&Transform, &CellCoord), With<VisualShip>>,
-    mut painter: ShapePainter,
+    mut gizmos: Gizmos,
 ) {
     if !combat.active {
         return;
@@ -1788,11 +1826,10 @@ pub fn render_targeting_lines(
             Color::srgba(1.0, 0.6, 0.1, 0.5) // Orange, semi-transparent
         };
 
-        painter.set_color(color);
-        painter.thickness = 2.0;
-        painter.line(
+        gizmos.line(
             Vec3::new(attacker_pos.x as f32, attacker_pos.y as f32, 0.02),
             Vec3::new(target_pos.x as f32, target_pos.y as f32, 0.02),
+            color,
         );
     }
 }
@@ -1804,30 +1841,42 @@ pub fn render_threat_axis(
     flagships: Res<Flagships>,
     arena_query: Query<&Grid, With<TacticalArena>>,
     flagship_query: Query<(&CellCoord, &Transform), With<Flagship>>,
-    escorts: Query<(&RelativePosition, &CellCoord, &Transform), (With<VisualShip>, Without<Flagship>)>,
-    mut painter: ShapePainter,
+    escorts: Query<
+        (&RelativePosition, &CellCoord, &Transform),
+        (With<VisualShip>, Without<Flagship>),
+    >,
+    mut gizmos: Gizmos,
 ) {
     if !combat.active {
         return;
     }
 
-    let Some(player_flag_entity) = flagships.player else { return };
-    let Some(enemy_flag_entity) = flagships.enemy else { return };
+    let Some(player_flag_entity) = flagships.player else {
+        return;
+    };
+    let Some(enemy_flag_entity) = flagships.enemy else {
+        return;
+    };
 
-    let Ok((pf_cell, pf_tf)) = flagship_query.get(player_flag_entity) else { return };
-    let Ok((ef_cell, ef_tf)) = flagship_query.get(enemy_flag_entity) else { return };
+    let Ok((pf_cell, pf_tf)) = flagship_query.get(player_flag_entity) else {
+        return;
+    };
+    let Ok((ef_cell, ef_tf)) = flagship_query.get(enemy_flag_entity) else {
+        return;
+    };
 
-    let Ok(arena_grid) = arena_query.single() else { return };
+    let Ok(arena_grid) = arena_query.single() else {
+        return;
+    };
 
     let player_flag_pos = arena_grid.grid_position_double(pf_cell, pf_tf);
     let enemy_flag_pos = arena_grid.grid_position_double(ef_cell, ef_tf);
 
     // Draw threat axis line (faint orange)
-    painter.set_color(Color::srgba(1.0, 0.5, 0.0, 0.3));
-    painter.thickness = 3.0;
-    painter.line(
+    gizmos.line(
         Vec3::new(player_flag_pos.x as f32, player_flag_pos.y as f32, 0.01),
         Vec3::new(enemy_flag_pos.x as f32, enemy_flag_pos.y as f32, 0.01),
+        Color::srgba(1.0, 0.5, 0.0, 0.3),
     );
 
     // Compute axis vectors for escort position rendering
@@ -1856,29 +1905,26 @@ pub fn render_threat_axis(
 
         if pos_error > tolerance {
             // Draw ghost marker at assigned position
-            let ghost_color = Color::srgba(0.5, 1.0, 0.5, 0.4);
-            painter.set_color(ghost_color);
-            painter.thickness = 2.0;
-
             // Small X marker
             let size = 200.0; // 200m marker
             let gx = assigned_pos.x as f32;
             let gy = assigned_pos.y as f32;
-            painter.line(
+            gizmos.line(
                 Vec3::new(gx - size, gy - size, 0.02),
                 Vec3::new(gx + size, gy + size, 0.02),
+                Color::srgba(0.5, 1.0, 0.5, 0.4),
             );
-            painter.line(
+            gizmos.line(
                 Vec3::new(gx - size, gy + size, 0.02),
                 Vec3::new(gx + size, gy - size, 0.02),
+                Color::srgba(0.5, 1.0, 0.5, 0.4),
             );
 
             // Line from current position to assigned position
-            painter.set_color(Color::srgba(0.5, 1.0, 0.5, 0.2));
-            painter.thickness = 1.0;
-            painter.line(
+            gizmos.line(
                 Vec3::new(current_pos.x as f32, current_pos.y as f32, 0.02),
                 Vec3::new(gx, gy, 0.02),
+                Color::srgba(0.5, 1.0, 0.5, 0.2),
             );
         }
     }
@@ -2171,7 +2217,10 @@ mod tests {
             TacticalArena {
                 body: Entity::PLACEHOLDER,
             },
-            Grid::new(crate::spatial::GRID_CELL_SIZE, crate::spatial::GRID_SWITCH_THRESHOLD),
+            Grid::new(
+                crate::spatial::GRID_CELL_SIZE,
+                crate::spatial::GRID_SWITCH_THRESHOLD,
+            ),
         ));
 
         let fleet = app.world_mut().spawn_empty().id();
@@ -2230,7 +2279,11 @@ mod tests {
 
         let velocity = app.world().get::<LinearVelocity>(flagship).unwrap().0;
         // dv = a * dt * time_scale = 2.0 * 0.5 * 10 = 10.0 m/s
-        assert!((velocity.x - 10.0).abs() < 1e-6, "velocity.x={}", velocity.x);
+        assert!(
+            (velocity.x - 10.0).abs() < 1e-6,
+            "velocity.x={}",
+            velocity.x
+        );
     }
 
     #[test]
@@ -2310,7 +2363,11 @@ mod tests {
         app.update();
 
         let velocity = app.world().get::<LinearVelocity>(flagship).unwrap().0;
-        assert_eq!(velocity, DVec3::ZERO, "velocity should stay zero while paused");
+        assert_eq!(
+            velocity,
+            DVec3::ZERO,
+            "velocity should stay zero while paused"
+        );
     }
 
     #[test]
@@ -2331,8 +2388,15 @@ mod tests {
         app.update();
 
         let flagships = app.world().resource::<Flagships>();
-        assert_eq!(flagships.player, None, "dead player flagship should be cleared");
-        assert_eq!(flagships.enemy, Some(enemy_flag), "living enemy flagship should remain");
+        assert_eq!(
+            flagships.player, None,
+            "dead player flagship should be cleared"
+        );
+        assert_eq!(
+            flagships.enemy,
+            Some(enemy_flag),
+            "living enemy flagship should remain"
+        );
     }
 }
 

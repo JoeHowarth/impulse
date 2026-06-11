@@ -217,9 +217,9 @@ impl Plugin for TacticalPlugin {
         app.add_systems(
             Update,
             (
-                tactical::update_ship_movement,      // Legacy: go-to-destination
-                tactical::update_flagship_movement,  // New: flagship AccelerationOrder
-                tactical::update_escort_movement,    // New: escort RelativePosition (PD controller)
+                tactical::update_ship_movement,     // Legacy: go-to-destination
+                tactical::update_flagship_movement, // New: flagship AccelerationOrder
+                tactical::update_escort_movement,   // New: escort RelativePosition (PD controller)
             )
                 .in_set(AppSet::Simulation)
                 .run_if(in_state(AppState::Tactical)),

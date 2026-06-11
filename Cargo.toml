@@ -22,7 +22,6 @@ avian3d = { version = "0.4", default-features = false, features = [
     "parry-f64",
 ] }
 bevy_pancam = "0.19.0"
-bevy_vector_shapes = "0.11.0"
 big_space = { version = "0.11.0", features = ["bevy_camera"] }
 serde = "1.0.228"
 serde_json = "1.0.145"

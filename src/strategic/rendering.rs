@@ -5,9 +5,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bevy::gizmos::GizmoAsset;
+use bevy::math::primitives::Triangle3d;
 use bevy::math::{DVec3, Isometry3d};
 use bevy::prelude::*;
-use bevy_vector_shapes::prelude::*;
 use big_space::prelude::*;
 
 use crate::camera::{BigSpaceRoot, CameraScale};
@@ -25,7 +25,7 @@ use super::transfer_vis::{self, HoveredTransferArc, TransferArcType};
 // Rendering Components
 // ============================================================================
 
-/// Marker for objective ring entities (retained shape showing enemy presence at a body).
+/// Marker for objective ring entities (retained marker showing enemy presence at a body).
 /// These are spawned as children of Body entities.
 #[derive(Component)]
 pub struct ObjectiveRing;
@@ -76,6 +76,23 @@ const QUEUE_MARKER_COLOR: Color = Color::srgba(0.3, 0.8, 0.8, 0.7);
 
 /// Size of plan marker in pixels (scaled by cam_scale)
 const PLAN_MARKER_SIZE_PIXELS: f32 = 8.0;
+
+fn create_fleet_triangle_mesh() -> Mesh {
+    Mesh::from(Triangle3d::new(
+        Vec3::new(0.0, 0.5, 0.0),
+        Vec3::new(-0.5, -0.5, 0.0),
+        Vec3::new(0.5, -0.5, 0.0),
+    ))
+}
+
+#[derive(Default)]
+pub(crate) struct FleetRenderCache {
+    mesh: Option<Handle<Mesh>>,
+    mat_player_selected: Option<Handle<StandardMaterial>>,
+    mat_player_unselected: Option<Handle<StandardMaterial>>,
+    mat_enemy_selected: Option<Handle<StandardMaterial>>,
+    mat_enemy_unselected: Option<Handle<StandardMaterial>>,
+}
 
 // ============================================================================
 // Fleet Name Generation
@@ -232,6 +249,8 @@ pub fn update_fleet_positions(
 /// - InTransit fleets: shape has CellCoord + Transform from orbital position
 pub fn sync_fleet_shapes(
     mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     combat: Res<CombatState>,
     big_space_root: Res<BigSpaceRoot>,
     grid_query: Query<&Grid, With<BigSpace>>,
@@ -241,6 +260,7 @@ pub fn sync_fleet_shapes(
     mut shape_transforms: Query<&mut Transform, With<FleetShape>>,
     sim_time: Res<SimulationTime>,
     cam_scale: Res<CameraScale>,
+    mut fleet_assets: Local<FleetRenderCache>,
 ) {
     use bevy::platform::collections::{HashMap, HashSet};
 
@@ -256,6 +276,58 @@ pub fn sync_fleet_shapes(
     let cam_scale = cam_scale.0;
     let fleet_size = cam_scale * FLEET_SIZE_PIXELS;
     let computed_positions = compute_fleet_positions(&fleets, &bodies, cam_scale);
+    let fleet_mesh = fleet_assets
+        .mesh
+        .get_or_insert_with(|| meshes.add(create_fleet_triangle_mesh()))
+        .clone();
+    let mat_player_selected = fleet_assets
+        .mat_player_selected
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: FLEET_PLAYER_SELECTED,
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+    let mat_player_unselected = fleet_assets
+        .mat_player_unselected
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: FLEET_PLAYER_UNSELECTED,
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+    let mat_enemy_selected = fleet_assets
+        .mat_enemy_selected
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: FLEET_ENEMY_SELECTED,
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+    let mat_enemy_unselected = fleet_assets
+        .mat_enemy_unselected
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: FLEET_ENEMY_UNSELECTED,
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
 
     let at_body_local_offset = |fleet_entity: Entity, body: Entity| -> Vec3 {
         let Some((fleet_world_pos, _)) = computed_positions.get(&fleet_entity) else {
@@ -287,11 +359,11 @@ pub fn sync_fleet_shapes(
 
         let is_selected = is_selected.is_some();
         let size_mult = if is_selected { 1.3 } else { 1.0 };
-        let color = match (faction, is_selected) {
-            (Faction::Player, true) => FLEET_PLAYER_SELECTED,
-            (Faction::Player, false) => FLEET_PLAYER_UNSELECTED,
-            (Faction::Enemy, true) => FLEET_ENEMY_SELECTED,
-            (Faction::Enemy, false) => FLEET_ENEMY_UNSELECTED,
+        let material = match (*faction, is_selected) {
+            (Faction::Player, true) => mat_player_selected.clone(),
+            (Faction::Player, false) => mat_player_unselected.clone(),
+            (Faction::Enemy, true) => mat_enemy_selected.clone(),
+            (Faction::Enemy, false) => mat_enemy_unselected.clone(),
         };
 
         // Compute velocity direction for triangle orientation
@@ -326,13 +398,6 @@ pub fn sync_fleet_shapes(
             Quat::IDENTITY
         };
 
-        // Build triangle vertices (scaled, Vec2 for bevy_vector_shapes)
-        let half_base = fleet_size * 0.5 * size_mult;
-        let height = fleet_size * size_mult;
-        let v_top = Vec2::new(0.0, height * 0.5);
-        let v_left = Vec2::new(-half_base, -height * 0.5);
-        let v_right = Vec2::new(half_base, -height * 0.5);
-
         let is_in_transit = matches!(location, FleetLocation::InTransit { .. });
 
         if let Some(&shape_entity) = fleets_with_shapes.get(&fleet_entity) {
@@ -353,6 +418,7 @@ pub fn sync_fleet_shapes(
                                 // Shape is child of body - just update local offset and rotation
                                 transform.translation = at_body_local_offset(fleet_entity, *body);
                                 transform.rotation = rotation;
+                                transform.scale = Vec3::splat(fleet_size * size_mult);
                             }
                             FleetLocation::InTransit {
                                 solution,
@@ -378,27 +444,15 @@ pub fn sync_fleet_shapes(
                                     }
                                 }
                                 transform.rotation = rotation;
+                                transform.scale = Vec3::splat(fleet_size * size_mult);
                             }
                         }
                     }
 
-                    // Update triangle component and color
-                    commands.entity(shape_entity).insert((
-                        TriangleComponent::new(
-                            &ShapeConfig {
-                                color,
-                                hollow: false,
-                                ..ShapeConfig::default_3d()
-                            },
-                            v_top,
-                            v_left,
-                            v_right,
-                        ),
-                        ShapeFill {
-                            color,
-                            ty: FillType::Fill,
-                        },
-                    ));
+                    // Update color
+                    commands
+                        .entity(shape_entity)
+                        .insert(MeshMaterial3d(material.clone()));
                     continue; // Shape updated, move to next fleet
                 }
             }
@@ -409,19 +463,14 @@ pub fn sync_fleet_shapes(
             match location {
                 FleetLocation::AtBody(body) => {
                     // Spawn as child of body entity
-                    let local_transform = Transform::from_translation(
-                        at_body_local_offset(fleet_entity, *body),
-                    )
-                    .with_rotation(rotation);
-                    let config = ShapeConfig {
-                        color,
-                        thickness: cam_scale * 1.0,
-                        hollow: false,
-                        transform: local_transform,
-                        ..ShapeConfig::default_3d()
-                    };
+                    let local_transform =
+                        Transform::from_translation(at_body_local_offset(fleet_entity, *body))
+                            .with_rotation(rotation)
+                            .with_scale(Vec3::splat(fleet_size * size_mult));
                     commands.spawn((
-                        ShapeBundle::triangle(&config, v_top, v_left, v_right).insert_3d(),
+                        Mesh3d(fleet_mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        local_transform,
                         FleetShape {
                             fleet_entity,
                             is_transit_shape: false,
@@ -453,18 +502,14 @@ pub fn sync_fleet_shapes(
                     };
 
                     let (cell, local) = grid.translation_to_grid(helio_pos);
-                    let local_transform =
-                        Transform::from_translation(local + Vec3::Z * 0.2).with_rotation(rotation);
-                    let config = ShapeConfig {
-                        color,
-                        thickness: cam_scale * 1.0,
-                        hollow: false,
-                        transform: local_transform,
-                        ..ShapeConfig::default_3d()
-                    };
+                    let local_transform = Transform::from_translation(local + Vec3::Z * 0.2)
+                        .with_rotation(rotation)
+                        .with_scale(Vec3::splat(fleet_size * size_mult));
 
                     commands.spawn((
-                        ShapeBundle::triangle(&config, v_top, v_left, v_right).insert_3d(),
+                        Mesh3d(fleet_mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        local_transform,
                         FleetShape {
                             fleet_entity,
                             is_transit_shape: true,
@@ -490,14 +535,16 @@ pub fn sync_fleet_shapes(
 /// Ring size updates each frame based on camera scale.
 pub fn sync_objective_rings(
     mut commands: Commands,
+    mut gizmo_assets: ResMut<Assets<GizmoAsset>>,
     combat: Res<CombatState>,
     fleets: Query<(Entity, &FleetLocation, &Faction)>,
     fleet_children: Query<&Children>,
     ships: Query<&LogicalShip>,
     bodies: Query<(Entity, &ComputedBody), With<Body>>,
     existing_rings: Query<(Entity, &ChildOf), With<ObjectiveRing>>,
-    mut ring_shapes: Query<(&mut DiscComponent, &mut ShapeFill), With<ObjectiveRing>>,
+    mut ring_transforms: Query<&mut Transform, With<ObjectiveRing>>,
     cam_scale: Res<CameraScale>,
+    mut ring_asset: Local<Option<Handle<GizmoAsset>>>,
 ) {
     use bevy::platform::collections::HashSet;
 
@@ -508,6 +555,13 @@ pub fn sync_objective_rings(
     }
 
     let cam_scale = cam_scale.0;
+    let ring_asset = ring_asset
+        .get_or_insert_with(|| {
+            let mut gizmo = GizmoAsset::new();
+            gizmo.circle(Isometry3d::IDENTITY, 1.0, ENEMY_MARKER_COLOR);
+            gizmo_assets.add(gizmo)
+        })
+        .clone();
 
     // Collect bodies with enemy fleets
     let mut enemy_bodies: HashSet<Entity> = HashSet::new();
@@ -530,11 +584,11 @@ pub fn sync_objective_rings(
         if enemy_bodies.contains(&parent) {
             // Body still has enemies - keep ring, update size
             bodies_with_rings.insert(parent);
-            if let Ok((mut disc, mut fill)) = ring_shapes.get_mut(ring_entity) {
-                // Update radius based on body's display size + offset
+            if let Ok(mut transform) = ring_transforms.get_mut(ring_entity) {
                 if let Ok((_, computed)) = bodies.get(parent) {
-                    disc.radius = computed.display_size + cam_scale * 5.0;
-                    fill.ty = FillType::Stroke(cam_scale * 1.5, ThicknessType::World);
+                    let ring_radius = computed.display_size + cam_scale * 5.0;
+                    *transform =
+                        Transform::from_xyz(0.0, 0.0, 0.1).with_scale(Vec3::splat(ring_radius));
                 }
             }
         } else {
@@ -553,16 +607,18 @@ pub fn sync_objective_rings(
         };
 
         let ring_radius = computed.display_size + cam_scale * 5.0;
-        let config = ShapeConfig {
-            color: ENEMY_MARKER_COLOR,
-            thickness: cam_scale * 1.5,
-            hollow: true,
-            transform: Transform::from_xyz(0.0, 0.0, 0.1), // Slight Z offset
-            ..ShapeConfig::default_3d()
-        };
 
         commands.spawn((
-            ShapeBundle::circle(&config, ring_radius).insert_3d(),
+            Gizmo {
+                handle: ring_asset.clone(),
+                depth_bias: 0.1,
+                line_config: GizmoLineConfig {
+                    width: 1.5,
+                    ..default()
+                },
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 0.1).with_scale(Vec3::splat(ring_radius)),
             ObjectiveRing,
             ChildOf(*body_entity),
         ));

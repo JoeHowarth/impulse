@@ -5,7 +5,6 @@
 
 use astrora_core::core::Vector3;
 use bevy::{asset::Assets, gizmos::GizmoAsset, prelude::*};
-use bevy_vector_shapes::prelude::*;
 
 use crate::{
     common::SimulationTime,
@@ -127,18 +126,16 @@ pub fn spawn_transfer_visualization(
 
     match arc_type {
         TransferArcType::Committed => {
-            let (dep_arrow, departure_circle_bundle) =
-                create_burn_arrow(&transfer, true, solution.departure_dv, cam_scale);
-            let (arr_arrow, arrival_circle_bundle) =
-                create_burn_arrow(&transfer, false, solution.arrival_dv, cam_scale);
+            let dep = create_burn_arrow(&transfer, true, solution.departure_dv, cam_scale);
+            let arr = create_burn_arrow(&transfer, false, solution.arrival_dv, cam_scale);
 
             commands
                 .spawn((core_bundle, transfer))
                 .with_children(|builder| {
-                    builder.spawn(departure_circle_bundle);
-                    builder.spawn(gizmo(dep_arrow));
-                    builder.spawn(arrival_circle_bundle);
-                    builder.spawn(gizmo(arr_arrow));
+                    builder.spawn((dep.marker_transform, gizmo(dep.marker_asset)));
+                    builder.spawn(gizmo(dep.arrow_asset));
+                    builder.spawn((arr.marker_transform, gizmo(arr.marker_asset)));
+                    builder.spawn(gizmo(arr.arrow_asset));
                 })
                 .id()
         }
@@ -208,13 +205,20 @@ fn create_transfer_arc(solution: &TransferSolution, mu: f64, color: Color) -> Gi
     gizmo
 }
 
-pub fn create_burn_arrow(
+struct BurnArrowVisual {
+    arrow_asset: GizmoAsset,
+    marker_asset: GizmoAsset,
+    marker_transform: Transform,
+}
+
+fn create_burn_arrow(
     transfer: &Transfer,
     is_departure: bool,
     delta_v: Vector3,
     cam_scale: f32,
-) -> (GizmoAsset, ShapeBundle<DiscComponent>) {
-    let mut gizmo = GizmoAsset::new();
+) -> BurnArrowVisual {
+    let mut arrow = GizmoAsset::new();
+    let mut marker = GizmoAsset::new();
     let Transfer { solution, .. } = transfer;
 
     // Calculate position for this marker (heliocentric + sun offset for floating origin)
@@ -247,7 +251,7 @@ pub fn create_burn_arrow(
     // painter.thickness = cam_scale * 0.5;
 
     // Draw the arrow
-    gizmo.line(position, position + dv_dir * arrow_len, color);
+    arrow.line(position, position + dv_dir * arrow_len, color);
 
     // Draw arrowhead (small lines at angle)
     let arrow_end = position + dv_dir * arrow_len;
@@ -262,15 +266,27 @@ pub fn create_burn_arrow(
     let barb_dir1 = (-dv_dir + perp * 0.5).normalize();
     let barb_dir2 = (-dv_dir - perp * 0.5).normalize();
 
-    gizmo.line(arrow_end, arrow_end + barb_dir1 * head_size, color);
-    gizmo.line(arrow_end, arrow_end + barb_dir2 * head_size, color);
+    arrow.line(arrow_end, arrow_end + barb_dir1 * head_size, color);
+    arrow.line(arrow_end, arrow_end + barb_dir2 * head_size, color);
 
-    let circle_bundle = bevy_vector_shapes::prelude::ShapeBundle::circle(
-        &ShapeConfig::default_3d(),
-        cam_scale * 3.0,
+    // Unit marker circle at origin, positioned/scaled by Transform on spawn.
+    marker.circle(
+        Isometry3d::IDENTITY,
+        1.0,
+        Color::srgba(
+            color.to_srgba().red,
+            color.to_srgba().green,
+            color.to_srgba().blue,
+            0.8,
+        ),
     );
 
-    (gizmo, circle_bundle)
+    BurnArrowVisual {
+        arrow_asset: arrow,
+        marker_asset: marker,
+        marker_transform: Transform::from_translation(position)
+            .with_scale(Vec3::splat(cam_scale * 3.0)),
+    }
 }
 
 /// Checks if any transfers have been completed (arrival time passed) and despawns them.

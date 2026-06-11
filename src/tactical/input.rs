@@ -155,7 +155,13 @@ pub fn handle_tactical_input(
     flagships_res: Res<Flagships>,
     mut box_sel: ResMut<BoxSelection>,
     mut right_drag: ResMut<RightClickDrag>,
-    visual_ships: Query<(Entity, &GlobalTransform, &VisualShip, &CellCoord, &Transform)>,
+    visual_ships: Query<(
+        Entity,
+        &GlobalTransform,
+        &VisualShip,
+        &CellCoord,
+        &Transform,
+    )>,
     selected_ships: Query<Entity, (With<VisualShip>, With<Selected>)>,
     flagship_query: Query<&Flagship>,
     ship_stats: Query<&super::ShipStats>,
@@ -183,9 +189,7 @@ pub fn handle_tactical_input(
     };
 
     // Check if UI is blocking input (only at action start, not during drag)
-    let ui_blocking = ui_interaction
-        .iter()
-        .any(|i| *i != Interaction::None);
+    let ui_blocking = ui_interaction.iter().any(|i| *i != Interaction::None);
 
     // Modifier keys
     let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
@@ -335,17 +339,24 @@ pub fn handle_tactical_input(
                 if drag_dist > 5.0 {
                     // Get ship's world position as drag origin
                     if let Ok((_, ship_gt, _, _, _)) = visual_ships.get(ship) {
-                        let ship_screen = camera.world_to_viewport(camera_transform, ship_gt.translation());
+                        let ship_screen =
+                            camera.world_to_viewport(camera_transform, ship_gt.translation());
 
                         if let Ok(ship_screen_pos) = ship_screen {
                             // Direction from ship to cursor (in screen space, then normalize)
                             let screen_dir = (cursor_pos - ship_screen_pos).normalize_or_zero();
                             // Convert screen direction to world direction (flip Y because screen Y is down)
-                            let world_dir = DVec3::new(screen_dir.x as f64, -screen_dir.y as f64, 0.0).normalize();
+                            let world_dir =
+                                DVec3::new(screen_dir.x as f64, -screen_dir.y as f64, 0.0)
+                                    .normalize();
 
                             // Magnitude: drag distance / scale, clamped to max acceleration
-                            let max_accel = ship_stats.get(ship).map(|s| s.max_acceleration).unwrap_or(10.0);
-                            let magnitude = ((drag_dist / FLAGSHIP_DRAG_SCALE) as f64 * max_accel).min(max_accel);
+                            let max_accel = ship_stats
+                                .get(ship)
+                                .map(|s| s.max_acceleration)
+                                .unwrap_or(10.0);
+                            let magnitude = ((drag_dist / FLAGSHIP_DRAG_SCALE) as f64 * max_accel)
+                                .min(max_accel);
 
                             cmd_writer.write(TacticalCommand::SetFlagshipAcceleration {
                                 flagship: ship,
@@ -363,7 +374,9 @@ pub fn handle_tactical_input(
                 // Get player flagship position
                 let Some(player_flag_entity) = flagships_res.player else {
                     // No flagship, fall back to legacy move command
-                    if let Some(dest) = screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform) {
+                    if let Some(dest) =
+                        screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform)
+                    {
                         cmd_writer.write(TacticalCommand::MoveShips {
                             ships: vec![ship],
                             destination: dest,
@@ -377,7 +390,9 @@ pub fn handle_tactical_input(
 
                 let Some(enemy_flag_entity) = flagships_res.enemy else {
                     // No enemy flagship, fall back to legacy
-                    if let Some(dest) = screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform) {
+                    if let Some(dest) =
+                        screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform)
+                    {
                         cmd_writer.write(TacticalCommand::MoveShips {
                             ships: vec![ship],
                             destination: dest,
@@ -412,7 +427,9 @@ pub fn handle_tactical_input(
                 let axis_perp = DVec3::new(-axis.y, axis.x, 0.0);
 
                 // Get drag destination in arena-local coordinates
-                if let Some(drag_pos) = screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform) {
+                if let Some(drag_pos) =
+                    screen_to_arena_local(cursor_pos, camera, camera_transform, arena_transform)
+                {
                     // Offset from player flagship
                     let offset = drag_pos - player_flag_pos;
                     let radius = offset.length();

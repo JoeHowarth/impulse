@@ -33,7 +33,6 @@ pub enum TacticalCommand {
     RequestExit { reason: ExitReason },
 
     // === New relational positioning commands ===
-
     /// Set flagship acceleration vector (direct thrust control).
     /// Flagship maintains this acceleration until changed or cleared.
     SetFlagshipAcceleration {

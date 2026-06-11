@@ -183,12 +183,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "any_vec"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d38a7a952d7eda94a2a9fa86603be7da3ecb2b5cc0b8341b8131edbf6e32201"
-
-[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1549,21 +1543,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_vector_shapes"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ed87d4dc5767212868e028f90ed6bbcb8a1fa83a0f723fa436a98e37f95c4cd"
-dependencies = [
- "any_vec",
- "bevy",
- "bitfield",
- "bitflags 2.10.0",
- "nonmax",
- "smallvec",
- "wgpu",
-]
-
-[[package]]
 name = "bevy_window"
 version = "0.17.3"
 source = "git+https://github.com/JoeHowarth/bevy.git?branch=main#e9788acb8071bf424c35762719d28e3228eec394"
@@ -1678,26 +1657,6 @@ name = "bit-vec"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
-
-[[package]]
-name = "bitfield"
-version = "0.19.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21ba6517c6b0f2bf08be60e187ab64b038438f22dd755614d8fe4d4098c46419"
-dependencies = [
- "bitfield-macros",
-]
-
-[[package]]
-name = "bitfield-macros"
-version = "0.19.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f48d6ace212fdf1b45fd6b566bb40808415344642b76c3224c07c8df9da81e97"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "bitflags"
@@ -2995,7 +2954,6 @@ dependencies = [
  "avian3d",
  "bevy",
  "bevy_pancam",
- "bevy_vector_shapes",
  "big_space",
  "bincode",
  "log",

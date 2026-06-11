@@ -12,7 +12,6 @@ use bevy::{
     transform::TransformPlugin,
 };
 use bevy_pancam::PanCamPlugin;
-use bevy_vector_shapes::ShapePlugin;
 use big_space::prelude::*;
 
 mod app_sets;
@@ -60,7 +59,6 @@ fn main() {
         .add_plugins(DefaultPlugins.build().disable::<TransformPlugin>())
         .add_plugins(BigSpaceDefaultPlugins)
         .add_plugins(PanCamPlugin)
-        .add_plugins(ShapePlugin::default())
         .add_plugins(PhysicsSyncPlugin)
         .add_plugins((
             // Performance diagnostics - logs to console every X seconds
@@ -185,16 +183,6 @@ fn setup(
     for body in bodies.values() {
         let body_entity = body_entities[&body.name];
         strategic::ui::spawn_body_label(&mut commands, &body.name, body_entity);
-        // Body -> Body shape
-        // let mut config = shape_prelude::ShapeConfig::default_3d();
-        // config.color = body.color.clone();
-
-        // let mut shape_bundle = shape_prelude::ShapeBundle::circle(&config, 1E10 as f32);
-        // shape_bundle.visibility = Visibility::Visible;
-        // commands
-        //     .entity(dbg!(body_entity))
-        //     .with_child((BodyShape, shape_bundle, NoFrustumCulling));
-
         // Create orbit gizmo if body has a parent
         // Gizmos stay outside BigSpace - their Transform is set from parent's GlobalTransform
         let Some(parent_name) = &body.parent_name else {
